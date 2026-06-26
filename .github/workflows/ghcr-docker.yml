@@ -1,0 +1,129 @@
+name: build-and-push ghcr-dockerhub
+
+# 仅支持手动触发，必须输入镜像版本标签
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '镜像版本标签（例如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+
+permissions:
+  contents: read
+  packages: write   # 允许推送至 GHCR
+
+env:
+  GHCR_REGISTRY: ghcr.io
+  DOCKERHUB_REGISTRY: docker.io
+  # 以下变量已修复，不再引用其他 env
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha7: ${{ steps.meta.outputs.sha7 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Derive version and commit
+        id: meta
+        run: |
+          echo "version=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          echo "sha7=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+  build:
+    needs: meta
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Platform slug
+        id: slug
+        run: echo "slug=$(echo '${{ matrix.platform }}' | tr '/' '-')" >> $GITHUB_OUTPUT
+
+      - name: Build and push (single arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfilefix
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}-${{ steps.slug.outputs.slug }}
+            ${{ env.GHCR_IMAGE }}:latest-${{ steps.slug.outputs.slug }}
+            ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}-${{ steps.slug.outputs.slug }}
+            ${{ env.DOCKERHUB_IMAGE }}:latest-${{ steps.slug.outputs.slug }}
+          build-args: |
+            VERSION=${{ needs.meta.outputs.version }}
+            COMMIT=${{ needs.meta.outputs.sha7 }}
+          cache-from: type=gha,scope=${{ steps.slug.outputs.slug }}
+          cache-to: type=gha,scope=${{ steps.slug.outputs.slug }},mode=max
+
+  merge:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }} \
+            -t ${{ env.GHCR_IMAGE }}:latest \
+            ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}-linux-amd64 \
+            ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}-linux-arm64
+
+          docker buildx imagetools create \
+            -t ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }} \
+            -t ${{ env.DOCKERHUB_IMAGE }}:latest \
+            ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}-linux-amd64 \
+            ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}-linux-arm64
+
+      - name: Generate summary
+        run: |
+          echo "### Docker Images Built and Pushed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**GHCR:** \`${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}\` and \`${{ env.GHCR_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Docker Hub:** \`${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}\` and \`${{ env.DOCKERHUB_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** linux/amd64, linux/arm64" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Commands:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
