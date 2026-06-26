@@ -113,6 +113,18 @@ jobs:
             ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}-linux-amd64 \
             ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}-linux-arm64
 
+      # ---------- 新增：同步项目摘要到 Docker Hub 仓库描述 ----------
+      - name: Update Docker Hub repository description
+        uses: peter-evans/dockerhub-description@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ env.DOCKERHUB_IMAGE }}
+          readme-filepath: ./README.md   # 若 README 不在根目录或名称不同请调整
+          # 可选：如果希望将某些 OCI 标签作为描述的一部分，可自定义 short-description
+          # short-description: ${{ steps.meta-ghcr.outputs.labels['org.opencontainers.image.description'] }}
+      # -------------------------------------------------------------
+
       - name: Generate summary
         run: |
           echo "### Docker Images Built and Pushed Successfully" >> $GITHUB_STEP_SUMMARY
