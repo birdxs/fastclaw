@@ -117,11 +117,11 @@ jobs:
 
       # ---------- 同步 README 到 Docker Hub 仓库描述 ----------
       - name: Update Docker Hub repository description
-        uses: peter-evans/dockerhub-description@v3
+        uses: peter-evans/dockerhub-description@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.DOCKERHUB_IMAGE }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
           readme-filepath: ./README.md
       # -----------------------------------------------
 
