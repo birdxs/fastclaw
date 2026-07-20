@@ -233,9 +233,14 @@ func modAgentIntro(p *promptCtx) string {
 	if buildinfo.IsHostedDeploy() {
 		fastclawLine = "FastClaw: hosted deployment. The chatter does NOT operate this runtime — if they ask about the version, upgrades, or installing/changing skills at the platform level, tell them those are administrator-controlled and offer to help with what's actually in your reach (config, skills you can author, files in the workspace)."
 	} else {
-		fastclawLine = fmt.Sprintf("FastClaw: %s (commit %s, built %s). Self-hosted install — the chatter is the operator. If they ask about upgrading, tell them: run %sfastclaw upgrade%s in a terminal (and %sfastclaw version%s to verify). Don't try to run those yourself unless the chatter explicitly asks you to and you have host shell access (no sandbox).",
-			buildinfo.Version, buildinfo.Commit, buildinfo.Date,
-			"`", "`", "`", "`")
+		fastclawLine = fmt.Sprintf("FastClaw: %s (commit %s, built %s). Self-hosted install — the chatter is the operator.\n"+
+			"Runtime configuration (LLM providers, IM channels, tool providers like web_search, agent settings, sandbox, cron jobs) lives in FastClaw's DATABASE, not in YAML/JSON config files — don't go hunting for config files, and NEVER edit ~/.fastclaw/fastclaw.db directly. "+
+			"The management interface is the `fastclaw` CLI: `fastclaw provider` (LLM credentials), `fastclaw tools provider-set` / `category-set` (web_search & friends), `fastclaw channels`, `fastclaw agents config`, `fastclaw admin`, `fastclaw cron`, `fastclaw skill` — run any subcommand with --help to see flags. "+
+			"CLI writes persist to the database and hot-reload the running gateway, so no restart is needed. "+
+			"When the operator asks you to change system config and you have host shell access, use the CLI yourself; without host shell access (enforced sandbox), give them the exact command to run instead. "+
+			"Upgrades work the same way: `fastclaw upgrade` in a terminal (`fastclaw version` to verify), only run it yourself when explicitly asked and host shell access is available. "+
+			"Host access follows the CHATTER, not the agent: only the operator (agent owner or a chatter on the agent's admins list) gets the host shell and host file access. For any other chatter your exec calls run in the sandbox (or are refused when none is configured) and file tools are confined to the workspace — if a guest asks for host-side or platform-management work (creating agents, changing config), explain it's operator-only instead of retrying.",
+			buildinfo.Version, buildinfo.Commit, buildinfo.Date)
 	}
 
 	return fmt.Sprintf(`You run on the FastClaw runtime. Your identity (name, role, personality)
@@ -474,9 +479,15 @@ spirit of the refusal politely, do not pass the bracketed message through.`
 }
 
 // modSandbox emits sandbox/code-execution instructions. Only relevant
-// when the agent has a sandbox attached.
+// when the agent has a sandbox attached. Two flavors: enforced mode
+// (sandboxEnabled — the sandbox IS the execution environment, full
+// filesystem-layout briefing) and optional mode (sandboxOptional —
+// self-hosted, host is the default, sandbox reachable per call).
 func modSandbox(p *promptCtx) string {
 	if !p.cb.sandboxEnabled {
+		if p.cb.sandboxOptional {
+			return modSandboxOptional(p)
+		}
 		return ""
 	}
 	prompt := `# Code Execution Environment
@@ -573,6 +584,45 @@ Then in your final reply, write: ![](/workspace/output.png)`
 		prompt += "\n- The sandbox is a Docker container."
 	}
 	return prompt
+}
+
+// modSandboxOptional briefs the model for self-hosted installs where a
+// sandbox pool is attached but the HOST remains the default execution
+// environment. Key job: stop the model from assuming the sandbox rules
+// (container paths, "host paths do not exist") apply to plain exec.
+func modSandboxOptional(p *promptCtx) string {
+	backend := "Docker container"
+	if p.cb.sandboxBackend == "e2b" {
+		backend = "cloud-hosted E2B environment"
+	} else if p.cb.sandboxBackend == "boxlite" {
+		backend = "Boxlite container"
+	}
+	return `# Execution Environment (host by default, sandbox on request)
+You run on the operator's HOST machine: exec and the file tools act
+directly on the host, in the Working Directory above. Installing
+software the user asks for, reading their files, and running their CLIs
+all happen right there — this is a self-hosted install and the chatter
+is the operator, so host access is expected. Execute code immediately
+with exec when asked to compute or process something; don't just show it.
+
+An isolated sandbox (` + backend + `) is ALSO available as an opt-in
+tool: pass sandbox:true on an exec call to run that ONE command inside
+it. Inside the sandbox the filesystem is its own — working dir is
+/workspace, skills are mounted read-only at /skills/<name>, and host
+paths (/Users/..., /home/...) do not exist. Use sandbox:true when you
+want isolation for untrusted code, or the sandbox image's pre-installed
+toolchain; use plain exec for everything tied to the user's actual
+machine. The sandbox's /workspace maps to your session workspace (bind
+mount or post-exec sync), so files a sandboxed command writes there do
+reach the user — but never reference host absolute paths inside a
+sandbox:true command, and never reference /workspace or /skills paths
+in a plain host exec.
+
+Host access is operator-only: when the current chatter is not the agent
+operator/admin, every exec call runs in the sandbox automatically (or is
+refused when the sandbox can't start) and file tools are confined to the
+workspace. Don't fight the restriction — tell the chatter the operation
+needs the operator.`
 }
 
 // modTaskDelegation emits the task-delegation and progress-tracking
