@@ -1,15 +1,19 @@
 # Cross-pod E2B sandbox lease registry
 
-> **Status**: implemented, **unreleased** (feature branch
-> `feat/e2b-sandbox-leases`)
+> **Status**: implemented, **unreleased** (built on the
+> `feat/e2b-sandbox-leases` line, now part of `fastagent`)
 > **Storage**: Postgres (`sandbox_leases`) in production; sqlite in tests
-> **Last updated**: 2026-09-13
+> **Last updated**: 2026-09-14
 > **Decision owner**: mengmengmengqiang@gmail.com
 > **Reviewed by**: mengmengmengqiang@gmail.com (2026-09-09)
-> **Commits**: see `feat/e2b-sandbox-leases` git log; latest doc revision
-> `85b17fa`, plus the rebuild-publish change (2026-09-13) documented below
-> **Open follow-ups**: none — every clause of the invariant below has a
-> guarding mechanism and a test. Rotation runbook:
+> **Commits**: the `internal/sandbox` history on `fastagent`. Two rounds are
+> documented below: rebuild-publish (2026-09-13) and the provider lifecycle
+> redesign (2026-09-14, stages 1–4 shipped; stage 5 implemented and withdrawn)
+> **Open follow-ups**: one — measure how fast paused instances accumulate in
+> production and decide from that number whether stage 5 comes back (see
+> "Orphan reaping: shipped, withdrawn, and the trigger to bring it back").
+> Every clause of the invariant below has a guarding mechanism and a test.
+> Rotation runbook:
 > [sandbox-secret-rotation.md](./sandbox-secret-rotation.md).
 
 ## Problem
@@ -246,12 +250,79 @@ buys:
 | 2 | Idle eviction **pauses** instead of releasing (`ScopeSleeper`), behind the in-flight guard; a sleep that fails for any reason but "already gone" leaves the sandbox running | **done** |
 | 3 | `set-timeout` before an operation long enough to outlive the instance TTL, so an auto-pause never lands mid-exec | **done** — `ScopeExtender` → `ExtendTimeout`, called for budgets ≥ 60s with `budget + 2 min` |
 | 4 | `state` / `paused_at` on the row; adopting a paused instance resumes it and refreshes the token when needed | **done** — columns + idempotent retrofit (`migrateSandboxLeasesAddState`), the idle sweep writes `paused`, adoption reads it and `connect`s (fresh token included), and a 401 anywhere still reconnects. The marker is advisory: it is never the basis of a destroy decision, because traffic can wake a paused sandbox without writing to the row |
-| 5 | Reconcile the table against provider lifecycle events (webhook or polled), including killing paused instances no row names | pending |
+| 5 | Reconcile the table against provider lifecycle events (webhook or polled), including killing paused instances no row names | **withdrawn by decision (2026-09-14)** — an implementation existed and was removed unshipped; the requirement is being settled by measurement instead, see below |
 
 Facts that size the design: paused sandboxes are unbilled, outside the
 concurrency limit and kept indefinitely; continuous runtime is capped per plan
 (Hobby 1h, Pro 24h) and resets on pause+resume; concurrent *running* sandboxes
 are 20 (Hobby) / 100 (Pro, add-on to 1,100) — [billing](https://docs.e2b.dev/billing.md).
+
+### Orphan reaping: shipped, withdrawn, and the trigger to bring it back
+
+Stages 1–4 leave one hole open on purpose. Pausing instead of destroying is what
+makes the next call a resume, but nothing ends an instance any more except us, and
+the provider will not pick up the slack: a paused sandbox has **no time-to-live
+and is never deleted automatically** —
+
+> "Paused sandboxes are kept **indefinitely**; there is no automatic deletion or
+> time-to-live limit … There is currently **no configurable 'auto-kill after N
+> days' option**; a paused sandbox will not expire on its own. To remove a paused
+> sandbox, you must kill it explicitly."
+> — [sandbox persistence](https://docs.e2b.dev/sandbox/persistence)
+
+> "**How long a sandbox can stay paused** is not capped at all."
+> — [How long does a sandbox live?](https://docs.e2b.dev/faq/sandbox-lifetime)
+
+Two more facts from the same pages, because they are easy to get backwards: the
+running timeout ends the *running* phase only — with `onTimeout: "pause"`, which
+is what we ask for, the sandbox becomes paused rather than terminated — and the
+continuous-runtime cap (1h Hobby / 24h Pro) **resets** on pause+resume, so it
+never bounds how long an instance exists. `DELETE` does apply to a paused
+sandbox: "A paused sandbox is only removed when you explicitly call `kill` on
+it" ([paused sandboxes and concurrency](https://docs.e2b.dev/faq/paused-sandboxes-concurrency)).
+
+So every scope nobody uses again — a normal idle session, a crashed pod, a row a
+takeover replaced, a rotation that made a row unreadable — leaves an instance in
+the account permanently. It is unbilled and outside the concurrency limit, which
+is why this is a bookkeeping problem rather than a cost one.
+
+**A reaper was implemented and then withdrawn before release** (commit
+`56bdb38`, reverted in the commit that carries this text). Its rule was three
+conjuncts, all needed: the provider must report `paused`, the instance's metadata
+must carry this deployment's pool tag (written at create time, so it outlives the
+row), and no lease row may still claim it — where a lapsed row keeps protecting
+its instance for two lease TTLs, because the scope can still come back inside
+that window. A tag was required because an e2b account can be shared, and
+"paused and unclaimed" describes another deployment's live sandbox just as well
+as our orphan.
+
+It was withdrawn for one reason: the requirement rests on growth that has never
+been measured. **Observation before automation** — we deploy stages 1–4, watch
+the account, and only then decide. What to record:
+
+```bash
+# paused instances this deployment created (needs a tag; without one, count by
+# template and cross-check against the lease table)
+curl -s -H "X-API-Key: $E2B_API_KEY" \
+  'https://api.e2b.app/v2/sandboxes?state=paused&limit=100' | jq 'length'
+
+# rows that lapsed and can no longer serve: the shape of what a reaper would find
+psql -c "SELECT count(*) FROM sandbox_leases WHERE expires_at < extract(epoch from now())"
+```
+
+Record both once a day for a week, alongside the active-session count, and read
+the trend per session rather than the absolute number. The trigger to bring the
+reaper back is any of:
+
+- paused instances grow without settling (roughly: one per abandoned scope, so
+  the count tracks historical session count, not current load);
+- e2b documents or a support answer states an account-level cap on paused
+  sandboxes — that turns this from housekeeping into an availability risk;
+- the dashboard or `GET /v2/sandboxes` becomes impractical to audit by hand.
+
+If none of those happens, leaving it withdrawn is the right call: the alternative
+to reaping is not "the provider cleans up", it is "we clean up by hand", and the
+measurement is what tells us how often.
 
 One commit-history note so a bisect lands on the right story: step 2's
 `LeaseRenewer` hook (`E2BExecutorPool.RenewLease`) actually shipped a commit
@@ -385,6 +456,9 @@ Alternatives rejected as heavier than the problem:
   `e2b sandbox adopted from shared lease` (another pod's instance, no create).
   `e2b sandbox routable` reports how long e2b took to route a fresh id —
   normally the first attempt, and the number to watch when creates are slow.
+  The one number to watch over days, not minutes, is how many paused instances
+  exist in the account: nothing collects them (see "Orphan reaping" for the two
+  queries and the trigger that would bring a reaper back).
 - CI coverage: `.github/workflows/go-test.yml` runs the sandbox/store/gateway
   suites against a Postgres service on every push/PR; the live E2B job runs
   only when `E2B_API_KEY`/`E2B_TEMPLATE` secrets exist.
@@ -413,8 +487,8 @@ path:
   release failures follow the failure table — the local sandbox stays
   usable and nothing shared is destroyed.
 - **Pod crash**: its lease expires within TTL (default 15 min) and another
-  pod reclaims the scope; the orphaned E2B instance lives until the provider
-  timeout and is never destroyed by the registry.
+  pod reclaims the scope. The orphaned E2B instance is never destroyed by the
+  registry — it becomes one of the residues catalogued in "Orphan reaping".
 - **E2B provider failure during create/adopt**: create/hydrate/verify
   failures tear the new sandbox down so callers retry loudly; adopt-renew
   errors keep the adopted executor usable but unregistered; warmup errors
@@ -489,10 +563,10 @@ Threat model and controls:
   the row is overwritten it adopts the same `sandbox_id`, and with `autoPause`
   that instance is merely paused: the takeover resumes it instead of building a
   replacement. A takeover that wins `Acquire` *after* the row was replaced
-  leaves the old instance paused, unreferenced and permanent — it is not billed
-  and does not count toward the concurrency limit, so the cost is bookkeeping
-  rather than money. Reaping those (lifecycle events, or a sweep that kills
-  paused instances no row names) is part of the staged work below.
+  leaves the old instance paused, unreferenced and permanent — unbilled and
+  outside the concurrency limit, so the cost is bookkeeping rather than money.
+  Nothing collects it today; "Orphan reaping" above is the full account, the
+  queries that measure it, and the trigger that would change that.
 - Adoption races are benign for correctness of destruction (owner check), but
   two pods briefly sharing one sandbox is expected during takeover windows.
 - In the rare double-race where a creator loses `Acquire` and the subsequent
@@ -537,12 +611,14 @@ Threat model and controls:
   the operation runs) trades a slow takeover for a second sandbox, which the
   lease exists to prevent.
 - **Two things about the secure switch are not verifiable from here.**
-  [UNVERIFIED] whether e2b's destroy call accepts a *paused* sandbox id (a
-  release of a scope whose sandbox is asleep must not leak it), and during a
-  rolling deploy the fleet is mixed: sandboxes created before `secure: true`
-  carry no token, and envd answers them without auth, so calls to them still
-  work (our client simply sends no `X-Access-Token`). Both are worth one check
-  against a real account.
+  [UNVERIFIED] the mixed fleet during a rolling deploy: sandboxes created before
+  `secure: true` carry no token, and envd answers them without auth, so calls to
+  them still work (our client simply sends no `X-Access-Token`). Worth one check
+  against a real account. (The other half of this bullet is settled: `DELETE`
+  does apply to a paused sandbox — "A paused sandbox is only removed when you
+  explicitly call `kill` on it",
+  [paused sandboxes and concurrency](https://docs.e2b.dev/faq/paused-sandboxes-concurrency)
+  — which is why a release of a scope whose sandbox is asleep does not leak it.)
 - **The in-use marker covers the post-exec sync too.** The sync reads the
   sandbox, so the scope stays marked busy until it finishes; otherwise the sweep
   could pause the sandbox mid-sync. That also means a wedged sync holds the scope
