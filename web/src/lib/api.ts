@@ -103,8 +103,9 @@ export interface AgentDetail {
   // design. Extend tools via Plugin or MCP, not per-agent toggles.
   promptMode?: string;
   // splitReplies is the per-agent multi-bubble override. Applies to
-  // every IM channel uniformly — when on, the agent may emit the
-  // SplitMessageMarker between bubbles and the dispatcher honors it.
+  // web chat and every IM channel uniformly — when on, the agent emits
+  // the SplitMessageMarker between bubbles and the renderer/dispatcher
+  // honors it.
   // null / undefined / false-ish = single bubble per reply (default).
   splitReplies?: boolean | null;
   // autoPersist is the per-agent "remember the chatter automatically"
@@ -151,16 +152,18 @@ export interface SkillEntryCfg {
 
 // updateSkillEntries persists skill env / apiKey patches. When agentId
 // is set the patch lands in cfg.Skills.AgentEntries[agentId] (per-agent
-// override), otherwise in cfg.Skills.Entries (global default). The
-// runtime resolves agent-scoped first, falling back to global.
+// override); otherwise configScope selects the caller's personal layer or
+// the system default. Runtime resolution is agent → user → system.
 export async function updateSkillEntries(
   entries: Record<string, SkillEntryCfg>,
   agentId?: string,
+  configScope?: "user" | "system",
 ) {
   const body = agentId
     ? { skills: { agentEntries: { [agentId]: entries } } }
     : { skills: { entries } };
-  const res = await apiFetch("/api/config", {
+  const scopeQuery = !agentId && configScope ? `?scope=${configScope}` : "";
+  const res = await apiFetch(`/api/config${scopeQuery}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -668,13 +671,18 @@ export async function saveConfig(config: Record<string, unknown>) {
   return res.json();
 }
 
-export async function getConfig(): Promise<ConfigResponse> {
-  const res = await apiFetch("/api/config");
+export async function getConfig(configScope?: "user" | "system"): Promise<ConfigResponse> {
+  const scopeQuery = configScope ? `?scope=${configScope}` : "";
+  const res = await apiFetch(`/api/config${scopeQuery}`);
   return res.json();
 }
 
-export async function updateConfig(config: Record<string, unknown>) {
-  const res = await apiFetch("/api/config", {
+export async function updateConfig(
+  config: Record<string, unknown>,
+  configScope?: "user" | "system",
+) {
+  const scopeQuery = configScope ? `?scope=${configScope}` : "";
+  const res = await apiFetch(`/api/config${scopeQuery}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(config),
@@ -888,18 +896,31 @@ export async function getChatHistory(agentId: string, sessionId: string): Promis
 export interface ChatHistoryResult {
   history: ChatHistoryMessage[];
   latestEventSeq: number; // -1 when there's nothing logged yet
+  historyStart: number;
+  hasMoreHistory: boolean;
 }
 
-export async function getChatHistoryWithCursor(agentId: string, sessionId: string): Promise<ChatHistoryResult> {
-  const res = await apiFetch(`/api/chat/history?agentId=${encodeURIComponent(agentId)}&sessionId=${encodeURIComponent(sessionId)}`);
-  if (!res.ok) return { history: [], latestEventSeq: -1 };
+export async function getChatHistoryWithCursor(
+  agentId: string,
+  sessionId: string,
+  options: { limit?: number; before?: number } = {},
+): Promise<ChatHistoryResult> {
+  const params = new URLSearchParams({ agentId, sessionId });
+  if (options.limit && options.limit > 0) params.set("limit", String(options.limit));
+  if (typeof options.before === "number") params.set("before", String(options.before));
+  const res = await apiFetch(`/api/chat/history?${params.toString()}`);
+  if (!res.ok) {
+    return { history: [], latestEventSeq: -1, historyStart: 0, hasMoreHistory: false };
+  }
   const data = await res.json();
   const history: ChatHistoryMessage[] = Array.isArray(data?.history)
     ? data.history
     : Array.isArray(data) ? data : [];
   const seqRaw = data?.latestEventSeq;
   const latestEventSeq = typeof seqRaw === "number" ? seqRaw : -1;
-  return { history, latestEventSeq };
+  const historyStart = typeof data?.historyStart === "number" ? data.historyStart : 0;
+  const hasMoreHistory = data?.hasMoreHistory === true;
+  return { history, latestEventSeq, historyStart, hasMoreHistory };
 }
 
 export interface ChatSessionEntry {
@@ -916,6 +937,10 @@ export interface ChatSessionEntry {
   projectId?: string;
   title?: string;
   preview: string;
+  // The opening preview remains the conversation's default title; these
+  // fields power contact rows with the actual latest exchange instead.
+  lastMessage?: string;
+  lastMessageAt?: number;
   thumbnailUrl?: string;
   createdAt?: number;
   updatedAt?: number;
@@ -1371,7 +1396,7 @@ export interface AgentUpdatePayload {
   // (only the date anchor + bootstrap files — author writes the whole
   // system prompt themselves via SOUL.md / IDENTITY.md). Pass "" to clear.
   promptMode?: "" | "agent" | "chatbot" | "customize";
-  // Multi-bubble per-agent override (applies to all IM channels).
+  // Multi-bubble per-agent override (applies to web and all IM channels).
   // Tri-state: omit to leave the saved value alone; pass true/false to
   // set explicit; pass `splitRepliesReset: true` to delete the override
   // so default behavior (single bubble) applies.
