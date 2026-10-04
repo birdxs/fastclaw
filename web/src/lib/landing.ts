@@ -1,18 +1,30 @@
 import { getAgents } from "@/lib/api";
 
-// Where a signed-in user lands. FastClaw's web UI has two areas: the chat
-// (the official FastClaw client) and /console (managing agents, models,
-// keys; the super_admin's /admin pages count as console). We remember
-// which one the user was last in, and where, so signing in resumes it;
-// chat is the default.
+// FastClaw's web UI has three areas, switched from the left rail (AppRail):
+// the chat (the official FastClaw client), /console (the account's own
+// agents, models, skills, keys) and, for super_admins, /admin. We remember
+// the last page of each area so switching back resumes it, and which area
+// the user was last in so signing in returns there; chat is the default.
+
+export type Area = "chat" | "console" | "admin";
 
 const MODE_KEY = "fastclaw:last-mode";
-const CHAT_KEY = "fastclaw:last-chat";
-const CONSOLE_KEY = "fastclaw:last-console";
-
-type Mode = "chat" | "console";
+const LAST_KEY: Record<Area, string> = {
+  chat: "fastclaw:last-chat",
+  console: "fastclaw:last-console",
+  admin: "fastclaw:last-admin",
+};
 
 const CHAT_ROUTE = /^\/(?:agents\/[^/]+\/(?:chat|project)(?:\/|$)|teams\/[^/]+\/chat\/)/;
+
+// areaOf maps a pathname to its area, or null for pages outside all three
+// (settings, onboarding, legacy redirects).
+export function areaOf(pathname: string): Area | null {
+  if (CHAT_ROUTE.test(pathname) || /^\/agents\/[^/]+\/?$/.test(pathname)) return "chat";
+  if (/^\/console(?:\/|$)/.test(pathname)) return "console";
+  if (/^\/admin(?:\/|$)/.test(pathname)) return "admin";
+  return null;
+}
 
 function read(key: string): string {
   try {
@@ -34,25 +46,18 @@ function write(key: string, value: string) {
 // Read-only audit views (?actAs=) are someone else's chats and are skipped.
 export function rememberLocation(pathname: string, search: string) {
   if (!pathname || search.includes("actAs=")) return;
-  if (CHAT_ROUTE.test(pathname)) {
-    write(MODE_KEY, "chat");
-    write(CHAT_KEY, pathname + search);
-  } else if (/^\/(?:console|admin)(?:\/|$)/.test(pathname)) {
-    write(MODE_KEY, "console");
-    write(CONSOLE_KEY, pathname + search);
-  }
+  const area = areaOf(pathname);
+  if (!area) return;
+  write(MODE_KEY, area);
+  write(LAST_KEY[area], pathname + search);
 }
 
-// resolveAppLanding picks the first page after sign-in:
-//   - no agents yet → the console's Agents page, to create one
-//   - last in the console → back to that console page
-//   - otherwise → the last conversation, or the newest agent's chat
-export async function resolveAppLanding(): Promise<string> {
+// resolveChatLanding returns the last conversation, or the newest agent's
+// chat; accounts without agents go to the console to create one.
+export async function resolveChatLanding(): Promise<string> {
   const agents = await getAgents().catch(() => []);
   if (agents.length === 0) return "/console/agents/";
-  const mode = read(MODE_KEY) as Mode | "";
-  if (mode === "console") return read(CONSOLE_KEY) || "/console/";
-  const lastChat = read(CHAT_KEY);
+  const lastChat = read(LAST_KEY.chat);
   const lastAgent = lastChat.match(/^\/agents\/([^/]+)\//)?.[1];
   // Agent chats only resume while the agent still exists for this user;
   // group chats re-check access on their own screen.
@@ -60,4 +65,22 @@ export async function resolveAppLanding(): Promise<string> {
     return lastChat;
   }
   return `/agents/${encodeURIComponent(agents[0].id)}/chat/`;
+}
+
+// areaHome is where switching to a management area lands: its last page,
+// or its root.
+export function areaHome(area: "console" | "admin"): string {
+  return read(LAST_KEY[area]) || (area === "console" ? "/console/" : "/admin/");
+}
+
+// resolveAppLanding picks the first page after sign-in: the area the user
+// was last in (chat by default).
+export async function resolveAppLanding(): Promise<string> {
+  const mode = read(MODE_KEY);
+  if (mode === "console" || mode === "admin") {
+    const agents = await getAgents().catch(() => []);
+    if (agents.length === 0) return "/console/agents/";
+    return areaHome(mode);
+  }
+  return resolveChatLanding();
 }

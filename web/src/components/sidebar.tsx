@@ -3,6 +3,7 @@
 import * as React from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { AppSidebar } from "@/components/app-sidebar";
+import { AppRail, APP_RAIL_WIDTH } from "@/components/app-rail";
 import { rememberLocation } from "@/lib/landing";
 import {
   SidebarInset,
@@ -80,15 +81,16 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
         resizeMinWidth={isConversationRoute ? 240 : undefined}
         resizeMaxWidth={isConversationRoute ? 420 : undefined}
         resizeStorageKey={isConversationRoute ? "fastclaw:bot-sidebar-width" : undefined}
-        resizeViewportReserve={isConversationRoute ? 480 : undefined}
+        // 480px for the conversation pane plus the 56px app rail.
+        resizeViewportReserve={isConversationRoute ? 536 : undefined}
         style={
-          isConversationRoute
-            ? ({
-                "--sidebar-width-icon": "64px",
-              } as React.CSSProperties)
-            : undefined
+          {
+            "--sidebar-offset": APP_RAIL_WIDTH,
+            ...(isConversationRoute ? { "--sidebar-width-icon": "64px" } : {}),
+          } as React.CSSProperties
         }
       >
+        <AppRail />
         <AppSidebar />
         <SidebarInset className={isConversationRoute ? "min-w-0 overflow-hidden" : undefined}>
           <header

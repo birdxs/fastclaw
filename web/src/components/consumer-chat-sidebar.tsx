@@ -441,7 +441,6 @@ export function ConsumerChatSidebar({
         <NavUser
           name={me?.user?.displayName || me?.user?.username || tr("User", "用户")}
           subtitle={me?.user?.role || tr("user", "用户")}
-          isAdmin={me?.user?.role === "super_admin"}
         />
       </SidebarFooter>
       <SidebarRail toggleOnClick={false} />

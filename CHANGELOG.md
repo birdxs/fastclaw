@@ -78,15 +78,16 @@ apps); the API Keys page only picks an app when issuing a key.
 `/console/models` and `/console/skills` show the caller's own (user-level)
 configuration.
 
-Super_admins manage the deployment from `/admin` (reached from the account
-menu's **Admin** entry), with its own sidebar: Users, Chats, Token Usage,
+Super_admins manage the deployment from `/admin`, with its own sidebar: Users, Chats, Token Usage,
 Models, Skills, Tools and About. These pages left the Settings dialog,
 which now holds only personal preferences (Account, General).
 `/console/tools` and `/tools` redirect to `/admin/tools/`.
 
-After sign-in users return to where they were last: their last
-conversation, or the console page they had open. Accounts without agents
-land on `/console/agents/` to create one.
+A narrow rail on the far left switches between the areas: Chat, Console,
+Admin (super_admins only) and, at the bottom, Settings. Each area reopens
+the page the user last had open there. After sign-in users return to the
+area they were last in (their last conversation by default). Accounts
+without agents land on `/console/agents/` to create one.
 
 ### Fixed
 
