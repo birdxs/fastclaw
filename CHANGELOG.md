@@ -42,7 +42,7 @@ agent ID will now get a 404 instead of a reply from some other agent.
   `skills/agent-integration/SKILL.md` is the integration guide — configuring
   `FASTCLAW_BASE_URL` / `FASTCLAW_API_KEY`, agent-scope keys for fixed
   agents, user-scope keys to create and manage agents, chat, usage and
-  errors. Every FastClaw serves it at `/integration.md` (public). The
+  errors. Every FastClaw serves it at `/skills/agent-integration/SKILL.md` (public). The
   console's new **Integration** page links it and builds a ready-to-paste
   prompt for the coding agent wiring another app to FastClaw. It replaces
   `skills/fastclaw-api-integration`; `docs/upstream-api.md` now points to it.

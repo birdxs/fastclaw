@@ -12,7 +12,11 @@ import (
 //go:embed apidocs/agent-integration.md
 var integrationDoc string
 
-// handleIntegrationDoc serves GET /integration.md: the integration guide for
+// IntegrationDocPath is where the integration skill is served — the same
+// path it has in the repository, so agents can install it as a skill.
+const IntegrationDocPath = "/skills/agent-integration/SKILL.md"
+
+// handleIntegrationDoc serves GET /skills/agent-integration/SKILL.md: the integration guide for
 // the coding agent (or developer) wiring an app to FastClaw. It is public —
 // documentation only, no secrets — so an agent can read it from a link
 // before it has a key. It is served verbatim: the base URL and API key are

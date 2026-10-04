@@ -11,6 +11,6 @@ covers:
   with agents on demand;
 - chat sessions, end-users, files, usage, quotas and error codes.
 
-Every FastClaw serves the same guide at `<base URL>/integration.md` (public,
+Every FastClaw serves the same guide at `<base URL>/skills/agent-integration/SKILL.md` (public,
 no key needed), and the console's **Integration** page gives a ready-to-paste
 prompt for the coding agent.

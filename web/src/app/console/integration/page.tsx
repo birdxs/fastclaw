@@ -10,7 +10,7 @@ import { useLocale } from "@/components/locale-provider";
 type Scenario = "fixed" | "manage";
 
 // The integration page hands the coding agent working on another app what
-// it needs: the public guide at /integration.md (skills/agent-integration)
+// it needs: the public agent-integration skill at /skills/agent-integration/SKILL.md
 // and a prompt naming the scenario, this FastClaw's base URL and — for
 // fixed agents — the agents to call. The API key stays a placeholder: the
 // guide tells the agent to read it from configuration and ask for it.
@@ -36,7 +36,7 @@ export default function IntegrationPage() {
       .catch(() => {});
   }, []);
 
-  const guideURL = `${origin}/integration.md`;
+  const guideURL = `${origin}/skills/agent-integration/SKILL.md`;
   const keysURL = `${origin}/console/apikeys/`;
   // The prompt is for an agent, so it stays in English regardless of the
   // UI language.
@@ -44,7 +44,7 @@ export default function IntegrationPage() {
     const lines = [
       "Integrate this project's backend with FastClaw cloud agents.",
       "",
-      `Read and follow the integration guide first: ${guideURL}`,
+      `Read and follow the agent-integration skill first (install it if you support skills): ${guideURL}`,
       "",
     ];
     if (scenario === "fixed") {
@@ -103,7 +103,7 @@ export default function IntegrationPage() {
             <Button size="sm" variant="outline" onClick={() => copy("url", guideURL)} title={tr("Copy", "复制")}>
               {copied === "url" ? <Check className="size-4" /> : <Copy className="size-4" />}
             </Button>
-            <Button size="sm" variant="outline" onClick={() => window.open("/integration.md", "_blank")} title={tr("Open", "打开")}>
+            <Button size="sm" variant="outline" onClick={() => window.open("/skills/agent-integration/SKILL.md", "_blank")} title={tr("Open", "打开")}>
               <ExternalLink className="size-4" />
             </Button>
           </div>

@@ -259,8 +259,12 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/register", s.handleRegister)
 	mux.HandleFunc("GET /api/public/agents", s.handlePublicAgents)
 	mux.HandleFunc("GET /api/public/skills", s.handlePublicSkills)
-	// The integration guide for apps (and their coding agents); public.
-	mux.HandleFunc("GET /integration.md", s.handleIntegrationDoc)
+	// The integration guide for apps (and their coding agents), served as
+	// the skill it is; public. /integration.md is its earlier address.
+	mux.HandleFunc("GET /skills/agent-integration/SKILL.md", s.handleIntegrationDoc)
+	mux.HandleFunc("GET /integration.md", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, IntegrationDocPath, http.StatusMovedPermanently)
+	})
 	mux.HandleFunc("GET /api/admin/registration", admin(s.handleGetRegistration))
 	mux.HandleFunc("PUT /api/admin/registration", admin(s.handleSetRegistration))
 	mux.HandleFunc("GET /api/admin/chats", admin(s.handleAdminChats))
