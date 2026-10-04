@@ -383,7 +383,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/skills/search", auth(s.handleSearchSkills))
 	mux.HandleFunc("POST /api/skills/install", auth(s.handleInstallSkill))
 	mux.HandleFunc("POST /api/skills/upload", auth(s.handleUploadSkill))
-	mux.HandleFunc("DELETE /api/skills/{name}", admin(s.handleDeleteSkill))
+	// Global deletes are admin-only; ?scope=user deletes the caller's own
+	// skill. handleDeleteSkill enforces both.
+	mux.HandleFunc("DELETE /api/skills/{name}", auth(s.handleDeleteSkill))
 	mux.HandleFunc("GET /api/agents/{id}/skills", auth(s.handleListAgentSkills))
 	mux.HandleFunc("DELETE /api/agents/{id}/skills/{name}", auth(s.handleDeleteAgentSkill))
 
@@ -562,7 +564,7 @@ func (h spaHandler) serveAgentPlaceholder(w http.ResponseWriter, r *http.Request
 
 // consoleTopLevel are the management pages that moved under /console.
 var consoleTopLevel = map[string]bool{
-	"models": true, "providers": true, "skills": true, "tools": true,
+	"models": true, "providers": true, "skills": true,
 	"plugins": true, "channels": true, "channels-config": true,
 	"cron": true, "apikeys": true,
 }
@@ -585,6 +587,9 @@ func legacyConsoleRedirect(path string, query url.Values) (string, bool) {
 	switch {
 	case trimmed == "overview":
 		target = "/console/"
+	case trimmed == "tools" || trimmed == "console/tools":
+		// Deployment-wide tool config lives in the super_admin's /admin.
+		target = "/admin/tools/"
 	case len(parts) == 1 && consoleTopLevel[trimmed]:
 		target = "/console/" + trimmed + "/"
 	case trimmed == "agents" && query.Get("manage") == "1":

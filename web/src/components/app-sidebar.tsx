@@ -29,11 +29,16 @@ import {
 import {
   BotIcon,
   BrainIcon,
+  CoinsIcon,
+  InfoIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
+  MessagesSquareIcon,
   PlusIcon,
   SettingsIcon,
   SparklesIcon,
+  UsersIcon,
+  WrenchIcon,
 } from "lucide-react";
 import {
   getAgent,
@@ -73,7 +78,7 @@ function extractTeamId(pathname: string): string | null {
 // The console sidebar is one flat list of the caller's own (user-level)
 // pages — the same for every account. Deployment-wide configuration
 // (users, all chats, token usage, system models / skills / tools) lives
-// in the System section of the Settings dialog for super_admins instead.
+// under /admin for super_admins instead (adminNav).
 // Overview is the console root, so a prefix match would light it up on
 // every console page; it's active only on /console itself.
 const consoleNav = (pathname: string): NavItem[] => [
@@ -88,6 +93,22 @@ const consoleNav = (pathname: string): NavItem[] => [
   { title: "Skills", url: "/console/skills/", icon: SparklesIcon },
   { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
 ];
+
+// The /admin sidebar: deployment-wide pages, super_admin only (AuthGuard
+// gates the routes, the APIs enforce it).
+const ADMIN_NAV: NavItem[] = [
+  { title: "Users", url: "/admin/users/", icon: UsersIcon },
+  { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
+  { title: "Token Usage", url: "/admin/usage/", icon: CoinsIcon },
+  { title: "Models", url: "/admin/models/", icon: BrainIcon },
+  { title: "Skills", url: "/admin/skills/", icon: SparklesIcon },
+  { title: "Tools", url: "/admin/tools/", icon: WrenchIcon },
+  { title: "About", url: "/admin/about/", icon: InfoIcon },
+];
+
+function isAdminRoute(pathname: string) {
+  return pathname === "/admin" || pathname.startsWith("/admin/");
+}
 
 // "New chat" is active iff we're parked on the bare /chat/ page with
 // no session open. A session can be encoded two ways:
@@ -427,6 +448,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             Chats: "聊天记录",
             "Token Usage": "Token 用量",
             "API Keys": "API 密钥",
+            About: "关于",
             "New chat": "新建对话",
           } as Record<string, string>)[item.title] || item.title,
         ),
@@ -455,7 +477,6 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           defaultTab={settingsDefaultTab}
           role={activeAgentId && agentRoles[activeAgentId] === "viewer" ? "viewer" : "owner"}
           userOnly={settingsUserOnly || !activeAgentId}
-          isAdmin={isAdmin}
         />
       </>
     );
@@ -479,6 +500,8 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             label={t("common.agent")}
             items={localizeNavItems(AGENT_NAV(activeAgentId, pathname, hasOpenSession))}
           />
+        ) : isAdminRoute(pathname) ? (
+          <NavMain items={localizeNavItems(ADMIN_NAV)} />
         ) : (
           <NavMain items={localizeNavItems(consoleNav(pathname))} />
         )}
@@ -521,6 +544,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             t("common.user")
           }
           subtitle={me?.user?.role || (isAdmin ? "super_admin" : "user")}
+          isAdmin={isAdmin}
         />
       </SidebarFooter>
       <SidebarRail />
@@ -534,7 +558,6 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             ? "viewer"
             : "owner"
         }
-        isAdmin={isAdmin}
       />
     </Sidebar>
   );

@@ -2,8 +2,9 @@ import { getAgents } from "@/lib/api";
 
 // Where a signed-in user lands. FastClaw's web UI has two areas: the chat
 // (the official FastClaw client) and /console (managing agents, models,
-// keys). We remember which one the user was last in, and where, so
-// signing in resumes it; chat is the default.
+// keys; the super_admin's /admin pages count as console). We remember
+// which one the user was last in, and where, so signing in resumes it;
+// chat is the default.
 
 const MODE_KEY = "fastclaw:last-mode";
 const CHAT_KEY = "fastclaw:last-chat";
@@ -36,7 +37,7 @@ export function rememberLocation(pathname: string, search: string) {
   if (CHAT_ROUTE.test(pathname)) {
     write(MODE_KEY, "chat");
     write(CHAT_KEY, pathname + search);
-  } else if (pathname === "/console" || pathname.startsWith("/console/")) {
+  } else if (/^\/(?:console|admin)(?:\/|$)/.test(pathname)) {
     write(MODE_KEY, "console");
     write(CONSOLE_KEY, pathname + search);
   }

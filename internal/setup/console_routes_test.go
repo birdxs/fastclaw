@@ -22,6 +22,8 @@ func TestLegacyConsoleRedirects(t *testing.T) {
 		{"/models/", "/console/models/"},
 		{"/apikeys", "/console/apikeys/"},
 		{"/channels-config/", "/console/channels-config/"},
+		{"/tools/", "/admin/tools/"},
+		{"/console/tools/", "/admin/tools/"},
 		{"/agents/?manage=1", "/console/agents/"},
 		{"/agents/?manage=1&x=1", "/console/agents/?x=1"},
 		{"/agents/agt_1/skills/", "/console/agents/agt_1/skills/"},

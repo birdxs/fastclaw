@@ -63,8 +63,13 @@ configuration pages moved from `/agents/<id>/<tab>` to
 The console sidebar is one flat list of the account's own pages —
 Overview, Agents, Models, Skills, API Keys — for every account.
 `/console/models` and `/console/skills` show the caller's own (user-level)
-configuration; super_admins manage deployment-wide users, chats, usage,
-models, skills and tools from the System section of the Settings dialog.
+configuration.
+
+Super_admins manage the deployment from `/admin` (reached from the account
+menu's **Admin** entry), with its own sidebar: Users, Chats, Token Usage,
+Models, Skills, Tools and About. These pages left the Settings dialog,
+which now holds only personal preferences (Account, General).
+`/console/tools` and `/tools` redirect to `/admin/tools/`.
 
 After sign-in users return to where they were last: their last
 conversation, or the console page they had open. Accounts without agents

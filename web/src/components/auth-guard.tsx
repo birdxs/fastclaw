@@ -24,7 +24,6 @@ const ADMIN_PATH_PREFIXES = [
   "/console/channels",
   "/console/channels-config",
   "/console/plugins",
-  "/console/tools",
   "/console/cron",
 ];
 
