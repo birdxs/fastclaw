@@ -8,7 +8,6 @@ import {
   CoinsIcon,
   IdCardIcon,
   InfoIcon,
-  KeyRoundIcon,
   LayersIcon,
   MessagesSquareIcon,
   Palette,
@@ -40,7 +39,6 @@ import AgentUsagePage from "@/app/console/agents/[id]/usage/page";
 import AccountSettingsPage from "@/app/settings/account/page";
 import GeneralSettingsPage from "@/app/settings/general/page";
 import UserModelsPage from "@/app/console/models/page";
-import ApikeysPage from "@/app/console/apikeys/page";
 import SystemSkillsPage from "@/app/console/skills/page";
 import SystemToolsPage from "@/app/console/tools/page";
 import AboutSettingsPage from "@/app/settings/about/page";
@@ -62,9 +60,6 @@ export type AgentSettingsTab =
   | "usage"
   | "account"
   | "general"
-  | "apiKeys"
-  | "userModels"
-  | "userSkills"
   | "systemModels"
   | "systemSkills"
   | "systemTools"
@@ -92,17 +87,11 @@ const AGENT_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> 
 const USER_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> = [
   { id: "account", label: "Account", icon: UserCog },
   { id: "general", label: "General", icon: Palette },
-  { id: "apiKeys", label: "API Keys", icon: KeyRoundIcon },
 ];
 
-// Models + skill credentials are personal overrides for every account,
-// including super_admin accounts. Admins additionally get a separate System
-// group below; explicit API scope keeps the two layers independent.
-const USER_CONFIGURATION_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> = [
-  { id: "userModels", label: "Models", icon: BrainIcon },
-  { id: "userSkills", label: "Skills", icon: SparklesIcon },
-];
-
+// The account's own models, skills and API keys live in /console; this
+// dialog keeps personal preferences and, for super_admins, the System
+// section.
 const SYSTEM_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> = [
   { id: "systemUsers", label: "Users", icon: UsersIcon },
   { id: "systemChats", label: "Chats", icon: MessagesSquareIcon },
@@ -127,9 +116,6 @@ const TAB_LABEL_KEYS: Record<AgentSettingsTab, MessageKey> = {
   usage: "settings.tab.usage",
   account: "settings.tab.account",
   general: "settings.tab.general",
-  apiKeys: "settings.tab.apiKeys",
-  userModels: "settings.tab.models",
-  userSkills: "settings.tab.skills",
   systemModels: "settings.tab.models",
   systemSkills: "settings.tab.skills",
   systemTools: "settings.tab.tools",
@@ -179,7 +165,7 @@ export function AgentSettingsDialog({
       ? AGENT_TABS.filter((t) => t.id === "models" || t.id === "channels")
       : AGENT_TABS;
   const userTabs = userOnly
-    ? [...USER_TABS, ...USER_CONFIGURATION_TABS]
+    ? USER_TABS
     : [];
   const systemTabs = userOnly && isAdmin ? SYSTEM_TABS : [];
   const visibleTabs = [...agentTabs, ...userTabs, ...systemTabs];
@@ -277,9 +263,6 @@ export function AgentSettingsDialog({
               <GeneralSettingsPage />
             </div>
           )}
-          {tab === "apiKeys" && <ApikeysPage />}
-          {tab === "userModels" && <UserModelsPage scope="user" />}
-          {tab === "userSkills" && <SystemSkillsPage scope="user" />}
           {tab === "systemModels" && <UserModelsPage scope="system" />}
           {tab === "systemSkills" && <SystemSkillsPage scope="system" />}
           {tab === "systemTools" && <SystemToolsPage />}
