@@ -495,51 +495,12 @@ export async function listApikeys() {
 
 export type ApikeyType = "admin" | "user" | "agent";
 
-export async function createApikey(req: { name: string; type: ApikeyType; appId?: string; agentIds?: string[] }) {
+export async function createApikey(req: { name: string; type: ApikeyType; agentIds?: string[] }) {
   const res = await apiFetch("/api/apikeys", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
-  return res.json();
-}
-
-// Apps: optional tenants of the runtime API. Keys and agents without an app
-// belong to the account; an app key only sees the agents of its app.
-
-export interface AppInfo {
-  id: string;
-  name: string;
-  createdAt: string;
-  agentCount: number;
-  keyCount: number;
-}
-
-export async function listApps(): Promise<{ apps?: AppInfo[]; error?: string }> {
-  const res = await apiFetch("/api/apps");
-  return res.json();
-}
-
-export async function createApp(name: string): Promise<{ app?: AppInfo; error?: string }> {
-  const res = await apiFetch("/api/apps", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  return res.json();
-}
-
-export async function renameApp(id: string, name: string): Promise<{ app?: AppInfo; error?: string }> {
-  const res = await apiFetch(`/api/apps/${id}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
-  });
-  return res.json();
-}
-
-export async function deleteApp(id: string): Promise<{ ok?: boolean; error?: string }> {
-  const res = await apiFetch(`/api/apps/${id}`, { method: "DELETE" });
   return res.json();
 }
 

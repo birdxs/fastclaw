@@ -266,12 +266,8 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	ident, _ := auth.FromContext(r.Context())
 	out := make([]map[string]any, 0, len(owned))
 	for _, ar := range owned {
-		if keyOutsideApp(ident, &ar) {
-			continue
-		}
 		desc, _ := ar.Config["description"].(string)
 		out = append(out, map[string]any{
 			"id":          ar.ID,
@@ -281,7 +277,6 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 			"avatarUrl":   "/api/agents/" + ar.ID + "/files/avatar.png",
 			"createdAt":   ar.CreatedAt,
 			"userId":      ar.UserID,
-			"appId":       ar.AppID,
 			"role":        "owner",
 			"isPublic":    ar.IsPublic,
 		})
@@ -336,12 +331,9 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// An app-scoped api key creates into its app; console sessions and
-	// account-level keys create account-level agents (empty AppID).
 	rec := &store.AgentRecord{
 		ID:     id,
 		UserID: uid,
-		AppID:  ident.AppID,
 		Name:   req.Name,
 	}
 	if req.Description != "" {
@@ -413,22 +405,7 @@ func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agent
 		jsonResponse(w, http.StatusForbidden, map[string]any{"error": "not your agent"})
 		return nil
 	}
-	if keyOutsideApp(ident, rec) {
-		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "not found"})
-		return nil
-	}
 	return rec
-}
-
-// keyOutsideApp reports whether an app-scoped api key is reaching for an
-// agent of another app of the same account. Such keys only see their own
-// app's agents on /api too — except agents explicitly granted to an
-// "agent" key (Identity.CanUseAgent). Platform-admin keys and cookie
-// sessions are unaffected.
-func keyOutsideApp(ident auth.Identity, rec *store.AgentRecord) bool {
-	return rec != nil && ident.AuthMethod == "apikey" && ident.AppID != "" &&
-		ident.APIKeyType != users.APIKeyTypeAdmin &&
-		rec.UserID == ident.AccountID() && !ident.CanUseAgent(rec.ID, rec.UserID, rec.AppID)
 }
 
 // agentReadable reports whether the current request may read an agent.
@@ -446,9 +423,6 @@ func (s *Server) agentReadable(r *http.Request, rec *store.AgentRecord) bool {
 		return false
 	}
 	uid := ident.EffectiveUserID()
-	if keyOutsideApp(ident, rec) {
-		return false
-	}
 	if rec.UserID == uid {
 		return true
 	}
@@ -474,9 +448,6 @@ func (s *Server) callerOwnsAgent(r *http.Request, agentID string) bool {
 	}
 	uid := s.effectiveUserID(r)
 	ident, _ := auth.FromContext(r.Context())
-	if keyOutsideApp(ident, rec) {
-		return false
-	}
 	if rec.UserID == uid || ident.Role == users.RoleSuperAdmin {
 		return true
 	}

@@ -23,8 +23,7 @@ import (
 //	agent_id — only usage of this agent
 //	end_user — only usage of this end-user (the app's external id, as
 //	           sent in X-Fastclaw-End-User / `user`)
-//	scope    — "app": usage of the app's agents, by the app itself and
-//	           by every end-user
+//	scope    — "app": the app owner plus every end-user it minted
 //	user_id  — legacy: a FastClaw user id; must be the app itself or one
 //	           of its end-users
 //
@@ -74,7 +73,6 @@ func (s *Server) HandleGetUsage(w http.ResponseWriter, r *http.Request) {
 		resp["userId"] = uid
 	case qs.Get("scope") == "app":
 		q.AppOwnerID = ident.AccountID()
-		q.AppID = ident.AppID
 		resp["scope"] = "app"
 		resp["userId"] = q.AppOwnerID
 	case qs.Get("user_id") != "":

@@ -8,7 +8,7 @@ action on upgrade — read those notes before deploying.
 ### Changed — `/v1/chat/completions` no longer falls back to another agent
 
 Naming an agent (`agent_id` in the body or `X-Fastclaw-Agent-ID`) that
-doesn't exist, or that isn't one of the API key's app's agents, now returns
+doesn't exist, or that the API key may not use, now returns
 `404` with `error.code = "agent_not_found"`. Previously FastClaw silently
 answered with the default (or an arbitrary) agent. Requests that don't name
 an agent still use the default agent. Scripts that passed a stale or wrong
@@ -17,14 +17,14 @@ agent ID will now get a 404 instead of a reply from some other agent.
 ### Added — runtime API for integrating apps
 
 - **Agent management on `/v1`:** `POST/GET/PATCH/DELETE /v1/agents[/{id}]`
-  and `PUT /v1/agents/{id}/system-files/{name}`. Agents belong to the app
-  (the API key's app). `GET /v1/agents` now returns `display_name`,
+  and `PUT /v1/agents/{id}/system-files/{name}`. Agents belong to the API
+  key's account — the tenant. `GET /v1/agents` now returns `display_name`,
   `description`, `metadata` and timestamps, reads from the database, and
   supports `limit`/`cursor` pagination and `metadata[key]=value` filters.
   `name` still equals `id` for compatibility.
 - **End-user is a data namespace, not an identity switch:** with
   `X-Fastclaw-End-User` or the chat body field `user`, the agent is resolved
-  from the app — so the app's agents are now usable for its end-users (this
+  from the account — so its agents are now usable for its end-users (this
   previously returned 404) — while session history, USER.md and personal
   memory stay per end-user under the existing app_user records. No data
   migration.
@@ -36,16 +36,8 @@ agent ID will now get a 404 instead of a reply from some other agent.
   rows include `userId` and `endUser`.
 - **Unified `/v1` errors:** `{"error": {"type", "code", "message"}}` with a
   stable `code` (including 401s and rate limits).
-- **Apps (optional tenants):** new `apps` table; agents and API keys get
-  an optional `app_id`. Nothing changes until you create an app: existing
-  and new agents and keys stay account-level, and an account-level `user`
-  key still covers every agent of the account. Create apps (e.g.
-  `douchat-prod`, `douchat-dev`) under API Keys → New app and pick one when
-  issuing a key: a `user` key in an app only sees, creates and bills agents
-  of its app — on `/v1` and on `/api/agents`. An `agent` key uses exactly
-  the agents granted to it, which may be any agent of the account. `GET /v1/usage?scope=app` counts the app's
-  agents (the whole account for account-level keys). Console endpoints:
-  `GET/POST /api/apps`, `PATCH/DELETE /api/apps/{id}`.
+- **`agent` keys** default to their only granted agent when a request
+  names none.
 - **On-demand agent loading:** accounts with more than 50 agents
   (`FASTCLAW_EAGER_AGENT_LIMIT`) load agents on first use and drop idle ones.
   Agents bound to IM channels or with enabled cron jobs are still loaded at
@@ -73,9 +65,7 @@ configuration pages moved from `/agents/<id>/<tab>` to
 (including `/agents/?manage=1`) redirect to their new location.
 
 The console sidebar is one flat list of the account's own pages —
-Overview, Agents, Models, Skills, Apps, API Keys — for every account.
-Apps have their own page (`/console/apps`: create, rename, delete empty
-apps); the API Keys page only picks an app when issuing a key.
+Overview, Agents, Models, Skills, API Keys — for every account.
 `/console/models` and `/console/skills` show the caller's own (user-level)
 configuration.
 

@@ -7,10 +7,8 @@ import {
   deleteApikey,
   rotateApikey,
   setApikeyAgents,
-  listApps,
   apiFetch,
   type ApikeyType,
-  type AppInfo,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,7 +47,6 @@ import { useLocale } from "@/components/locale-provider";
 interface ApiKey {
   id: string;
   userId: string;
-  appId?: string;
   name?: string;
   key: string;
   type: ApikeyType;
@@ -64,7 +61,6 @@ interface MeResponse {
 interface AgentMeta {
   id: string;
   name: string;
-  appId?: string;
 }
 
 export default function ApikeysPage() {
@@ -83,14 +79,6 @@ export default function ApikeysPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [scopeTarget, setScopeTarget] = useState<ApiKey | null>(null);
   const [scopeAgents, setScopeAgents] = useState<string[]>([]);
-  const [apps, setApps] = useState<AppInfo[]>([]);
-  const [createAppId, setCreateAppId] = useState("");
-
-  // Apps are optional. The app layer only surfaces once the account has
-  // one; until then the page reads exactly as before.
-  const hasApps = apps.length > 0;
-  const appName = (id?: string) =>
-    apps.find((a) => a.id === id)?.name || tr("Account (all agents)", "账号（全部 Agent）");
 
   async function refresh() {
     setError("");
@@ -103,8 +91,6 @@ export default function ApikeysPage() {
     const me = await apiFetch("/api/me");
     const mj = (await me.json()) as MeResponse;
     setIsSuperAdmin(mj?.user?.role === "super_admin");
-    const ap = await listApps();
-    if (ap.apps) setApps(ap.apps);
   }
   useEffect(() => {
     refresh();
@@ -121,7 +107,6 @@ export default function ApikeysPage() {
     const res = await createApikey({
       name: createName.trim(),
       type: createType,
-      appId: createAppId || undefined,
       agentIds: createType === "agent" ? createAgents : undefined,
     });
     if (res.error) {
@@ -187,7 +172,6 @@ export default function ApikeysPage() {
     setCreateName("");
     setCreateType("user");
     setCreateAgents([]);
-    setCreateAppId("");
     setError("");
     setCreateOpen(true);
   }
@@ -271,7 +255,6 @@ export default function ApikeysPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>{tr("Name", "名称")}</TableHead>
-                {hasApps && <TableHead>{tr("App", "应用")}</TableHead>}
                 <TableHead>{tr("Type", "类型")}</TableHead>
                 <TableHead>{tr("Key", "密钥")}</TableHead>
                 <TableHead>{tr("Scope", "范围")}</TableHead>
@@ -283,9 +266,6 @@ export default function ApikeysPage() {
               {keys.map((k) => (
                 <TableRow key={k.id}>
                   <TableCell className="font-medium">{k.name || k.id}</TableCell>
-                  {hasApps && (
-                    <TableCell className="text-xs text-muted-foreground">{appName(k.appId)}</TableCell>
-                  )}
                   <TableCell>
                     <Badge variant={typeBadgeVariant(k.type)} className="text-xs">
                       {k.type === "admin" ? tr("Admin", "管理员") : k.type === "user" ? tr("User", "用户") : "Agent"}
@@ -298,11 +278,7 @@ export default function ApikeysPage() {
                     {k.type === "admin" ? (
                       <span className="text-xs text-muted-foreground">{tr("All agents (platform-wide)", "平台中的所有 Agent")}</span>
                     ) : k.type === "user" ? (
-                      <span className="text-xs text-muted-foreground">
-                        {k.appId
-                          ? tr("All agents in this app (new ones included automatically)", "该应用的所有 Agent（自动包含新建的 Agent）")
-                          : tr("All your agents (new ones included automatically)", "你的所有 Agent（自动包含新建的 Agent）")}
-                      </span>
+                      <span className="text-xs text-muted-foreground">{tr("All your agents (new ones included automatically)", "你的所有 Agent（自动包含新建的 Agent）")}</span>
                     ) : (
                       <ScopeChips
                         selectedIds={k.agents || []}
@@ -356,30 +332,6 @@ export default function ApikeysPage() {
                 autoFocus
               />
             </div>
-            {hasApps && (
-              <div className="space-y-1.5">
-                <Label>{tr("App", "应用")}</Label>
-                <div className="flex flex-wrap gap-2">
-                  {[{ id: "", name: appName("") }, ...apps].map((a) => (
-                    <button
-                      key={a.id || "account"}
-                      type="button"
-                      onClick={() => {
-                        setCreateAppId(a.id);
-                      }}
-                      className={
-                        "rounded-md border px-2.5 py-1 text-xs transition " +
-                        (createAppId === a.id
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "border-border hover:bg-muted")
-                      }
-                    >
-                      {a.name}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
             <div className="space-y-1.5">
               <Label>{tr("Type", "类型")}</Label>
               <div className="space-y-2">
@@ -397,11 +349,7 @@ export default function ApikeysPage() {
                   selected={createType}
                   onSelect={setCreateType}
                   title={tr("User", "用户")}
-                  description={
-                    createAppId
-                      ? tr("Access every agent in this app, including future ones, and create new agents in it.", "可访问该应用的所有 Agent（包括之后新建的），并在该应用中创建 Agent。")
-                      : tr("Access all your agents, including future ones, and create new agents.", "可访问自己的所有 Agent（包括之后新建的）并创建 Agent。")
-                  }
+                  description={tr("Access all your agents, including future ones, and create new agents.", "可访问自己的所有 Agent（包括之后新建的）并创建 Agent。")}
                 />
                 <TypeOption
                   value="agent"

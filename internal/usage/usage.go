@@ -125,9 +125,6 @@ type Query struct {
 	// AppOwnerID, when UserID is empty, selects the app owner's own rows
 	// plus the rows of every app_user owned by it.
 	AppOwnerID string
-	// AppID optionally restricts rows to agents of one app (an account
-	// can run several apps). MemMeter has no agents table and ignores it.
-	AppID string
 	// AgentID optionally restricts rows to one agent.
 	AgentID string
 	Range   Range
@@ -647,10 +644,6 @@ func (s *SQLMeter) Query(ctx context.Context, q Query) ([]DailyUsage, Totals, er
 		args = append(args, q.AppOwnerID, q.AppOwnerID)
 	default:
 		return nil, Totals{}, fmt.Errorf("usage.Query: UserID or AppOwnerID required")
-	}
-	if q.AppID != "" {
-		where = append(where, "t.agent_id IN (SELECT id FROM agents WHERE app_id = ?)")
-		args = append(args, q.AppID)
 	}
 	if q.AgentID != "" {
 		where = append(where, "t.agent_id = ?")

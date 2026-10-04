@@ -488,77 +488,14 @@ func TestV1UnauthorizedUsesUnifiedError(t *testing.T) {
 	}
 }
 
-// An app key only sees its app — not the account's other agents — while
-// an account-level key sees everything of the account.
-func TestAppsOfOneAccountAreIsolated(t *testing.T) {
+// An "agent" key uses exactly the agents granted to it; with a single
+// grant, requests that name no agent go to that one.
+func TestAgentKeyUsesItsGrants(t *testing.T) {
 	h := newV1Harness(t)
 	ctx := context.Background()
-	dev := &store.AppRecord{OwnerUserID: h.appA, Name: "douchat-dev"}
-	if err := h.st.CreateApp(ctx, dev); err != nil {
-		t.Fatal(err)
-	}
-	_, devKey, err := h.apikeys.CreateInApp(ctx, h.appA, dev.ID, "dev-key", users.APIKeyTypeUser, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prodAgent := h.createAgent(h.keyA, "account agent", nil)
-	devAgent := h.createAgent(devKey, "dev agent", nil)
-	if rec, _ := h.st.GetAgent(ctx, devAgent); rec.AppID != dev.ID || rec.UserID != h.appA {
-		t.Fatalf("dev agent = %+v, want app %s under the same account", rec, dev.ID)
-	}
-	if rec, _ := h.st.GetAgent(ctx, prodAgent); rec.AppID != "" {
-		t.Fatalf("an account-level key creates account-level agents, got app %q", rec.AppID)
-	}
-	// The account-level key covers the whole account, apps included.
-	if _, out := h.do("GET", "/v1/agents", h.keyA, nil); len(out["agents"].([]any)) != 2 {
-		t.Fatalf("account key should list every agent of the account: %v", out)
-	}
-
-	_, out := h.do("GET", "/v1/agents", devKey, nil)
-	if list := out["agents"].([]any); len(list) != 1 || list[0].(map[string]any)["id"] != devAgent {
-		t.Fatalf("dev key lists %v, want only the dev agent", list)
-	}
-	code, out := h.do("GET", "/v1/agents/"+prodAgent, devKey, nil)
-	if code != http.StatusNotFound || errCode(out) != "agent_not_found" {
-		t.Fatalf("dev key read prod agent: %d %v", code, out)
-	}
-	code, out = h.do("POST", "/v1/chat/completions", devKey, map[string]any{
-		"agent_id": prodAgent, "messages": []map[string]string{{"role": "user", "content": "hi"}},
-	})
-	if code != http.StatusNotFound || errCode(out) != "agent_not_found" {
-		t.Fatalf("dev key chatted with prod agent: %d %v", code, out)
-	}
-	// No agent named: the app's only agent answers, not the account's.
-	code, out = h.do("POST", "/v1/chat/completions", devKey, map[string]any{
-		"messages": []map[string]string{{"role": "user", "content": "hi"}},
-	})
-	if code != http.StatusOK {
-		t.Fatalf("default agent for dev app: %d %v", code, out)
-	}
-	if got := h.rt.ensured[len(h.rt.ensured)-1]; got != h.appA+"/"+devAgent {
-		t.Fatalf("default agent resolved to %s, want the dev app's agent", got)
-	}
-
-	meter := usage.NewSQLMeter(h.st.DB(), "sqlite")
-	_ = meter.RecordTokens(ctx, h.appA, prodAgent, "s", "", "m", usage.Tokens{Input: 7})
-	_ = meter.RecordTokens(ctx, h.appA, devAgent, "s", "", "m", usage.Tokens{Input: 3})
-	if _, out = h.do("GET", "/v1/usage?scope=app", devKey, nil); out["totals"].(map[string]any)["inputTokens"].(float64) != 3 {
-		t.Fatalf("dev app usage must exclude prod: %v", out)
-	}
-}
-
-// An "agent" key in an app may use exactly the agents granted to it, even
-// account-level ones outside the app — granting is the authorization.
-func TestAppAgentKeyUsesExplicitGrantsAcrossApps(t *testing.T) {
-	h := newV1Harness(t)
-	ctx := context.Background()
-	snapok := &store.AppRecord{OwnerUserID: h.appA, Name: "snapok"}
-	if err := h.st.CreateApp(ctx, snapok); err != nil {
-		t.Fatal(err)
-	}
-	editor := h.createAgent(h.keyA, "Snapok-Image-Editor", nil) // account-level
+	editor := h.createAgent(h.keyA, "Snapok-Image-Editor", nil)
 	other := h.createAgent(h.keyA, "Private", nil)
-	_, key, err := h.apikeys.CreateInApp(ctx, h.appA, snapok.ID, "snapok", users.APIKeyTypeAgent, []string{editor})
+	_, key, err := h.apikeys.Create(ctx, h.appA, "snapok", users.APIKeyTypeAgent, []string{editor})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,7 +507,6 @@ func TestAppAgentKeyUsesExplicitGrantsAcrossApps(t *testing.T) {
 	if code, out := h.do("GET", "/v1/agents/"+other, key, nil); code != http.StatusNotFound {
 		t.Fatalf("ungranted agent visible: %d %v", code, out)
 	}
-	// Named and default (sole grant) both reach the granted agent.
 	for _, body := range []map[string]any{
 		{"agent_id": editor, "messages": []map[string]string{{"role": "user", "content": "hi"}}},
 		{"messages": []map[string]string{{"role": "user", "content": "hi"}}},
@@ -578,6 +514,9 @@ func TestAppAgentKeyUsesExplicitGrantsAcrossApps(t *testing.T) {
 		if code, out := h.do("POST", "/v1/chat/completions", key, body); code != http.StatusOK {
 			t.Fatalf("chat %v: %d %v", body, code, out)
 		}
+	}
+	if got := h.rt.ensured[len(h.rt.ensured)-1]; got != h.appA+"/"+editor {
+		t.Fatalf("default agent resolved to %s, want the sole grant", got)
 	}
 	code, out := h.do("POST", "/v1/chat/completions", key, map[string]any{
 		"agent_id": other, "messages": []map[string]string{{"role": "user", "content": "hi"}},

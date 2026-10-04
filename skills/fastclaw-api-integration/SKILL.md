@@ -10,11 +10,11 @@ Follow that document over guesses from existing dashboard code.
 
 FastClaw is the agent runtime; the upstream app owns its users, permissions,
 billing, chat records and IM channels. The runtime never calls the app back.
-Agents belong to the integrator's FastClaw account (and optionally to an
-app such as `douchat-prod`), never to an end-user — the integrating app must
-check "may this user use this agent?" before every call. For fixed agents an
-account-level `agent` key scoped to them is enough; use apps to separate
-environments or integrations that create their own agents.
+Agents belong to the integrator's FastClaw account (the API key's owner),
+not to any end-user — the integrating app must check "may this user use this
+agent?" before every call. For fixed agents, use an `agent` key granted just
+those agents; an integration that creates its own agents gets a `user` key on
+its own account.
 
 Use `/v1/*` only:
 
