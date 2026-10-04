@@ -428,7 +428,7 @@ export function ConsumerChatSidebar({
             </p>
             <button
               type="button"
-              onClick={() => router.push("/agents/?manage=1")}
+              onClick={() => router.push("/console/agents/")}
               className="mt-2 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
             >
               {t("sidebar.manageBots")}

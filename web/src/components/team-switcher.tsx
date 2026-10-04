@@ -188,7 +188,7 @@ export function AgentSwitcher({
             <DropdownMenuGroup>
               <DropdownMenuItem
                 className="gap-2 p-2"
-                onClick={() => router.push("/agents/?manage=1")}
+                onClick={() => router.push("/console/agents/")}
               >
                 <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
                   <PlusIcon className="size-4" />

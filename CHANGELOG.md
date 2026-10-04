@@ -51,6 +51,19 @@ agent ID will now get a 404 instead of a reply from some other agent.
   startup and never dropped, and cron/channel/webhook dispatch attaches any
   agent it needs. Smaller accounts load exactly as before.
 
+### Changed — management pages moved under `/console`
+
+The web UI now has two areas: the chat (`/agents/<id>/chat/…`,
+`/teams/…`, unchanged) and the console at `/console` for managing agents,
+models, skills, tools, plugins, channels, cron and API keys. Per-agent
+configuration pages moved from `/agents/<id>/<tab>` to
+`/console/agents/<id>/<tab>`; `/overview` is now `/console`. Old URLs
+(including `/agents/?manage=1`) redirect to their new location.
+
+After sign-in users return to where they were last: their last
+conversation, or the console page they had open. Accounts without agents
+land on `/console/agents/` to create one.
+
 ### Fixed
 
 - `GET /v1/usage?user_id=` and the `/v1/quota` endpoints accepted any user

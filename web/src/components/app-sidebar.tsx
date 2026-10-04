@@ -54,15 +54,16 @@ import {
 import { useLocale } from "@/components/locale-provider";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
 
-// Extract agent ID from pathname like /agents/default/chat/. The second
-// capture is an explicit allow-list of sub-routes so the bare /agents/
-// index keeps the Platform nav instead of flipping to Agent nav.
+// Extract agent ID from pathname like /agents/default/chat/ or an Agent's
+// console page like /console/agents/default/skills/. The second capture is
+// an explicit allow-list of sub-routes so the Agent list keeps the Platform
+// nav instead of flipping to Agent nav.
 // Add new agent-scoped routes here when they ship — `project` was
 // missed when the project chat route was introduced and that left
 // the sidebar showing the platform nav for /agents/<id>/project/...
 function extractAgentId(pathname: string): string | null {
   const match = pathname.match(
-    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler|project|team)/,
+    /^\/(?:console\/)?agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler|project|team|context|knowledge|mcp|plugins|usage)/,
   );
   return match ? match[1] : null;
 }
@@ -86,33 +87,36 @@ function extractTeamId(pathname: string): string | null {
 // and a slim User group with API Keys. Settings is a click-only item —
 // its onClick is attached at render time so it can call into component
 // state.
-const OVERVIEW_ITEM: NavItem = {
+// Overview is the console root, so a prefix match would light it up on
+// every console page; it's active only on /console itself.
+const overviewItem = (pathname: string): NavItem => ({
   title: "Overview",
-  url: "/overview/",
+  url: "/console/",
   icon: LayoutDashboardIcon,
-};
+  active: pathname.replace(/\/$/, "") === "/console",
+});
 
 const USER_AGENT_GROUP: NavItem[] = [
-  { title: "Agents", url: "/agents/?manage=1", icon: BotIcon },
-  { title: "Models", url: "/models/", icon: BrainIcon },
+  { title: "Agents", url: "/console/agents/", icon: BotIcon },
+  { title: "Models", url: "/console/models/", icon: BrainIcon },
 ];
 
 const ADMIN_AGENT_GROUP: NavItem[] = [
-  { title: "Agents", url: "/agents/?manage=1", icon: BotIcon },
-  { title: "Models", url: "/models/", icon: BrainIcon },
-  { title: "Skills", url: "/skills/", icon: SparklesIcon },
-  { title: "Tools", url: "/tools/", icon: WrenchIcon },
+  { title: "Agents", url: "/console/agents/", icon: BotIcon },
+  { title: "Models", url: "/console/models/", icon: BrainIcon },
+  { title: "Skills", url: "/console/skills/", icon: SparklesIcon },
+  { title: "Tools", url: "/console/tools/", icon: WrenchIcon },
 ];
 
 const USER_USER_GROUP: NavItem[] = [
-  { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
+  { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
 ];
 
 const ADMIN_USER_GROUP: NavItem[] = [
   { title: "Users", url: "/admin/users/", icon: UsersIcon },
   { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
   { title: "Token Usage", url: "/admin/usage/", icon: CoinsIcon },
-  { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
+  { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
 ];
 
 // "New chat" is active iff we're parked on the bare /chat/ page with
@@ -507,7 +511,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           />
         ) : (
           <>
-            <NavMain items={localizeNavItems([OVERVIEW_ITEM])} />
+            <NavMain items={localizeNavItems([overviewItem(pathname)])} />
             <NavMain
               label={t("common.agent")}
               items={localizeNavItems(isAdmin ? ADMIN_AGENT_GROUP : USER_AGENT_GROUP)}

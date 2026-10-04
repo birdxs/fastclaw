@@ -20,7 +20,7 @@ function agentIdFromPath(pathname: string | null | undefined): string {
   if (!pathname) return "";
   // Match /agents/<id>(/...)? — strict on the prefix so we don't
   // accidentally pull an id off some other route.
-  const m = pathname.match(/^\/agents\/([^/]+)/);
+  const m = pathname.match(/^\/(?:console\/)?agents\/([^/]+)/);
   return m ? m[1] : "";
 }
 

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -494,6 +495,112 @@ func (s *Server) Run(ctx context.Context) error {
 	return nil
 }
 
+// serveAgentPlaceholder serves <prefix><id>/<rest> from the static export's
+// single "default" placeholder (<prefix>default/<rest>). Static export
+// emits Agent routes once, for id "default"; both the chat routes
+// (agents/) and the Agent console pages (console/agents/) use it. Reports
+// whether it wrote a response.
+func (h spaHandler) serveAgentPlaceholder(w http.ResponseWriter, r *http.Request, prefix, rel string) bool {
+	parts := strings.SplitN(rel, "/", 2)
+	if parts[0] == "" || parts[0] == "default" {
+		return false
+	}
+	base := prefix + "default/"
+	serveFile := func(p string) bool {
+		f, err := h.fs.Open(p)
+		if err != nil {
+			return false
+		}
+		stat, statErr := f.Stat()
+		f.Close()
+		if statErr != nil || stat.IsDir() {
+			return false
+		}
+		http.ServeFileFS(w, r, h.fs, p)
+		return true
+	}
+	if len(parts) == 1 {
+		// The bare Agent URL (<prefix><id>/) has its own page too.
+		return serveFile(base + "index.html")
+	}
+	if serveFile(base+parts[1]) || serveFile(base+parts[1]+"/index.html") {
+		return true
+	}
+	// Nested dynamic segment fallback: routes like
+	// agents/[id]/chat/[session] and agents/[id]/project/[pid]
+	// emit a single placeholder ("_") at build time. Substitute
+	// "_" for any segment that sits immediately under a known
+	// dynamic-parent (chat, project, team), regardless of what
+	// follows. This covers BOTH the page HTML
+	//   /chat/<sid>/                            → /chat/_/index.html
+	// AND the per-route RSC payloads Next 16 fetches during
+	// client-side navigation:
+	//   /chat/<sid>/index.txt                   → /chat/_/index.txt
+	//   /chat/<sid>/__next.agents.$d$id.chat.$d$session.__PAGE__.txt
+	//   …
+	// Without this, App Router's RSC fetch on a sidebar click
+	// gets a 404 (or the root index.html), gives up on soft
+	// navigation, and falls back to window.location — which
+	// flickers the page and tears down any in-flight stream.
+	// Add new dynamic routes to dynamicParents below as they
+	// get introduced.
+	dynamicParents := map[string]bool{"chat": true, "project": true, "team": true}
+	sub := strings.Split(parts[1], "/")
+	substituted := false
+	for i := 0; i < len(sub)-1; i++ {
+		if dynamicParents[sub[i]] && sub[i+1] != "_" {
+			sub[i+1] = "_"
+			substituted = true
+		}
+	}
+	if !substituted {
+		return false
+	}
+	placeholder := base + strings.Join(sub, "/")
+	return serveFile(placeholder) || serveFile(placeholder+"/index.html")
+}
+
+// consoleTopLevel are the management pages that moved under /console.
+var consoleTopLevel = map[string]bool{
+	"models": true, "providers": true, "skills": true, "tools": true,
+	"plugins": true, "channels": true, "channels-config": true,
+	"cron": true, "apikeys": true,
+}
+
+// consoleAgentTabs are the per-Agent configuration pages that moved from
+// /agents/<id>/<tab> to /console/agents/<id>/<tab>. Chat routes stay put.
+var consoleAgentTabs = map[string]bool{
+	"channels": true, "context": true, "customize": true, "knowledge": true,
+	"mcp": true, "models": true, "plugins": true, "scheduler": true,
+	"sessions": true, "skills": true, "usage": true,
+}
+
+// legacyConsoleRedirect maps a pre-/console management URL to its new
+// home, so bookmarks and old links keep working. Only page URLs are
+// mapped: /channels/<file> stays a static asset (channel icons).
+func legacyConsoleRedirect(path string, query url.Values) (string, bool) {
+	trimmed := strings.Trim(path, "/")
+	parts := strings.Split(trimmed, "/")
+	target := ""
+	switch {
+	case trimmed == "overview":
+		target = "/console/"
+	case len(parts) == 1 && consoleTopLevel[trimmed]:
+		target = "/console/" + trimmed + "/"
+	case trimmed == "agents" && query.Get("manage") == "1":
+		query.Del("manage")
+		target = "/console/agents/"
+	case len(parts) >= 3 && parts[0] == "agents" && consoleAgentTabs[parts[2]]:
+		target = "/console/" + trimmed + "/"
+	default:
+		return "", false
+	}
+	if q := query.Encode(); q != "" {
+		target += "?" + q
+	}
+	return target, true
+}
+
 // spaHandler serves the embedded Next.js UI with SPA-style fallback.
 type spaHandler struct {
 	fs fs.FS
@@ -501,6 +608,12 @@ type spaHandler struct {
 
 func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
+	if r.Method == http.MethodGet || r.Method == http.MethodHead {
+		if target, ok := legacyConsoleRedirect(path, r.URL.Query()); ok {
+			http.Redirect(w, r, target, http.StatusFound)
+			return
+		}
+	}
 	if path != "/" && strings.HasSuffix(path, "/") {
 		path = strings.TrimSuffix(path, "/")
 	}
@@ -527,68 +640,9 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.ServeFileFS(w, r, h.fs, indexPath)
 		return
 	}
-	if strings.HasPrefix(fsPath, "agents/") {
-		parts := strings.SplitN(fsPath, "/", 3)
-		if len(parts) >= 3 && parts[1] != "default" {
-			directFallback := "agents/default/" + parts[2]
-			if f, err := h.fs.Open(directFallback); err == nil {
-				stat, statErr := f.Stat()
-				f.Close()
-				if statErr == nil && !stat.IsDir() {
-					http.ServeFileFS(w, r, h.fs, directFallback)
-					return
-				}
-			}
-			dirFallback := "agents/default/" + parts[2] + "/index.html"
-			if f, err := h.fs.Open(dirFallback); err == nil {
-				f.Close()
-				http.ServeFileFS(w, r, h.fs, dirFallback)
-				return
-			}
-			// Nested dynamic segment fallback: routes like
-			// agents/[id]/chat/[session] and agents/[id]/project/[pid]
-			// emit a single placeholder ("_") at build time. Substitute
-			// "_" for any segment that sits immediately under a known
-			// dynamic-parent (chat, project), regardless of what
-			// follows. This covers BOTH the page HTML
-			//   /chat/<sid>/                            → /chat/_/index.html
-			// AND the per-route RSC payloads Next 16 fetches during
-			// client-side navigation:
-			//   /chat/<sid>/index.txt                   → /chat/_/index.txt
-			//   /chat/<sid>/__next.agents.$d$id.chat.$d$session.__PAGE__.txt
-			//   …
-			// Without this, App Router's RSC fetch on a sidebar click
-			// gets a 404 (or the root index.html), gives up on soft
-			// navigation, and falls back to window.location — which
-			// flickers the page and tears down any in-flight stream.
-			// Add new dynamic routes to dynamicParents below as they
-			// get introduced.
-			dynamicParents := map[string]bool{"chat": true, "project": true, "team": true}
-			sub := strings.Split(parts[2], "/")
-			substituted := false
-			for i := 0; i < len(sub)-1; i++ {
-				if dynamicParents[sub[i]] && sub[i+1] != "_" {
-					sub[i+1] = "_"
-					substituted = true
-				}
-			}
-			if substituted {
-				placeholder := "agents/default/" + strings.Join(sub, "/")
-				if f, err := h.fs.Open(placeholder); err == nil {
-					stat, statErr := f.Stat()
-					f.Close()
-					if statErr == nil && !stat.IsDir() {
-						http.ServeFileFS(w, r, h.fs, placeholder)
-						return
-					}
-				}
-				placeholderIndex := placeholder + "/index.html"
-				if f, err := h.fs.Open(placeholderIndex); err == nil {
-					f.Close()
-					http.ServeFileFS(w, r, h.fs, placeholderIndex)
-					return
-				}
-			}
+	for _, prefix := range []string{"agents/", "console/agents/"} {
+		if strings.HasPrefix(fsPath, prefix) && h.serveAgentPlaceholder(w, r, prefix, strings.TrimPrefix(fsPath, prefix)) {
+			return
 		}
 	}
 	if strings.HasPrefix(fsPath, "teams/") {

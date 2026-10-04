@@ -6000,7 +6000,7 @@ function SlashMenu({
         })}
       </div>
       <Link
-        href="/skills/"
+        href="/console/skills/"
         className="flex items-center gap-2 border-t border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
       >
         <SlidersHorizontal className="h-3.5 w-3.5" />

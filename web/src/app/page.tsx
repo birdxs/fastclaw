@@ -2,19 +2,13 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getAgents, getStatus, getMe, login as loginApi } from "@/lib/api";
+import { getStatus, getMe, login as loginApi } from "@/lib/api";
 import { logout } from "@/lib/auth";
+import { resolveAppLanding } from "@/lib/landing";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useLocale } from "@/components/locale-provider";
-
-async function resolveAppLanding() {
-  const agents = await getAgents().catch(() => []);
-  return agents.length > 0
-    ? `/agents/${encodeURIComponent(agents[0].id)}/chat/`
-    : "/agents/?manage=1";
-}
 
 export default function RootPage() {
   const { tr } = useLocale();
