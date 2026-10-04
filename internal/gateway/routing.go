@@ -374,6 +374,13 @@ func (g *Gateway) matchAgent(ctx context.Context, space *UserSpace, msg bus.Inbo
 		if ag := space.Agents.AgentByID(msg.AgentID); ag != nil {
 			return ag
 		}
+		// On-demand spaces don't preload every owned agent; attach the
+		// target now. Restricted to agents this account owns.
+		if err := space.EnsureOwnedAgent(ctx, g.store, g.bus, g.workspace, msg.AgentID); err == nil {
+			if ag := space.Agents.AgentByID(msg.AgentID); ag != nil {
+				return ag
+			}
+		}
 	}
 	bindings := space.Config.Bindings
 	if len(bindings) == 0 {
@@ -410,6 +417,20 @@ func (g *Gateway) ensureForeignAgent(ctx context.Context, space *UserSpace, agen
 		return nil
 	}
 	return space.EnsureAgent(ctx, g.store, g.bus, g.workspace, agentID)
+}
+
+// ownedAgent returns agentID from space, attaching it on demand when the
+// space's account owns it. Callers that got agentID from an untrusted
+// place (LLM tool calls, webhook paths) use this instead of EnsureAgent
+// so they can never pull in someone else's agent.
+func (g *Gateway) ownedAgent(ctx context.Context, space *UserSpace, agentID string) *agent.Agent {
+	if ag := space.Agents.AgentByID(agentID); ag != nil {
+		return ag
+	}
+	if err := space.EnsureOwnedAgent(ctx, g.store, g.bus, g.workspace, agentID); err != nil {
+		return nil
+	}
+	return space.Agents.AgentByID(agentID)
 }
 
 func matchBinding(m config.Match, msg bus.InboundMessage) bool {
@@ -569,7 +590,7 @@ func (s *gatewaySubAgentSpawner) SpawnSubAgent(ctx context.Context, agentID stri
 	if err != nil {
 		return fmt.Sprintf("Error: load user space: %v", err)
 	}
-	ag := space.Agents.AgentByID(agentID)
+	ag := s.gateway.ownedAgent(ctx, space, agentID)
 	if ag == nil {
 		return fmt.Sprintf("Error: agent %q not found", agentID)
 	}
@@ -592,7 +613,7 @@ func (h *webhookAgentHandler) HandleMessage(ctx context.Context, agentID string,
 	if err != nil {
 		return "", err
 	}
-	ag := space.Agents.AgentByID(agentID)
+	ag := h.gateway.ownedAgent(ctx, space, agentID)
 	if ag == nil {
 		return "", fmt.Errorf("agent %q not found for user %q", agentID, msg.OwnerUserID)
 	}

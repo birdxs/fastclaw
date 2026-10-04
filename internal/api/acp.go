@@ -164,7 +164,7 @@ func (s *Server) handleACPGetAgent(w http.ResponseWriter, r *http.Request) {
 		writeACPError(w, http.StatusUnauthorized, "server_error", err.Error())
 		return
 	}
-	ag := resolveACPAgent(space, ident, r.PathValue("name"))
+	ag := s.resolveACPAgent(r, space, ident, r.PathValue("name"))
 	if ag == nil {
 		writeACPError(w, http.StatusNotFound, "not_found", "agent not found")
 		return
@@ -195,7 +195,7 @@ func (s *Server) handleACPCreateRun(w http.ResponseWriter, r *http.Request) {
 		writeACPError(w, http.StatusBadRequest, "invalid_input", "mode must be sync, async, or stream")
 		return
 	}
-	ag := resolveACPAgent(space, ident, req.AgentName)
+	ag := s.resolveACPAgent(r, space, ident, req.AgentName)
 	if ag == nil {
 		writeACPError(w, http.StatusNotFound, "not_found", "agent not found")
 		return
@@ -464,12 +464,19 @@ func acpManifestFor(ag *agent.Agent) map[string]any {
 	}
 }
 
-func resolveACPAgent(space *UserSpaceView, ident auth.Identity, name string) *agent.Agent {
+func (s *Server) resolveACPAgent(r *http.Request, space *UserSpaceView, ident auth.Identity, name string) *agent.Agent {
 	for _, ag := range space.Agents.All() {
 		if !ident.CanAccessAgent(ag.Name()) {
 			continue
 		}
 		if ag.Name() == name || acpAgentName(ag.Name()) == name {
+			return ag
+		}
+	}
+	// Apps with many agents load them on demand, so an agent addressed
+	// by its exact id may not be loaded yet.
+	if name != "" {
+		if ag, err := s.resolveChatAgent(r, name); err == nil {
 			return ag
 		}
 	}

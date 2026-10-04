@@ -61,6 +61,10 @@ type Store interface {
 
 	// --- Agents (atomic; agents.id is globally unique) ---
 	ListAgents(ctx context.Context, ownerUserID string) ([]AgentRecord, error)
+	// ListAgentIDs returns just the ids of the agents ownerUserID owns.
+	// Cheap enough to run per request (api-key ACL resolution) even for
+	// accounts with thousands of agents.
+	ListAgentIDs(ctx context.Context, ownerUserID string) ([]string, error)
 	ListPublicAgents(ctx context.Context) ([]AgentRecord, error)
 	GetAgent(ctx context.Context, agentID string) (*AgentRecord, error)
 	SaveAgent(ctx context.Context, agent *AgentRecord) error

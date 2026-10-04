@@ -1651,6 +1651,9 @@ func isIMChannel(channel string) bool {
 // Returns "" for web chats and any other caller that doesn't populate
 // SenderName, so we don't waste tokens.
 func renderSender(msg bus.InboundMessage) string {
+	if speaker := renderSpeaker(msg.Params); speaker != "" {
+		return speaker
+	}
 	if msg.SenderName == "" {
 		return ""
 	}
@@ -1666,6 +1669,37 @@ func renderSender(msg bus.InboundMessage) string {
 	}
 	if msg.PeerKind != "" {
 		fmt.Fprintf(&b, "- peer_kind: %s\n", msg.PeerKind)
+	}
+	return b.String()
+}
+
+// SpeakerParamKey is the internal params key carrying the group-chat
+// speaker an API caller named in `params.speaker`. Like every
+// __fastclaw key it is hidden from the Client Parameters block.
+const SpeakerParamKey = "__fastclawSpeaker"
+
+// renderSpeaker renders the API caller's group-chat speaker
+// ({"id": "...", "name": "..."}) as per-turn context. It lives only in
+// this turn's prompt — never in session history — and grants nothing:
+// the id is the calling app's user id, not a FastClaw identity.
+func renderSpeaker(params map[string]any) string {
+	raw, ok := params[SpeakerParamKey].(map[string]any)
+	if !ok {
+		return ""
+	}
+	id, _ := raw["id"].(string)
+	name, _ := raw["name"].(string)
+	id, name = strings.TrimSpace(id), strings.TrimSpace(name)
+	if id == "" && name == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Current Speaker\n\nThis conversation has several participants. The latest user turn was sent by:\n")
+	if name != "" {
+		fmt.Fprintf(&b, "- name: %s\n", name)
+	}
+	if id != "" {
+		fmt.Fprintf(&b, "- id: %s\n", id)
 	}
 	return b.String()
 }

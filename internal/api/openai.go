@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,12 +16,12 @@ import (
 
 // chatCompletionRequest mirrors the OpenAI chat completion request.
 //
-// User is OpenAI's standard "end-user identifier" field. When the
-// request authenticates with an api_key, a non-empty value triggers
-// rebinding the request identity to a fastclaw app_user keyed on
-// (apikey_id, user) so sessions and agent_files partition per
-// end-user. Clients that prefer a header-only contract can use
-// X-Fastclaw-End-User instead — both arrive at the same code path.
+// User is OpenAI's standard "end-user identifier" field. On an api_key
+// request it names the app's end-user, exactly like the
+// X-Fastclaw-End-User header: the end-user is a data namespace only.
+// The agent is still resolved from the app; the end-user decides where
+// the session history, USER.md and personal memory live. It never
+// changes which agents the request may use.
 type chatCompletionRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
@@ -67,6 +68,10 @@ type chatCompletionRequest struct {
 	// breadcrumb. Use Images / ImageURLs (not Attachments) when you
 	// want the bytes shown directly to a vision model.
 	Attachments []attachmentRequest `json:"attachments,omitempty"`
+	// ProjectID optionally files the conversation under one of the
+	// agent's projects (in the caller's namespace) so it shares that
+	// project's workspace. Omit for a loose chat.
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 // attachmentRequest is the wire form of a single attachment.
@@ -164,26 +169,20 @@ type completionUsage struct {
 func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var req chatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": "invalid request body", "type": "invalid_request_error"},
-		})
+		writeBadRequest(w, "invalid request body")
 		return
 	}
 
 	if len(req.Messages) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": "messages is required", "type": "invalid_request_error"},
-		})
+		writeBadRequest(w, "messages is required")
 		return
 	}
 
-	// OpenAI's `user` body field, when present on an api_key call,
-	// rebinds the identity to the corresponding app_user (lazy mint).
-	// Header X-Fastclaw-End-User does the same job pre-handler in the
-	// auth middleware; we run this *after* the middleware so the body
-	// value wins iff both are present (the body field is more
-	// specific to this call than a static header). Errors here are
-	// non-fatal — request continues under the unswitched identity.
+	// OpenAI's `user` body field names the end-user, like the
+	// X-Fastclaw-End-User header the auth middleware already applied.
+	// The body is more specific to this call, so it wins when both are
+	// present. Errors are non-fatal — the request continues in the
+	// app's own namespace.
 	if req.User != "" && s.authResolver != nil {
 		if ident, ok := auth.FromContext(r.Context()); ok {
 			if next, swErr := s.authResolver.SwitchToAppUser(r.Context(), ident, req.User); swErr == nil {
@@ -191,44 +190,28 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
-	// Resolve the caller's user space (set by authMiddleware) and pick an
-	// agent out of it.
-	space, err := s.userSpaceFor(r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "authentication_error"},
-		})
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		writeUnauth(w, "unauthorized")
 		return
 	}
 
 	// Body field beats header — same precedence as `user`. Lets app
 	// callers send everything in one JSON without juggling headers.
-	agentID := r.Header.Get("x-fastclaw-agent-id")
+	agentID := strings.TrimSpace(r.Header.Get("x-fastclaw-agent-id"))
 	if req.AgentID != "" {
-		agentID = req.AgentID
+		agentID = strings.TrimSpace(req.AgentID)
 	}
-	ag := resolveAgent(space, agentID)
-	if ag == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"error": map[string]string{"message": "agent not found", "type": "not_found_error"},
-		})
-		return
-	}
-	// Apikey ACL gate. UserSpaceFor loads every agent the owner has,
-	// regardless of which subset this particular apikey is scoped to.
-	// Without this check a type=agent apikey scoped to one agent
-	// could pass `x-fastclaw-agent-id: <sibling>` (or omit it and
-	// fall back to default / all[0]) and talk to any of the owner's
-	// agents. The /v1/agents listing already filters by
-	// CanAccessAgent — mirror that here so apikey scope is enforced
-	// uniformly. Use 404 (not 403) so the response is identical to
-	// the genuine "no such agent" case and the ACL doesn't leak the
-	// existence of out-of-scope agents.
-	if ident, ok := auth.FromContext(r.Context()); ok && !ident.CanAccessAgent(ag.Name()) {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"error": map[string]string{"message": "agent not found", "type": "not_found_error"},
-		})
+	// Strict: a named agent that isn't in this app is a 404 — never a
+	// silent fallback to the default agent. Agents outside the api key's
+	// ACL get the same 404 so their existence isn't revealed.
+	ag, err := s.resolveChatAgent(r, agentID)
+	if err != nil {
+		if errors.Is(err, errAgentNotFound) {
+			writeAgentNotFound(w)
+			return
+		}
+		writeUnauth(w, err.Error())
 		return
 	}
 
@@ -236,6 +219,18 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	sessionKey := r.Header.Get("x-fastclaw-session-key")
 	if sessionKey == "" {
 		sessionKey = "api-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+
+	projectID := strings.TrimSpace(req.ProjectID)
+	if projectID != "" {
+		if s.store == nil {
+			writeAPIError(w, http.StatusNotFound, errTypeNotFound, codeProjectNotFound, "project not found")
+			return
+		}
+		if p, perr := s.store.GetProject(r.Context(), ident.EffectiveUserID(), ag.Name(), projectID); perr != nil || p == nil {
+			writeAPIError(w, http.StatusNotFound, errTypeNotFound, codeProjectNotFound, "project not found")
+			return
+		}
 	}
 
 	// Extract the last user message
@@ -247,9 +242,7 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if userText == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": "no user message found", "type": "invalid_request_error"},
-		})
+		writeBadRequest(w, "no user message found")
 		return
 	}
 
@@ -260,12 +253,10 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// probe" notes here actively backfire — models reflexively run
 	// which/ls/file to "verify" the path when the prompt foregrounds it.
 	// PhotoURLs is preserved so vision LLMs still see the image inline.
-	// API clients can't address a project today — chat completions only
-	// know session_key — so attachments always land in the loose-chat
-	// scope. When/if we expose project addressing here, look up the
-	// session row and pass its project_id instead of "".
+	// Attachments land in the project's workspace when the request names
+	// a project, otherwise in the loose-chat scope.
 	atts := req.allAttachments()
-	attachmentPaths := ag.WriteSessionAttachments(r.Context(), sessionKey, "", atts)
+	attachmentPaths := ag.WriteSessionAttachments(r.Context(), sessionKey, projectID, atts)
 	if len(attachmentPaths) > 0 {
 		var b strings.Builder
 		for _, p := range attachmentPaths {
@@ -285,19 +276,28 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if channel == "" {
 		channel = "api"
 	}
+	// The chatter decides whose USER.md and personal memory the turn
+	// reads and writes. With an end-user it's that end-user's app_user;
+	// without one, every call shares the agent's own "api-user" memory.
+	chatter := "api-user"
+	if ident.EndUser != "" {
+		chatter = ident.EffectiveUserID()
+	}
 	msg := bus.InboundMessage{
 		Channel:   channel,
 		ChatID:    sessionKey,
-		UserID:    "api-user",
+		UserID:    chatter,
 		Text:      userText,
 		PeerKind:  "dm",
-		Params:    req.Params,
+		Params:    turnParams(req.Params),
 		PhotoURLs: req.inlineImageURLs(),
+		ProjectID: projectID,
 	}
 
 	slog.Info("chat completion request",
 		"agent", ag.Name(),
 		"session", sessionKey,
+		"end_user", ident.EndUser,
 		"stream", req.Stream != nil && *req.Stream,
 	)
 
@@ -401,23 +401,22 @@ func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// resolveAgent picks an agent out of the caller's user space, preferring an
-// explicit agent ID from the x-fastclaw-agent-id header and falling back to
-// the default / first agent.
-func resolveAgent(space *UserSpaceView, agentID string) *agent.Agent {
-	mgr := space.Agents
-	if agentID != "" {
-		if ag := mgr.AgentByID(agentID); ag != nil {
-			return ag
+// turnParams prepares the caller's params for the agent turn. A group
+// chat's `speaker` ({"id", "name"}) moves to the internal
+// __fastclawSpeaker key: the agent renders it as per-turn context so it
+// can tell group members apart, it is never persisted, and it isn't
+// echoed back as a tool parameter.
+func turnParams(params map[string]any) map[string]any {
+	speaker, ok := params["speaker"]
+	if !ok {
+		return params
+	}
+	out := make(map[string]any, len(params))
+	for k, v := range params {
+		if k != "speaker" {
+			out[k] = v
 		}
 	}
-	if def := mgr.DefaultAgent(); def != nil {
-		return def
-	}
-	all := mgr.All()
-	if len(all) > 0 {
-		return all[0]
-	}
-	return nil
+	out[agent.SpeakerParamKey] = speaker
+	return out
 }
-

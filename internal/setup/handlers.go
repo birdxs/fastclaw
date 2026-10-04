@@ -462,23 +462,45 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			resp["channels"] = chs
 		}
 	}
-	allAgents := s.resolveAllAgents(r)
-	if len(allAgents) > 0 {
-		var agentList []map[string]string
-		for _, ag := range allAgents {
-			id := ag.Name() // AgentHandle.Name() returns the agent id
-			entry := map[string]string{"id": id}
-			// Surface the human-friendly name from the agents row so the
-			// dashboard list reads "default" / "ImgAny" instead of
-			// "agt_…". Look-up failures fall back to id-only so a
-			// transient store error doesn't black out the panel.
-			if s.dataStore != nil {
-				if rec, _ := s.dataStore.GetAgent(r.Context(), id); rec != nil && rec.Name != "" {
+	var agentList []map[string]string
+	listed := map[string]bool{}
+	// Owned agents come from the agents table: accounts with many agents
+	// load them on demand, so the runtime only holds the ones in use.
+	if ident, ok := auth.FromContext(r.Context()); ok && s.dataStore != nil {
+		if recs, err := s.dataStore.ListAgents(r.Context(), ident.EffectiveUserID()); err == nil {
+			for _, rec := range recs {
+				if !ident.CanAccessAgent(rec.ID) {
+					continue
+				}
+				entry := map[string]string{"id": rec.ID}
+				if rec.Name != "" {
 					entry["name"] = rec.Name
 				}
+				agentList = append(agentList, entry)
+				listed[rec.ID] = true
 			}
-			agentList = append(agentList, entry)
 		}
+	}
+	// Plus anything attached to the caller's runtime that they don't own
+	// (public agents, api-key grants).
+	for _, ag := range s.resolveAllAgents(r) {
+		id := ag.Name() // AgentHandle.Name() returns the agent id
+		if listed[id] {
+			continue
+		}
+		entry := map[string]string{"id": id}
+		// Surface the human-friendly name from the agents row so the
+		// dashboard list reads "default" / "ImgAny" instead of
+		// "agt_…". Look-up failures fall back to id-only so a
+		// transient store error doesn't black out the panel.
+		if s.dataStore != nil {
+			if rec, _ := s.dataStore.GetAgent(r.Context(), id); rec != nil && rec.Name != "" {
+				entry["name"] = rec.Name
+			}
+		}
+		agentList = append(agentList, entry)
+	}
+	if len(agentList) > 0 {
 		resp["agents"] = agentList
 	}
 	jsonResponse(w, http.StatusOK, resp)

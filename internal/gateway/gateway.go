@@ -486,6 +486,14 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		}
 		ag := space.Agents.AgentByID(task.AgentID)
 		if ag == nil {
+			// Routing already authorized this agent for the space, but
+			// it may have been evicted (on-demand) or the space reloaded
+			// since. Re-attach rather than dropping the message.
+			if err := space.EnsureAgent(ctx, g.store, g.bus, g.workspace, task.AgentID); err == nil {
+				ag = space.Agents.AgentByID(task.AgentID)
+			}
+		}
+		if ag == nil {
 			return "", fmt.Errorf("agent %q not found", task.AgentID)
 		}
 		if len(task.Message.MediaItems) > 0 {

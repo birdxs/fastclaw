@@ -53,6 +53,26 @@ type Identity struct {
 	// user's resources read-only via ?actAs=. Mutating handlers MUST
 	// 403 when this is set.
 	ActAsUserID string
+
+	// AppUserID and EndUser are set when an api_key request named an
+	// end-user (X-Fastclaw-End-User header or the `user` body field) and
+	// SwitchToAppUser rebound UserID to that end-user's app_user record.
+	// AppUserID is the api_key owner — the app that owns the agents.
+	// EndUser is the caller's external id for the end-user. UserID then
+	// only names the data namespace (sessions, USER.md, personal memory);
+	// agents are always resolved against AppUserID.
+	AppUserID string
+	EndUser   string
+}
+
+// AppID returns the account that owns the app this request acts for:
+// the api_key owner, even when UserID was switched to an end-user
+// namespace. Agents are resolved against it.
+func (i Identity) AppID() string {
+	if i.AppUserID != "" {
+		return i.AppUserID
+	}
+	return i.EffectiveUserID()
 }
 
 // EffectiveUserID is who we read data for. For super_admin in actAs mode
@@ -267,17 +287,25 @@ func (r *Resolver) SwitchToAppUser(ctx context.Context, ident Identity, external
 	if ident.AuthMethod != "apikey" || ident.APIKeyID == "" {
 		return ident, errors.New("auth.SwitchToAppUser: api_key auth required")
 	}
-	// Already an app_user (request switched once) — re-keying off the
-	// app_user's own id would mint a nested user. No-op instead.
+	// Key the app_user on the api_key's OWNER account so rotating or
+	// replacing the api_key keeps the same user.
+	owner := ident.UserID
 	if ident.Role == users.RoleAppUser {
-		return ident, nil
+		// Already switched once (header) — re-keying off the app_user's
+		// own id would mint a nested user. A different end-user named in
+		// the body re-keys off the app owner instead; anything else is a
+		// no-op.
+		if ident.AppUserID == "" || ident.EndUser == externalID {
+			return ident, nil
+		}
+		owner = ident.AppUserID
 	}
-	// ident.UserID is the api_key's owner account here (pre-switch); key the
-	// app_user on it so rotating/replacing the api_key keeps the same user.
-	acc, err := r.accounts.EnsureAppUser(ctx, ident.UserID, externalID, "", ident.APIKeyID)
+	acc, err := r.accounts.EnsureAppUser(ctx, owner, externalID, "", ident.APIKeyID)
 	if err != nil {
 		return ident, err
 	}
+	ident.AppUserID = owner
+	ident.EndUser = externalID
 	ident.UserID = acc.ID
 	ident.Role = acc.Role
 	return ident, nil

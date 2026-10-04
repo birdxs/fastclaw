@@ -2448,6 +2448,24 @@ func (d *DBStore) ListAgents(ctx context.Context, ownerUserID string) ([]AgentRe
 	return scanAgents(rows)
 }
 
+func (d *DBStore) ListAgentIDs(ctx context.Context, ownerUserID string) ([]string, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id FROM agents WHERE user_id = %s`, d.ph(1)), ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (d *DBStore) ListPublicAgents(ctx context.Context) ([]AgentRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
 		`SELECT `+agentSelectCols+` FROM agents WHERE is_public = TRUE ORDER BY updated_at DESC`)
