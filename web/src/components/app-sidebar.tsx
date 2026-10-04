@@ -23,6 +23,7 @@ import {
   type ConsumerTeamItem,
 } from "@/components/consumer-chat-sidebar";
 import {
+  BookOpenIcon,
   BotIcon,
   GaugeIcon,
   BrainIcon,
@@ -84,6 +85,7 @@ const consoleNav = (pathname: string): NavItem[] => [
   { title: "Models", url: "/console/models/", icon: BrainIcon },
   { title: "Skills", url: "/console/skills/", icon: SparklesIcon },
   { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
+  { title: "Integration", url: "/console/integration/", icon: BookOpenIcon },
 ];
 
 // The /admin sidebar: deployment-wide pages, super_admin only (AuthGuard
@@ -345,6 +347,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             Chats: "聊天记录",
             "Token Usage": "Token 用量",
             "API Keys": "API 密钥",
+            Integration: "接入文档",
             About: "关于",
             "New chat": "新建对话",
           } as Record<string, string>)[item.title] || item.title,

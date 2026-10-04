@@ -3,7 +3,8 @@
 Use this skill when integrating an upstream application with FastClaw as an
 agent runtime.
 
-The canonical reference is `docs/upstream-api.md` in the FastClaw repository.
+The canonical reference is `docs/upstream-api.md` in the FastClaw repository;
+every FastClaw also serves it at `<base URL>/integration.md`.
 Follow that document over guesses from existing dashboard code.
 
 ## Integration Boundary

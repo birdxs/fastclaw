@@ -36,7 +36,13 @@ bundle-skills:
 	@cp -R skills/find-skills internal/agent/bundled_skills/find-skills
 	@echo "==> bundled skills synced"
 
-build: build-web bundle-skills
+# bundle-docs copies docs served by the binary into its embed tree
+# (/integration.md). TestIntegrationDocMatchesDocs fails when it's stale.
+bundle-docs:
+	@cp docs/upstream-api.md internal/setup/apidocs/upstream-api.md
+	@echo "==> bundled docs synced"
+
+build: build-web bundle-skills bundle-docs
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/fastclaw ./cmd/fastclaw
 
 install: build
@@ -59,7 +65,7 @@ clean:
 	rm -rf bin/ dist/ tmp/
 
 # Build all platforms
-release-local: build-web bundle-skills
+release-local: build-web bundle-skills bundle-docs
 	@mkdir -p dist
 	@# macOS
 	GOOS=darwin  GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o dist/fastclaw_darwin_arm64/fastclaw  ./cmd/fastclaw
