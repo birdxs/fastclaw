@@ -13,13 +13,13 @@ interface AuthGuardProps {
 // authoritatively; the client gate just stops non-admins from landing on a
 // page that would render an empty / 403'd shell.
 //
-// /settings, /console/models, and /console/apikeys are intentionally NOT here —
-// settings hides Runtime; models merges system+user with badges;
-// apikeys lets non-admins issue type=user/agent (only type=admin
-// requires super_admin and that gate lives inside the create handler).
+// /settings and the console's user-level pages (/console, agents, models,
+// skills, apikeys) are intentionally NOT here — they show the caller's own
+// configuration; apikeys lets non-admins issue type=user/agent (only
+// type=admin requires super_admin and that gate lives inside the create
+// handler).
 const ADMIN_PATH_PREFIXES = [
   "/admin/",
-  "/console/skills",
   "/console/providers",
   "/console/channels",
   "/console/channels-config",

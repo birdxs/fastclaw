@@ -29,15 +29,11 @@ import {
 import {
   BotIcon,
   BrainIcon,
-  CoinsIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
-  MessagesSquareIcon,
   PlusIcon,
   SettingsIcon,
   SparklesIcon,
-  UsersIcon,
-  WrenchIcon,
 } from "lucide-react";
 import {
   getAgent,
@@ -74,48 +70,22 @@ function extractTeamId(pathname: string): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-// Sidebar nav is rendered as a series of labeled sections so users can
-// scan it by domain instead of one flat list:
-//
-//   (no label)  Overview                              — landing dashboard
-//   Agent       Agents · Models · Skills · Tools      — agent-building surfaces
-//   User        Users · Chats · Token Usage · API Keys — admin platform tools
-//   (no label)  Settings                              — opens the user dialog
-//
-// Skills / Tools and the Users/Chats/Token-Usage admin entries are
-// admin-only. Non-admin sees the Agent group with just Agents + Models,
-// and a slim User group with API Keys. Settings is a click-only item —
-// its onClick is attached at render time so it can call into component
-// state.
+// The console sidebar is one flat list of the caller's own (user-level)
+// pages — the same for every account. Deployment-wide configuration
+// (users, all chats, token usage, system models / skills / tools) lives
+// in the System section of the Settings dialog for super_admins instead.
 // Overview is the console root, so a prefix match would light it up on
 // every console page; it's active only on /console itself.
-const overviewItem = (pathname: string): NavItem => ({
-  title: "Overview",
-  url: "/console/",
-  icon: LayoutDashboardIcon,
-  active: pathname.replace(/\/$/, "") === "/console",
-});
-
-const USER_AGENT_GROUP: NavItem[] = [
-  { title: "Agents", url: "/console/agents/", icon: BotIcon },
-  { title: "Models", url: "/console/models/", icon: BrainIcon },
-];
-
-const ADMIN_AGENT_GROUP: NavItem[] = [
+const consoleNav = (pathname: string): NavItem[] => [
+  {
+    title: "Overview",
+    url: "/console/",
+    icon: LayoutDashboardIcon,
+    active: pathname.replace(/\/$/, "") === "/console",
+  },
   { title: "Agents", url: "/console/agents/", icon: BotIcon },
   { title: "Models", url: "/console/models/", icon: BrainIcon },
   { title: "Skills", url: "/console/skills/", icon: SparklesIcon },
-  { title: "Tools", url: "/console/tools/", icon: WrenchIcon },
-];
-
-const USER_USER_GROUP: NavItem[] = [
-  { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
-];
-
-const ADMIN_USER_GROUP: NavItem[] = [
-  { title: "Users", url: "/admin/users/", icon: UsersIcon },
-  { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
-  { title: "Token Usage", url: "/admin/usage/", icon: CoinsIcon },
   { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
 ];
 
@@ -510,17 +480,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             items={localizeNavItems(AGENT_NAV(activeAgentId, pathname, hasOpenSession))}
           />
         ) : (
-          <>
-            <NavMain items={localizeNavItems([overviewItem(pathname)])} />
-            <NavMain
-              label={t("common.agent")}
-              items={localizeNavItems(isAdmin ? ADMIN_AGENT_GROUP : USER_AGENT_GROUP)}
-            />
-            <NavMain
-              label={t("common.user")}
-              items={localizeNavItems(isAdmin ? ADMIN_USER_GROUP : USER_USER_GROUP)}
-            />
-          </>
+          <NavMain items={localizeNavItems(consoleNav(pathname))} />
         )}
         {/* Projects are per-(user, agent), so viewers on a shared agent
             see/create their OWN projects — the owner's projects stay

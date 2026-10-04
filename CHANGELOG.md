@@ -60,6 +60,12 @@ configuration pages moved from `/agents/<id>/<tab>` to
 `/console/agents/<id>/<tab>`; `/overview` is now `/console`. Old URLs
 (including `/agents/?manage=1`) redirect to their new location.
 
+The console sidebar is one flat list of the account's own pages —
+Overview, Agents, Models, Skills, API Keys — for every account.
+`/console/models` and `/console/skills` show the caller's own (user-level)
+configuration; super_admins manage deployment-wide users, chats, usage,
+models, skills and tools from the System section of the Settings dialog.
+
 After sign-in users return to where they were last: their last
 conversation, or the console page they had open. Accounts without agents
 land on `/console/agents/` to create one.
