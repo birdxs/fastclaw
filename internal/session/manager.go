@@ -673,6 +673,7 @@ func (s *Session) appendToFile(msg provider.Message) {
 // pointing at a chat_id still resolve via the agent-side fallback
 // (ResolveSessionKey) so existing bookmarks don't break.
 type WebSession struct {
+	Status    string `json:"status,omitempty"`
 	ID        string `json:"id"`
 	Channel   string `json:"channel,omitempty"`
 	AccountID string `json:"accountId,omitempty"`

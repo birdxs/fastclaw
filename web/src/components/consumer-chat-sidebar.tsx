@@ -1,8 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import { ChevronDown, ChevronsLeft, ChevronsRight, ImagePlus, Plus, Search } from "lucide-react";
+import { useRouter, usePathname } from "next/navigation";
+import { Bot, Check, ChevronDown, ChevronsLeft, ChevronsRight, ImagePlus, Plus, Search, UsersRound } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -26,10 +26,17 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { BotAvatar } from "@/components/bot-avatar";
+import { TeamAvatarStack } from "@/components/team-avatar-stack";
 import { NavUser } from "@/components/nav-user";
 import { useLocale, type Locale } from "@/components/locale-provider";
-import { apiFetch, createAgent, type MeResponse } from "@/lib/api";
+import { apiFetch, createAgent, updateConfig, getTeamInbox, type TeamInboxNotice, type MeResponse, type TeamEntry } from "@/lib/api";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
 
 export interface ConsumerAgentItem {
@@ -40,6 +47,11 @@ export interface ConsumerAgentItem {
   avatarUrl?: string;
   sessionId?: string;
   updatedAt?: number;
+}
+
+export interface ConsumerTeamItem extends TeamEntry {
+  id: string;
+  name: string;
 }
 
 const AGENT_PAGE_SIZE = 20;
@@ -101,21 +113,52 @@ function relativeSessionTime(updatedAt: number | undefined, locale: Locale) {
 
 export function ConsumerChatSidebar({
   activeAgentId,
+  activeTeamId,
   agents,
+  teams = [],
   loading = false,
   me,
 }: {
-  activeAgentId: string;
+  activeAgentId?: string;
+  activeTeamId?: string;
   agents: ConsumerAgentItem[];
+  teams?: ConsumerTeamItem[];
   loading?: boolean;
   me: MeResponse | null;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
+  const [inbox, setInbox] = React.useState<TeamInboxNotice[]>([]);
+  React.useEffect(() => {
+    const uid = me?.user?.id;
+    if (!uid) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        const { messages } = await getTeamInbox();
+        if (cancelled) return;
+        const unread = (messages || []).filter((notice) => {
+          const key = `fastclaw:group-inbox-read:${uid}:${notice.agentId}:${notice.sessionId}`;
+          if (pathname === `/agents/${encodeURIComponent(notice.agentId)}/chat/${encodeURIComponent(notice.sessionId)}/`) {
+            localStorage.setItem(key, String(Math.max(Number(localStorage.getItem(key) || 0), notice.timestamp)));
+            return false;
+          }
+          return notice.timestamp > Number(localStorage.getItem(key) || 0);
+        });
+        setInbox(unread);
+      } catch { /* Retry on the next poll. */ }
+      finally { if (!cancelled) timer = setTimeout(refresh, 3000); }
+    };
+    void refresh();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [me?.user?.id, pathname]);
   const { state: sidebarState, toggleSidebar } = useSidebar();
   const { locale, t, tr } = useLocale();
   const [query, setQuery] = React.useState("");
   const [visibleCount, setVisibleCount] = React.useState(AGENT_PAGE_SIZE);
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [createTeamOpen, setCreateTeamOpen] = React.useState(false);
 
   const filtered = React.useMemo(() => {
     const q = query.trim().toLocaleLowerCase();
@@ -129,10 +172,22 @@ export function ConsumerChatSidebar({
     [filtered, visibleCount],
   );
   const hasMoreAgents = visibleAgents.length < filtered.length;
+  const filteredTeams = React.useMemo(() => {
+    const q = query.trim().toLocaleLowerCase();
+    if (!q) return teams;
+    return teams.filter((team) => {
+      const memberNames = team.agents
+        .map((id) => agents.find((agent) => agent.id === id)?.name || id)
+        .join(" ");
+      return `${team.name} ${memberNames}`.toLocaleLowerCase().includes(q);
+    });
+  }, [agents, query, teams]);
 
   const openAgent = (agent: ConsumerAgentItem) => {
     const base = `/agents/${encodeURIComponent(agent.id)}/chat/`;
-    const target = agent.sessionId ? `${base}${encodeURIComponent(agent.sessionId)}/` : base;
+    const latestPrivate = inbox.filter((notice) => notice.agentId === agent.id).sort((a, b) => b.timestamp - a.timestamp)[0];
+    const sessionId = latestPrivate?.sessionId || agent.sessionId;
+    const target = sessionId ? `${base}${encodeURIComponent(sessionId)}/` : base;
     // This row came from the caller's authenticated agent list, so the access
     // gate can safely keep the current shell visible during the route swap.
     rememberAgentAccess(agent.id);
@@ -142,6 +197,12 @@ export function ConsumerChatSidebar({
     // its reactive router, so this swaps only the active conversation while
     // the left list stays mounted and visually stable.
     window.history.pushState(null, "", target);
+  };
+
+  const openTeam = (team: ConsumerTeamItem) => {
+    const sessionId = team.sessionId || `team-${team.id}`;
+    rememberAgentAccess(team.agents);
+    window.history.pushState(null, "", `/teams/${encodeURIComponent(team.id)}/chat/${encodeURIComponent(sessionId)}/`);
   };
 
   return (
@@ -203,15 +264,30 @@ export function ConsumerChatSidebar({
               className="h-8 w-full rounded-md border border-black/7 bg-black/[0.035] pl-8 pr-2.5 text-sm outline-none transition focus:border-black/15 focus:bg-white focus:ring-2 focus:ring-black/5 dark:border-white/8 dark:bg-white/[0.055] dark:focus:border-white/15 dark:focus:bg-white/[0.08]"
             />
           </div>
-          <button
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/8"
-            aria-label={t("sidebar.createBot")}
-            title={t("sidebar.createBot")}
-          >
-            <Plus className="size-4" />
-          </button>
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <button
+                  type="button"
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/8"
+                  aria-label={tr("Create", "新建")}
+                  title={tr("Create", "新建")}
+                >
+                  <Plus className="size-4" />
+                </button>
+              }
+            />
+            <DropdownMenuContent align="end" sideOffset={7} className="w-52 rounded-xl p-1.5">
+              <DropdownMenuItem onClick={() => setCreateOpen(true)} className="h-10 gap-2 rounded-lg px-2.5">
+                <Bot className="size-4" />
+                {t("sidebar.createBot")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setCreateTeamOpen(true)} className="h-10 gap-2 rounded-lg px-2.5">
+                <UsersRound className="size-4" />
+                {tr("Create group chat", "创建群聊")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </SidebarHeader>
 
@@ -238,8 +314,39 @@ export function ConsumerChatSidebar({
               </span>
             </>
           )}
+          {filteredTeams.map((team) => {
+            const members = team.agents
+              .map((id) => agents.find((agent) => agent.id === id))
+              .filter((agent): agent is ConsumerAgentItem => !!agent);
+            const memberLabel = members.map((member) => member.name).join("、");
+            return (
+              <SidebarMenuItem key={`team-${team.id}`}>
+                <SidebarMenuButton
+                  isActive={activeTeamId === team.id}
+                  onClick={() => openTeam(team)}
+                  tooltip={team.name}
+                  className="h-[58px] gap-3 rounded-lg px-2.5 py-2 data-active:bg-[#e9e3ec] data-active:font-normal hover:bg-black/[0.05] group-data-[collapsible=icon]:size-12! group-data-[collapsible=icon]:rounded-xl group-data-[collapsible=icon]:p-[7px]! dark:data-active:bg-[#3a303d] dark:hover:bg-white/[0.07]"
+                >
+                  <TeamAvatarStack members={members} size={34} />
+                  <span className="grid min-w-0 flex-1 gap-0.5 group-data-[collapsible=icon]:hidden">
+                    <span className="flex min-w-0 items-baseline justify-between gap-2">
+                      <span className="truncate text-[15px] font-semibold leading-5 text-foreground">
+                        {team.name}
+                      </span>
+                      <span className="shrink-0 rounded-full bg-[#e8e1eb] px-1.5 py-0.5 text-[10px] font-semibold text-[#756878] dark:bg-white/10 dark:text-[#c9bdcc]">
+                        {tr("Group", "群聊")}
+                      </span>
+                    </span>
+                    <span className="truncate text-[13px] font-normal leading-5 text-muted-foreground">
+                      {memberLabel || tr("No Agents", "暂无 Agent")}
+                    </span>
+                  </span>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            );
+          })}
           {visibleAgents.map((agent) => {
-            const active = activeAgentId === agent.id;
+            const active = !activeTeamId && activeAgentId === agent.id;
             const summary = agent.preview || agent.description || t("sidebar.greeting", { name: agent.name });
             return (
               <SidebarMenuItem key={agent.id}>
@@ -259,6 +366,7 @@ export function ConsumerChatSidebar({
                     <span className="flex min-w-0 items-baseline justify-between gap-2">
                       <span className="truncate text-[15px] font-semibold leading-5 text-foreground">
                         {agent.name || t("sidebar.untitledBot")}
+                        {inbox.some((notice) => notice.agentId === agent.id) && <span aria-label={tr("Unread private messages", "未读私信")} className="ml-2 inline-flex min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] leading-4 text-white">{inbox.filter((notice) => notice.agentId === agent.id).length}</span>}
                       </span>
                       <span className="shrink-0 text-[11px] font-normal text-muted-foreground/80">
                         {relativeSessionTime(agent.updatedAt, locale)}
@@ -288,17 +396,32 @@ export function ConsumerChatSidebar({
           )}
         </SidebarMenu>
 
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
-          className="mx-auto mt-2 hidden size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:flex dark:hover:bg-white/8"
-          aria-label={t("sidebar.createBot")}
-          title={t("sidebar.createBot")}
-        >
-          <Plus className="size-4" />
-        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <button
+                type="button"
+                className="mx-auto mt-2 hidden size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:flex dark:hover:bg-white/8"
+                aria-label={tr("Create", "新建")}
+                title={tr("Create", "新建")}
+              >
+                <Plus className="size-4" />
+              </button>
+            }
+          />
+          <DropdownMenuContent side="right" align="start" sideOffset={8} className="w-48 rounded-xl p-1.5">
+            <DropdownMenuItem onClick={() => setCreateOpen(true)} className="h-9 gap-2 rounded-lg px-2.5">
+              <Bot className="size-4" />
+              {t("sidebar.createBot")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setCreateTeamOpen(true)} className="h-9 gap-2 rounded-lg px-2.5">
+              <UsersRound className="size-4" />
+              {tr("Create group chat", "创建群聊")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
-        {!loading && filtered.length === 0 && (
+        {!loading && filtered.length === 0 && filteredTeams.length === 0 && (
           <div className="mx-2 mt-4 rounded-lg border border-dashed border-black/10 px-4 py-8 text-center group-data-[collapsible=icon]:hidden dark:border-white/10">
             <p className="text-sm font-medium">
               {query ? t("sidebar.noMatches") : t("sidebar.noBots")}
@@ -329,7 +452,194 @@ export function ConsumerChatSidebar({
           router.push(`/agents/${encodeURIComponent(agentId)}/chat/`);
         }}
       />
+      <CreateTeamDialog
+        open={createTeamOpen}
+        onOpenChange={setCreateTeamOpen}
+        agents={agents}
+        onCreated={(team) => {
+          window.dispatchEvent(new CustomEvent("fastclaw:teams-changed"));
+          openTeam(team);
+        }}
+      />
     </>
+  );
+}
+
+function CreateTeamDialog({
+  open,
+  onOpenChange,
+  agents,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  agents: ConsumerAgentItem[];
+  onCreated: (team: ConsumerTeamItem) => void;
+}) {
+  const { tr } = useLocale();
+  const [name, setName] = React.useState("");
+  const [query, setQuery] = React.useState("");
+  const [selected, setSelected] = React.useState<string[]>([]);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  const reset = () => {
+    setName("");
+    setQuery("");
+    setSelected([]);
+    setSaving(false);
+    setError("");
+  };
+  const close = () => {
+    onOpenChange(false);
+    reset();
+  };
+  const visibleAgents = agents.filter((agent) =>
+    `${agent.name} ${agent.description || ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
+
+  const createTeam = async () => {
+    const teamName = name.trim();
+    if (!teamName || selected.length < 2 || saving) return;
+    setSaving(true);
+    setError("");
+    const id = `tm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const sessionId = `tc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const entry: TeamEntry = {
+      name: teamName,
+      agents: selected,
+      defaultAgent: selected[0],
+      sessionId,
+      groupBehavior: "coordinated",
+      createdAt: Date.now(),
+    };
+    try {
+      const response = await updateConfig({ teams: { [id]: entry } }, "user");
+      if (!response?.ok) {
+        setError(response?.error || tr("Failed to create group chat", "创建群聊失败"));
+        return;
+      }
+      close();
+      onCreated({ id, ...entry, name: teamName });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : tr("Failed to create group chat", "创建群聊失败"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) onOpenChange(true);
+        else close();
+      }}
+    >
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{tr("Create group chat", "创建群聊")}</DialogTitle>
+          <DialogDescription>
+            {tr(
+              "Choose at least two Agents. Mention one by name, or use @all when everyone should answer.",
+              "选择至少两个 Agent。对话中可以 @某个 Agent，或用 @all 让所有成员回复。",
+            )}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-1">
+          <div className="space-y-2">
+            <Label htmlFor="team-name">{tr("Group name", "群聊名称")}</Label>
+            <Input
+              id="team-name"
+              value={name}
+              onChange={(event) => {
+                setName(event.target.value);
+                setError("");
+              }}
+              placeholder={tr("Launch crew", "项目讨论组")}
+              autoFocus
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="team-agent-search">{tr("Members", "群成员")}</Label>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                id="team-agent-search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={tr("Search Agents", "搜索 Agent")}
+                className="pl-9"
+              />
+            </div>
+            <div className="max-h-64 space-y-1 overflow-y-auto rounded-xl border p-1.5">
+              {visibleAgents.map((agent) => {
+                const checked = selected.includes(agent.id);
+                return (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    onClick={() => {
+                      setSelected((current) => checked
+                        ? current.filter((id) => id !== agent.id)
+                        : [...current, agent.id]);
+                      setError("");
+                    }}
+                    className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition ${
+                      checked ? "bg-[#eee9f0] dark:bg-[#342d36]" : "hover:bg-muted/70"
+                    }`}
+                  >
+                    <BotAvatar agentId={agent.id} avatarUrl={agent.avatarUrl} seed={agent.id} size={34} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold">{agent.name}</span>
+                      {agent.description && (
+                        <span className="block truncate text-xs text-muted-foreground">{renderInlineMarkdown(agent.description, `team-${agent.id}`)}</span>
+                      )}
+                    </span>
+                    <span className={`flex size-5 items-center justify-center rounded-full border transition ${
+                      checked
+                        ? "border-[#79677f] bg-[#79677f] text-white"
+                        : "border-border text-transparent"
+                    }`}>
+                      <Check className="size-3" />
+                    </span>
+                  </button>
+                );
+              })}
+              {visibleAgents.length === 0 && (
+                <p className="px-3 py-8 text-center text-sm text-muted-foreground">
+                  {tr("No matching Agents", "没有匹配的 Agent")}
+                </p>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {tr("{{count}} selected", "已选择 {{count}} 个", { count: selected.length })}
+            </p>
+          </div>
+          {agents.length < 2 && (
+            <p className="text-sm text-amber-700 dark:text-amber-300">
+              {tr("Create at least two Agents before starting a group chat.", "至少创建两个 Agent 后才能发起群聊。")}
+            </p>
+          )}
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={close}>
+            {tr("Cancel", "取消")}
+          </Button>
+          <Button
+            type="button"
+            onClick={() => void createTeam()}
+            disabled={!name.trim() || selected.length < 2 || saving}
+          >
+            {saving ? tr("Creating…", "正在创建…") : tr("Create group", "创建群聊")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

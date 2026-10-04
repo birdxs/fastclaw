@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
@@ -42,6 +43,8 @@ type Server struct {
 	limiter      *rateLimiter
 	meter        usage.Meter
 	quotaStore   usage.QuotaStore
+	acpMu        sync.Mutex
+	acpRuns      map[string]*acpRunState
 }
 
 // NewServer creates a new API server. authResolver is mandatory — there is
@@ -63,6 +66,7 @@ func NewServer(resolver UserResolver, authResolver *auth.Resolver, gatewayCfg *c
 func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ws", s.HandleWebSocket)
 	mux.HandleFunc("OPTIONS /v1/", s.handleCORS)
+	mux.HandleFunc("OPTIONS /acp/", s.handleCORS)
 
 	getUserID := func(r *http.Request) string { return config.UserIDFromContext(r.Context()) }
 
@@ -93,6 +97,11 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		s.authMiddleware(rateLimitMiddleware(s.limiter, getUserID, s.HandleGetQuota)))
 	mux.HandleFunc("DELETE /v1/quota",
 		s.authMiddleware(rateLimitMiddleware(s.limiter, getUserID, s.HandleDeleteQuota)))
+
+	// Agent Communication Protocol (ACP) 0.2. The protocol defines root
+	// paths such as /agents and /runs relative to a server base URL. FastClaw
+	// exposes that base at /acp because /agents is already a dashboard route.
+	s.registerACPRoutes(mux, getUserID)
 }
 
 // SetMeter installs the token usage meter for the /v1/usage endpoint.
@@ -109,7 +118,8 @@ func (s *Server) RegisterAdminRoutes(mux *http.ServeMux) {}
 func (s *Server) handleCORS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-fastclaw-agent-id, x-fastclaw-session-key")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, x-fastclaw-agent-id, x-fastclaw-session-key, x-fastclaw-end-user")
+	w.Header().Set("Access-Control-Expose-Headers", "Run-ID")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	w.WriteHeader(http.StatusNoContent)
 }

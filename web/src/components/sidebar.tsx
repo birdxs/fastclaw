@@ -37,9 +37,10 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
   // session, not the impersonated user — hiding it (and its collapse
   // toggle) keeps the surface focused on the conversation being inspected.
   const isActAsView = !!searchParams?.get("actAs");
-  const isConversationRoute = /^\/agents\/[^/]+\/(chat|project)(?:\/|$)/.test(
-    usePathname() || "",
-  );
+  const pathname = usePathname() || "";
+  const isConversationRoute =
+    /^\/agents\/[^/]+\/(chat|project|team)(?:\/|$)/.test(pathname) ||
+    /^\/teams\/[^/]+\/chat\/[^/]+(?:\/|$)/.test(pathname);
 
   const headerCtx = React.useMemo<PageHeaderContextValue>(
     () => ({ setNode: setHeaderNode }),

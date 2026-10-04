@@ -24,6 +24,7 @@ import {
 import {
   ConsumerChatSidebar,
   type ConsumerAgentItem,
+  type ConsumerTeamItem,
 } from "@/components/consumer-chat-sidebar";
 import {
   BotIcon,
@@ -42,6 +43,7 @@ import {
   getAgent,
   getAgents,
   getChatSessions,
+  getConfig,
   getMe,
   getStatus,
   listProjects,
@@ -60,9 +62,15 @@ import { rememberAgentAccess } from "@/lib/agent-access-cache";
 // the sidebar showing the platform nav for /agents/<id>/project/...
 function extractAgentId(pathname: string): string | null {
   const match = pathname.match(
-    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler|project)/,
+    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler|project|team)/,
   );
   return match ? match[1] : null;
+}
+
+function extractTeamId(pathname: string): string | null {
+  const match = pathname.match(/^\/teams\/([^/]+)\/chat\/[^/]+/) ||
+    pathname.match(/^\/agents\/[^/]+\/team\/([^/]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
 }
 
 // Sidebar nav is rendered as a series of labeled sections so users can
@@ -140,12 +148,14 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const activeAgentId = extractAgentId(pathname);
+  const activeTeamId = extractTeamId(pathname);
   const hasOpenSession = !!searchParams?.get("session");
 
   const [status, setStatus] = React.useState<StatusResponse | null>(null);
   const [me, setMe] = React.useState<MeResponse | null>(null);
   const [agents, setAgents] = React.useState<AgentSwitcherItem[]>([]);
   const [consumerAgents, setConsumerAgents] = React.useState<ConsumerAgentItem[]>([]);
+  const [consumerTeams, setConsumerTeams] = React.useState<ConsumerTeamItem[]>([]);
   const [consumerAgentsLoading, setConsumerAgentsLoading] = React.useState(true);
   // role flag per agent the caller can see — owner vs viewer (read-only
   // shared from another user). Drives whether the AGENT_NAV exposes
@@ -251,7 +261,11 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       Promise.all(
         agents.map(async (agent) => {
           const list = await getChatSessions(agent.id).catch(() => []);
-          const latest = [...list].sort(
+          // Group-member sessions use their team id as a hidden project
+          // scope. They belong to the group row, not the Agent's direct
+          // contact row; otherwise creating a group would make clicking an
+          // Agent unexpectedly reopen its private group transcript.
+          const latest = list.filter((session) => !session.projectId?.startsWith("tm-")).sort(
             (a, b) =>
               (b.lastMessageAt || b.updatedAt || b.createdAt || 0) -
               (a.lastMessageAt || a.updatedAt || a.createdAt || 0),
@@ -299,6 +313,31 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       window.removeEventListener("fastclaw:sessions-changed", refresh);
     };
   }, [agents]);
+
+  React.useEffect(() => {
+    let aborted = false;
+    const refreshTeams = () => {
+      getConfig("user")
+        .then((cfg) => {
+          if (aborted) return;
+          const items = Object.entries(cfg.teams || {}).map(([id, team]) => ({
+            id,
+            ...team,
+            name: team.name?.trim() || tr("Group chat", "群聊"),
+          }));
+          setConsumerTeams(items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+        })
+        .catch(() => {
+          if (!aborted) setConsumerTeams([]);
+        });
+    };
+    refreshTeams();
+    window.addEventListener("fastclaw:teams-changed", refreshTeams);
+    return () => {
+      aborted = true;
+      window.removeEventListener("fastclaw:teams-changed", refreshTeams);
+    };
+  }, [tr]);
 
   // When the active agent isn't in the caller's owned list — e.g. a
   // super_admin chatting with another user's agent — fetch its name
@@ -422,15 +461,17 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   );
 
   const isConsumerChat =
-    !!activeAgentId &&
-    /^\/agents\/[^/]+\/(chat|project|chats)(?:\/|$)/.test(pathname);
+    (!!activeAgentId && /^\/agents\/[^/]+\/(chat|project|chats|team)(?:\/|$)/.test(pathname)) ||
+    /^\/teams\/[^/]+\/chat\/[^/]+(?:\/|$)/.test(pathname);
 
-  if (isConsumerChat && activeAgentId) {
+  if (isConsumerChat) {
     return (
       <>
         <ConsumerChatSidebar
-          activeAgentId={activeAgentId}
+          activeAgentId={activeAgentId || undefined}
+          activeTeamId={activeTeamId || undefined}
           agents={consumerAgents}
+          teams={consumerTeams}
           loading={consumerAgentsLoading}
           me={me}
         />
@@ -438,8 +479,8 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
           defaultTab={settingsDefaultTab}
-          role={agentRoles[activeAgentId] === "viewer" ? "viewer" : "owner"}
-          userOnly={settingsUserOnly}
+          role={activeAgentId && agentRoles[activeAgentId] === "viewer" ? "viewer" : "owner"}
+          userOnly={settingsUserOnly || !activeAgentId}
           isAdmin={isAdmin}
         />
       </>

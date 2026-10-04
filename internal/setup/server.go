@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
@@ -69,6 +70,8 @@ type AgentProvider interface {
 // Server hosts the web UI + admin API. Multi-user is unconditional —
 // every request must resolve to a real users.id via the auth.Resolver.
 type Server struct {
+	chatTurnsMu    sync.Mutex
+	chatTurns      map[teamRunKey]*chatTurnState
 	port           int
 	bind           string
 	gatewayCfg     *config.GatewayCfg
@@ -85,9 +88,12 @@ type Server struct {
 	// chatEvents fans live agent chat events out to subscribed SSE
 	// clients across browser tabs. Lazy-init on first use so older
 	// callers that didn't wire it explicitly still work.
-	chatEvents *agent.EventHub
-	usage      usage.Meter
-	startedAt  time.Time
+	chatEvents     *agent.EventHub
+	chatEventsOnce sync.Once
+	teamRunsMu     sync.Mutex
+	teamRuns       map[teamRunKey]*teamRun
+	usage          usage.Meter
+	startedAt      time.Time
 	// runtimeMgr powers the coding-agent project runtime (live dev server
 	// + preview). Optional: nil when the deployment hasn't wired a
 	// sandbox-backed runtime, in which case the /runtime endpoints return
@@ -176,9 +182,11 @@ func (s *Server) SetWebChannel(wc *channels.WebChannel) {
 // chat handler reaches the same instance — without this, the streaming
 // handler's hub publish would never reach the subscribe handler.
 func (s *Server) chatEventHub() *agent.EventHub {
-	if s.chatEvents == nil {
-		s.chatEvents = agent.NewEventHub()
-	}
+	s.chatEventsOnce.Do(func() {
+		if s.chatEvents == nil {
+			s.chatEvents = agent.NewEventHub()
+		}
+	})
 	return s.chatEvents
 }
 
@@ -261,7 +269,15 @@ func (s *Server) Run(ctx context.Context) error {
 	// Chat
 	mux.HandleFunc("POST /api/chat", auth(s.handleChat))
 	mux.HandleFunc("POST /api/chat/stream", auth(s.handleChatStream))
+	mux.HandleFunc("POST /api/chat/stop", auth(s.handleChatStop))
 	mux.HandleFunc("POST /api/chat/team/stream", auth(s.handleTeamChatStream))
+	mux.HandleFunc("POST /api/chat/team/run", auth(s.handleTeamChatRun))
+	mux.HandleFunc("GET /api/chat/team/topics", auth(s.handleTeamTopics))
+	mux.HandleFunc("GET /api/chat/team/run", auth(s.handleTeamRun))
+	mux.HandleFunc("POST /api/chat/team/stop", auth(s.handleTeamStop))
+	mux.HandleFunc("GET /api/chat/team/inbox", auth(s.handleTeamInbox))
+	mux.HandleFunc("PATCH /api/chat/team/topic", auth(s.handleTeamTopic))
+	mux.HandleFunc("DELETE /api/chat/team/topic", auth(s.handleTeamTopic))
 	mux.HandleFunc("POST /api/chat/steer", auth(s.handleChatSteer))
 	mux.HandleFunc("GET /api/chats", auth(s.handleChats))
 	mux.HandleFunc("GET /api/chat/history", auth(s.handleChatHistory))
@@ -543,7 +559,7 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// flickers the page and tears down any in-flight stream.
 			// Add new dynamic routes to dynamicParents below as they
 			// get introduced.
-			dynamicParents := map[string]bool{"chat": true, "project": true}
+			dynamicParents := map[string]bool{"chat": true, "project": true, "team": true}
 			sub := strings.Split(parts[2], "/")
 			substituted := false
 			for i := 0; i < len(sub)-1; i++ {
@@ -568,6 +584,41 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					http.ServeFileFS(w, r, h.fs, placeholderIndex)
 					return
 				}
+			}
+		}
+	}
+	if strings.HasPrefix(fsPath, "teams/") {
+		// Team conversations are top-level resources with two dynamic
+		// segments: /teams/<team>/chat/<session>. Static export emits
+		// /teams/_/chat/_ once, so map both page requests and Next's
+		// per-route RSC payloads to those placeholders.
+		sub := strings.Split(fsPath, "/")
+		substituted := false
+		if len(sub) > 1 && sub[1] != "_" {
+			sub[1] = "_"
+			substituted = true
+		}
+		for i := 0; i < len(sub)-1; i++ {
+			if sub[i] == "chat" && sub[i+1] != "_" {
+				sub[i+1] = "_"
+				substituted = true
+			}
+		}
+		if substituted {
+			placeholder := strings.Join(sub, "/")
+			if f, err := h.fs.Open(placeholder); err == nil {
+				stat, statErr := f.Stat()
+				f.Close()
+				if statErr == nil && !stat.IsDir() {
+					http.ServeFileFS(w, r, h.fs, placeholder)
+					return
+				}
+			}
+			placeholderIndex := placeholder + "/index.html"
+			if f, err := h.fs.Open(placeholderIndex); err == nil {
+				f.Close()
+				http.ServeFileFS(w, r, h.fs, placeholderIndex)
+				return
 			}
 		}
 	}

@@ -65,9 +65,9 @@ func (h *EventHub) Subscribe(userID, agentID, sessionKey string) (<-chan EventEn
 func (h *EventHub) Publish(userID, agentID, sessionKey string, env EventEnvelope) {
 	key := hubKey(userID, agentID, sessionKey)
 	h.mu.RLock()
-	subs := append([]chan EventEnvelope(nil), h.subs[key]...)
-	h.mu.RUnlock()
-	for _, ch := range subs {
+	// Keep cleanup from closing a subscriber during the nonblocking send.
+	defer h.mu.RUnlock()
+	for _, ch := range h.subs[key] {
 		select {
 		case ch <- env:
 		default:

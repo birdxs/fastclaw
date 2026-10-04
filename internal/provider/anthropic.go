@@ -386,7 +386,7 @@ func (p *AnthropicProvider) buildRequest(ctx context.Context, messages []Message
 	}
 
 	url := p.apiBase + "/v1/messages"
-	slog.Info("anthropic request", "url", url, "model", req.Model)
+	slog.Info("anthropic request", "url", url, "model", req.Model, "request_bytes", len(body))
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

@@ -94,6 +94,7 @@ func (a *apiResolver) DispatchLINEWebhook(accountID string, body []byte, signatu
 }
 
 func main() {
+	var showVersion bool
 	rootCmd := &cobra.Command{
 		Use:   "fastclaw",
 		Short: "FastClaw - Multi-User AI Agent Platform",
@@ -111,12 +112,17 @@ func main() {
 			})))
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if showVersion {
+				versionCmd().Run(cmd, args)
+				return nil
+			}
 			if isInteractiveTerminal(os.Stdin, os.Stdout) {
 				return runChat(cmd.Context(), chatOptions{})
 			}
 			return runGateway(18953)
 		},
 	}
+	rootCmd.Flags().BoolVar(&showVersion, "version", false, "Print FastClaw version")
 
 	rootCmd.AddCommand(gatewayCmd())
 	rootCmd.AddCommand(chatCmd())
