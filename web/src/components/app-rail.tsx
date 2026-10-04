@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, ServerCogIcon, SettingsIcon } from "lucide-react";
+import { LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, SettingsIcon, UserCogIcon } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
@@ -84,7 +84,7 @@ export function AppRail() {
             label={tr("Admin", "管理后台")}
             active={area === "admin"}
             onClick={() => go("admin")}
-            icon={ServerCogIcon}
+            icon={UserCogIcon}
           />
         )}
         <div className="mt-auto">
