@@ -8,8 +8,6 @@ import {
   rotateApikey,
   setApikeyAgents,
   listApps,
-  createApp,
-  deleteApp,
   apiFetch,
   type ApikeyType,
   type AppInfo,
@@ -45,7 +43,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { KeyRound, RotateCw, Trash2, Copy, Check, Plus, Boxes } from "lucide-react";
+import { KeyRound, RotateCw, Trash2, Copy, Check, Plus } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
 
 interface ApiKey {
@@ -87,9 +85,6 @@ export default function ApikeysPage() {
   const [scopeAgents, setScopeAgents] = useState<string[]>([]);
   const [apps, setApps] = useState<AppInfo[]>([]);
   const [createAppId, setCreateAppId] = useState("");
-  const [appDialogOpen, setAppDialogOpen] = useState(false);
-  const [newAppName, setNewAppName] = useState("");
-  const [deleteAppTarget, setDeleteAppTarget] = useState<AppInfo | null>(null);
 
   // Apps are optional. The app layer only surfaces once the account has
   // one; until then the page reads exactly as before.
@@ -112,26 +107,6 @@ export default function ApikeysPage() {
     setIsSuperAdmin(mj?.user?.role === "super_admin");
     const ap = await listApps();
     if (ap.apps) setApps(ap.apps);
-  }
-
-  async function handleCreateApp(e: React.FormEvent) {
-    e.preventDefault();
-    if (!newAppName.trim()) return;
-    const res = await createApp(newAppName.trim());
-    if (res.error) {
-      setError(res.error);
-      return;
-    }
-    setNewAppName("");
-    setAppDialogOpen(false);
-    refresh();
-  }
-
-  async function handleDeleteApp(app: AppInfo) {
-    const res = await deleteApp(app.id);
-    if (res.error) setError(res.error);
-    setDeleteAppTarget(null);
-    refresh();
   }
   useEffect(() => {
     refresh();
@@ -239,53 +214,11 @@ export default function ApikeysPage() {
             )}
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={() => setAppDialogOpen(true)}>
-            <Boxes className="h-4 w-4 mr-2" />
-            {tr("New app", "新建应用")}
-          </Button>
-          <Button onClick={openCreateDialog}>
-            <Plus className="h-4 w-4 mr-2" />
-            {tr("Add API key", "添加 API 密钥")}
-          </Button>
-        </div>
+        <Button onClick={openCreateDialog}>
+          <Plus className="h-4 w-4 mr-2" />
+          {tr("Add API key", "添加 API 密钥")}
+        </Button>
       </div>
-
-      {hasApps && (
-        <div className="rounded-lg border border-border bg-card overflow-hidden">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>{tr("App", "应用")}</TableHead>
-                <TableHead>{tr("Agents", "Agent 数")}</TableHead>
-                <TableHead>{tr("API keys", "密钥数")}</TableHead>
-                <TableHead className="text-right">{tr("Actions", "操作")}</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {apps.map((a) => (
-                <TableRow key={a.id}>
-                  <TableCell className="font-medium">{a.name}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{a.agentCount}</TableCell>
-                  <TableCell className="text-xs text-muted-foreground">{a.keyCount}</TableCell>
-                  <TableCell className="text-right">
-                    <Button
-                      size="icon"
-                      variant="ghost"
-                      className="text-destructive hover:text-destructive"
-                      disabled={a.agentCount > 0 || a.keyCount > 0}
-                      onClick={() => setDeleteAppTarget(a)}
-                      title={tr("Delete (only empty apps)", "删除（仅限空应用）")}
-                    >
-                      <Trash2 className="size-4" />
-                    </Button>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
 
       {showToken && (
         <Card className="border-amber-500/40 bg-amber-500/5">
@@ -529,59 +462,6 @@ export default function ApikeysPage() {
           </form>
         </DialogContent>
       </Dialog>
-
-      <Dialog open={appDialogOpen} onOpenChange={setAppDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>{tr("New app", "新建应用")}</DialogTitle>
-            <DialogDescription>
-              {tr(
-                "Optional. An app is one integration environment, such as douchat-prod or douchat-dev. Its API keys only see the agents created in it; keys without an app see all your agents.",
-                "可选。一个应用对应一个接入环境，例如 douchat-prod 或 douchat-dev。应用的密钥只能看到在该应用里创建的 Agent；不属于任何应用的密钥能看到你的全部 Agent。",
-              )}
-            </DialogDescription>
-          </DialogHeader>
-          <form onSubmit={handleCreateApp} className="space-y-4 py-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="app-name">{tr("Name", "名称")}</Label>
-              <Input
-                id="app-name"
-                value={newAppName}
-                maxLength={64}
-                onChange={(e) => setNewAppName(e.target.value)}
-                placeholder={tr("e.g. douchat-prod", "例如 douchat-prod")}
-                autoFocus
-              />
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setAppDialogOpen(false)}>
-                {tr("Cancel", "取消")}
-              </Button>
-              <Button type="submit" disabled={!newAppName.trim()}>
-                {tr("Create app", "创建应用")}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
-
-      <AlertDialog open={deleteAppTarget !== null} onOpenChange={(o) => !o && setDeleteAppTarget(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{tr("Delete app?", "删除应用？")}</AlertDialogTitle>
-            <AlertDialogDescription>
-              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{deleteAppTarget?.name}</code>{" "}
-              {tr("has no agents or keys and will be removed.", "没有 Agent 和密钥，将被删除。")}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{tr("Cancel", "取消")}</AlertDialogCancel>
-            <AlertDialogAction onClick={() => deleteAppTarget && handleDeleteApp(deleteAppTarget)}>
-              {tr("Delete", "删除")}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => !o && setDeleteTarget(null)}>
         <AlertDialogContent>

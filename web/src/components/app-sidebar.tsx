@@ -28,6 +28,7 @@ import {
 } from "@/components/consumer-chat-sidebar";
 import {
   BotIcon,
+  BoxesIcon,
   BrainIcon,
   CoinsIcon,
   InfoIcon,
@@ -91,6 +92,7 @@ const consoleNav = (pathname: string): NavItem[] => [
   { title: "Agents", url: "/console/agents/", icon: BotIcon },
   { title: "Models", url: "/console/models/", icon: BrainIcon },
   { title: "Skills", url: "/console/skills/", icon: SparklesIcon },
+  { title: "Apps", url: "/console/apps/", icon: BoxesIcon },
   { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
 ];
 
@@ -448,6 +450,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             Chats: "聊天记录",
             "Token Usage": "Token 用量",
             "API Keys": "API 密钥",
+            Apps: "应用",
             About: "关于",
             "New chat": "新建对话",
           } as Record<string, string>)[item.title] || item.title,

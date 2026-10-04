@@ -51,6 +51,17 @@ agent ID will now get a 404 instead of a reply from some other agent.
   startup and never dropped, and cron/channel/webhook dispatch attaches any
   agent it needs. Smaller accounts load exactly as before.
 
+### Added — personal skills
+
+Every account can now install skills for itself from `/console/skills`,
+with the same search / install / zip upload / configure / remove flow as an
+Agent's Skills page. They live in `~/.fastclaw/users/<uid>/skills/` (and the
+object store) and load in all of that account's conversations, with any
+agent. Skills installed for the whole deployment are listed as shared;
+accounts can set their own credentials for them. API: `scope: "user"` on
+`POST /api/skills/install`, `?scope=user` on `GET /api/skills`,
+`POST /api/skills/upload` and `DELETE /api/skills/{name}`.
+
 ### Changed — management pages moved under `/console`
 
 The web UI now has two areas: the chat (`/agents/<id>/chat/…`,
@@ -61,7 +72,9 @@ configuration pages moved from `/agents/<id>/<tab>` to
 (including `/agents/?manage=1`) redirect to their new location.
 
 The console sidebar is one flat list of the account's own pages —
-Overview, Agents, Models, Skills, API Keys — for every account.
+Overview, Agents, Models, Skills, Apps, API Keys — for every account.
+Apps have their own page (`/console/apps`: create, rename, delete empty
+apps); the API Keys page only picks an app when issuing a key.
 `/console/models` and `/console/skills` show the caller's own (user-level)
 configuration.
 

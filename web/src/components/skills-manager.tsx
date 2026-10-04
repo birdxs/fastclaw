@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -22,80 +22,145 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sparkles, Trash2, Download, Search, Loader2, Check, ExternalLink, Settings, Upload, Files, Info } from "lucide-react";
 import {
+  Sparkles,
+  Trash2,
+  Download,
+  Search,
+  Loader2,
+  Check,
+  ExternalLink,
+  Settings,
+  Upload,
+  Files,
+  Info,
+} from "lucide-react";
+import {
+  getAgentSkills,
   getSkills,
+  deleteAgentSkill,
   deleteSkill,
-  searchSkills,
   installSkill,
   uploadSkill,
+  searchSkills,
   getConfig,
   type SkillInfo,
   type SkillSearchResult,
 } from "@/lib/api";
 import { ConfigureSkillDialog, type SkillEntryView } from "@/components/configure-skill-dialog";
 import { useLocale } from "@/components/locale-provider";
-import { SkillsManager } from "@/components/skills-manager";
 
-// /console/skills is the account's own skills (install, upload, configure,
-// remove — the same UI as an Agent's Skills page). The Settings dialog's
-// System section renders scope="system": the deployment-wide skills.
-export default function SkillsPage({ scope = "user" }: { scope?: "user" | "system" }) {
-  if (scope === "user") return <SkillsManager target={{ kind: "user" }} />;
-  return <SystemSkillsPanel />;
-}
+// Where installs go: one Agent's own skills, or the signed-in account's
+// own skills (loaded in every conversation the account has).
+export type SkillsTarget =
+  | { kind: "agent"; agentId: string; agentName: string }
+  | { kind: "user" };
 
-function SystemSkillsPanel() {
-  const scope = "system" as const;
+// SkillsManager is the shared install / upload / configure / remove UI for
+// an Agent's skills page and the console's personal Skills page.
+export function SkillsManager({ target }: { target: SkillsTarget }) {
   const { tr } = useLocale();
-  const canManage = scope === "system";
+  const isUser = target.kind === "user";
+  const agentId = target.kind === "agent" ? target.agentId : "";
+  const agentName = target.kind === "agent" ? target.agentName : "";
   const [skills, setSkills] = useState<SkillInfo[]>([]);
+  // Personal page only: skills installed for the whole deployment. The
+  // account can't remove them but can set its own credentials for them.
+  const [sharedSkills, setSharedSkills] = useState<SkillInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [installOpen, setInstallOpen] = useState(false);
   const [configureTarget, setConfigureTarget] = useState<SkillInfo | null>(null);
-  // Per-skill saved entries (apiKey/env values come back masked from
-  // GET /api/config — the dialog renders them as placeholders so the
-  // user can tell something is configured, and POST preserves any field
-  // that's still masked on save).
+  // Skill env entries are GLOBAL (keyed by skill name), so the same
+  // /api/config blob feeds both the global /skills page and this
+  // agent-scoped one. Lets the user configure FAL_KEY etc. from
+  // whichever entry point they're already on.
   const [skillEntries, setSkillEntries] = useState<Record<string, SkillEntryView>>({});
-  // Upload-zip state. Backend route is the same as the agent-scoped
-  // upload but without the ?agent= query param — it lands in the global
-  // ~/.fastclaw/skills dir, which the resolveInstallTarget handler
-  // gates behind admin (this page is already admin-only).
+  // File input ref + upload state for the local-zip "Upload" button.
+  // The server unzips to <agent>/skills/<name>/ and hot-reloads the
+  // agent so the new skill shows up without a refresh.
   const uploadInputRef = useRef<HTMLInputElement>(null);
-  const [uploadOpen, setUploadOpen] = useState(false);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const fetchSkills = () => {
+  const fetchSkills = useCallback(() => {
     setLoading(true);
     Promise.all([
-      getSkills().catch(() => [] as SkillInfo[]),
-      getConfig(scope).catch(() => null),
+      (isUser ? getSkills("user") : getAgentSkills(agentId)).catch(() => [] as SkillInfo[]),
+      getConfig(isUser ? "user" : undefined).catch(() => null),
+      isUser ? getSkills().catch(() => [] as SkillInfo[]) : Promise.resolve([] as SkillInfo[]),
     ])
-      .then(([list, cfg]) => {
-        setSkills(list);
-        const entries =
-          (cfg?.skills as { entries?: Record<string, SkillEntryView> } | undefined)?.entries || {};
-        setSkillEntries(entries);
+      .then(([list, cfg, shared]) => {
+        setSkills(list || []);
+        const own = new Set((list || []).map((sk) => sk.name));
+        setSharedSkills((shared || []).filter((sk) => !own.has(sk.name)));
+        // Per-agent override map first (this page edits there); merge
+        // global defaults underneath so the "configured" badge still
+        // lights up when only the global value is set.
+        const skillsCfg = cfg?.skills as
+          | {
+              entries?: Record<string, SkillEntryView>;
+              agentEntries?: Record<string, Record<string, SkillEntryView>>;
+            }
+          | undefined;
+        const globalEntries = skillsCfg?.entries || {};
+        const agentMap = (agentId && skillsCfg?.agentEntries?.[agentId]) || {};
+        const merged: Record<string, SkillEntryView> = { ...globalEntries };
+        for (const [name, entry] of Object.entries(agentMap)) {
+          merged[name] = entry;
+        }
+        setSkillEntries(merged);
       })
       .finally(() => setLoading(false));
-  };
+  }, [agentId, isUser]);
 
   useEffect(() => {
     fetchSkills();
-  }, [scope]);
+  }, [fetchSkills]);
 
   const handleDelete = async () => {
     if (!deleteTarget) return;
-    await deleteSkill(deleteTarget);
+    if (isUser) {
+      await deleteSkill(deleteTarget, "user");
+    } else {
+      await deleteAgentSkill(agentId, deleteTarget);
+    }
     setDeleteTarget(null);
     fetchSkills();
   };
 
+  const handleUploadConfirm = async () => {
+    if (!uploadFile || (!isUser && !agentId)) return;
+    setUploading(true);
+    setUploadError(null);
+    try {
+      const resp = isUser
+        ? await uploadSkill(uploadFile, undefined, undefined, "user")
+        : await uploadSkill(uploadFile, agentId);
+      if (!resp.ok) {
+        // Backend rejects zips that don't contain SKILL.md at the
+        // skill root — surface the message inside the dialog so the
+        // user can fix the zip and retry without re-opening it.
+        setUploadError(resp.error || tr("Upload failed", "上传失败"));
+        return;
+      }
+      // Success — close, reset, refresh the grid.
+      setUploadOpen(false);
+      setUploadFile(null);
+      fetchSkills();
+    } catch (e) {
+      setUploadError(e instanceof Error ? e.message : tr("Upload failed", "上传失败"));
+    } finally {
+      setUploading(false);
+      if (uploadInputRef.current) uploadInputRef.current.value = "";
+    }
+  };
+
+  // Drop dialog state when the dialog closes (cancel or success), so the
+  // next open is fresh — no stale file or error from a previous attempt.
   const handleUploadOpenChange = (open: boolean) => {
     setUploadOpen(open);
     if (!open) {
@@ -106,6 +171,9 @@ function SystemSkillsPanel() {
     }
   };
 
+  // Filter dropped/selected files to a single .zip — the dropzone accepts
+  // multi-drop in the browser, but a skill bundle is one archive so we
+  // take the first .zip and reject the rest with an inline message.
   const acceptDroppedFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
     if (files.length > 1) {
@@ -121,50 +189,32 @@ function SystemSkillsPanel() {
     setUploadError(null);
   };
 
-  const handleUploadConfirm = async () => {
-    if (!uploadFile) return;
-    setUploading(true);
-    setUploadError(null);
-    try {
-      // No agentId here → backend installs to the global skills dir.
-      // The connect handler enforces admin auth for global installs.
-      const resp = await uploadSkill(uploadFile);
-      if (!resp.ok) {
-        setUploadError(resp.error || tr("Upload failed", "上传失败"));
-        return;
-      }
-      setUploadOpen(false);
-      setUploadFile(null);
-      fetchSkills();
-    } catch (e) {
-      setUploadError(e instanceof Error ? e.message : tr("Upload failed", "上传失败"));
-    } finally {
-      setUploading(false);
-      if (uploadInputRef.current) uploadInputRef.current.value = "";
-    }
-  };
-
   return (
     <div className="p-6 space-y-6 max-w-5xl mx-auto">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">{tr("Skills", "技能")}</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            {canManage
-              ? tr("Install and configure skills available across the system", "安装和配置全系统可用的技能")
-              : tr("Configure skill credentials and environment variables for your account", "配置当前账户的技能凭据和环境变量")}
+            {isUser ? (
+              tr("Your own skills — available in all your conversations, with every agent", "你自己的技能 — 在你和所有 Agent 的对话中都可用")
+            ) : (
+              <>
+                {tr("Skills assigned to", "分配给")} <strong>{agentName}</strong>
+                {tr(" — only this agent can use them", " 的技能 — 仅此 Agent 可用")}
+              </>
+            )}
           </p>
         </div>
-        {canManage && <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => setUploadOpen(true)}>
             <Upload className="h-4 w-4 mr-2" />
             {tr("Upload skills", "上传技能")}
           </Button>
-          <Button onClick={() => setInstallOpen(true)}>
+          <Button variant="outline" onClick={() => setInstallOpen(true)}>
             <Download className="h-4 w-4 mr-2" />
             {tr("Install skill", "安装技能")}
           </Button>
-        </div>}
+        </div>
       </div>
 
       {loading ? (
@@ -179,10 +229,20 @@ function SystemSkillsPanel() {
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 mb-4">
               <Sparkles className="h-7 w-7 text-primary" />
             </div>
-            <p className="text-sm text-muted-foreground mb-1">{tr("No skills installed", "尚未安装技能")}</p>
-            <p className="text-xs text-muted-foreground/60">
-              {tr("Skills extend agent capabilities with specialized behaviors", "技能通过专门的行为扩展 Agent 能力")}
+            <p className="text-sm text-muted-foreground mb-1">
+              {isUser
+                ? tr("No skills of your own yet", "你还没有自己的技能")
+                : tr("No agent-specific skills yet", "还没有 Agent 专属技能")}
             </p>
+            <p className="text-xs text-muted-foreground/60 mb-4 max-w-sm text-center">
+              {isUser
+                ? tr("Install a skill for yourself. Every agent can use it in your conversations; other users are not affected.", "为自己安装技能。在你的对话中所有 Agent 都能使用，不影响其他用户。")
+                : tr("Install a skill for this agent. It will be stored in the agent's own skills directory and will not affect other agents.", "为此 Agent 安装技能。技能会保存在其专属目录中，不会影响其他 Agent。")}
+            </p>
+            <Button variant="outline" size="sm" onClick={() => setInstallOpen(true)}>
+              <Download className="h-4 w-4 mr-2" />
+              {tr("Install skill", "安装技能")}
+            </Button>
           </div>
         </div>
       ) : (
@@ -199,10 +259,7 @@ function SystemSkillsPanel() {
                   </div>
                   <div>
                     <p className="text-sm font-medium">{skill.name}</p>
-                    <Badge
-                      variant="outline"
-                      className="mt-1 text-[10px]"
-                    >
+                    <Badge variant="outline" className="mt-1 text-[10px]">
                       {skill.type || "skill"}
                     </Badge>
                   </div>
@@ -217,16 +274,14 @@ function SystemSkillsPanel() {
                   >
                     <Settings className="h-3.5 w-3.5" />
                   </Button>
-                  {canManage && (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                      onClick={() => setDeleteTarget(skill.name)}
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </Button>
-                  )}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    onClick={() => setDeleteTarget(skill.name)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
               </div>
               <p className="text-sm text-muted-foreground line-clamp-2">
@@ -244,12 +299,67 @@ function SystemSkillsPanel() {
         </div>
       )}
 
-      {canManage && <Dialog open={uploadOpen} onOpenChange={handleUploadOpenChange}>
+      {isUser && sharedSkills.length > 0 && (
+        <div className="space-y-3">
+          <div>
+            <h3 className="text-sm font-medium">{tr("Shared skills", "共享技能")}</h3>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {tr("Installed for everyone on this FastClaw. You can set your own credentials for them.", "已为此 FastClaw 的所有用户安装。你可以为它们设置自己的凭据。")}
+            </p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            {sharedSkills.map((skill) => (
+              <div
+                key={skill.name}
+                className="group rounded-lg border border-border bg-card p-5 transition-colors hover:bg-muted/50"
+              >
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted">
+                      <Sparkles className="h-4 w-4 text-muted-foreground" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium">{skill.name}</p>
+                      <Badge variant="secondary" className="mt-1 text-[10px]">
+                        {tr("shared", "共享")}
+                      </Badge>
+                    </div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-foreground opacity-0 group-hover:opacity-100 transition-opacity"
+                    onClick={() => setConfigureTarget(skill)}
+                    title={tr("Configure environment variables and API keys", "配置环境变量和 API 密钥")}
+                  >
+                    <Settings className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <p className="text-sm text-muted-foreground line-clamp-2">
+                  {skill.description || tr("No description", "暂无描述")}
+                </p>
+                {(skillEntries[skill.name]?.apiKey ||
+                  Object.keys(skillEntries[skill.name]?.env || {}).length > 0) && (
+                  <div className="mt-2 inline-flex items-center gap-1 text-[10px] text-emerald-500">
+                    <Check className="h-3 w-3" />
+                    {tr("configured", "已配置")}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <Dialog open={uploadOpen} onOpenChange={handleUploadOpenChange}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>{tr("Upload skill", "上传技能")}</DialogTitle>
           </DialogHeader>
 
+          {/* Hidden input — both the drop zone click and the "click to upload"
+              text trigger it. accept= filters the OS picker to .zip; we still
+              re-validate in JS for drops since accept doesn't apply there. */}
           <input
             ref={uploadInputRef}
             type="file"
@@ -258,6 +368,10 @@ function SystemSkillsPanel() {
             onChange={(e) => acceptDroppedFiles(e.target.files)}
           />
 
+          {/* Drop zone. Keeps a constant footprint (32rem-ish content,
+              ~12rem tall) so the dialog doesn't jump when a file is
+              picked — empty state shows the icon + prompt, populated
+              state shows the chosen filename inline. */}
           <button
             type="button"
             onClick={() => uploadInputRef.current?.click()}
@@ -357,14 +471,18 @@ function SystemSkillsPanel() {
             </Button>
           </div>
         </DialogContent>
-      </Dialog>}
+      </Dialog>
 
-      {canManage && <AlertDialog open={!!deleteTarget} onOpenChange={() => setDeleteTarget(null)}>
+      <AlertDialog open={!!deleteTarget} onOpenChange={() => setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{tr("Remove skill", "移除技能")}</AlertDialogTitle>
             <AlertDialogDescription>
-              {tr("Remove", "从已安装技能中移除")} <strong>{deleteTarget}</strong>?
+              {tr(
+                "Remove {{skill}} from {{agent}}? Other agents are unaffected.",
+                "从 {{agent}} 中移除 {{skill}}？其他 Agent 不受影响。",
+                { skill: deleteTarget || "", agent: agentName },
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -377,9 +495,10 @@ function SystemSkillsPanel() {
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
-      </AlertDialog>}
+      </AlertDialog>
 
-      {canManage && <InstallSkillDialog
+      <InstallSkillDialog
+        target={target}
         open={installOpen}
         onOpenChange={setInstallOpen}
         onInstalled={() => {
@@ -387,12 +506,13 @@ function SystemSkillsPanel() {
           fetchSkills();
         }}
         installedNames={new Set(skills.map((s) => s.name))}
-      />}
+      />
 
       <ConfigureSkillDialog
         skill={configureTarget}
+        agentId={agentId || undefined}
+        scope={isUser ? "user" : undefined}
         existing={configureTarget ? skillEntries[configureTarget.name] : undefined}
-        scope={scope}
         onClose={() => setConfigureTarget(null)}
         onSaved={() => {
           setConfigureTarget(null);
@@ -403,19 +523,23 @@ function SystemSkillsPanel() {
   );
 }
 
-
 function InstallSkillDialog({
+  target,
   open,
   onOpenChange,
   onInstalled,
   installedNames,
 }: {
+  target: SkillsTarget;
   open: boolean;
   onOpenChange: (v: boolean) => void;
   onInstalled: () => void;
   installedNames: Set<string>;
 }) {
   const { tr } = useLocale();
+  const isUser = target.kind === "user";
+  const agentId = target.kind === "agent" ? target.agentId : "";
+  const agentName = target.kind === "agent" ? target.agentName : "";
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SkillSearchResult[]>([]);
   const [searching, setSearching] = useState(false);
@@ -451,14 +575,19 @@ function InstallSkillDialog({
     };
   }, [query, open]);
 
-  // Show at most 20 results; the API returns up to 100, most are low-signal.
   const visible = useMemo(() => results.slice(0, 20), [results]);
 
   const handleInstall = async (r: SkillSearchResult) => {
     setInstallError(null);
     setInstallingId(r.id);
     try {
-      const resp = await installSkill({ source: "skillssh", name: r.skillId });
+      // agent → ~/.fastclaw/agents/<id>/skills; scope user →
+      // ~/.fastclaw/users/<uid>/skills.
+      const resp = await installSkill({
+        source: "skillssh",
+        name: r.skillId,
+        ...(isUser ? { scope: "user" as const } : { agent: agentId }),
+      });
       if (!resp.ok) {
         setInstallError(resp.error || tr("Install failed", "安装失败"));
         return;
@@ -475,11 +604,23 @@ function InstallSkillDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{tr("Install skill", "安装技能")}</DialogTitle>
+          <DialogTitle>
+            {isUser
+              ? tr("Install skill for yourself", "为自己安装技能")
+              : tr("Install skill for {{name}}", "为 {{name}} 安装技能", { name: agentName })}
+          </DialogTitle>
           <DialogDescription>
-            {tr("Search skills.sh for a published skill. Installed files are saved to", "在 skills.sh 搜索已发布技能。安装文件将保存到")} {" "}
-            <code className="font-mono text-xs">~/.fastclaw/skills/</code>
-            {tr(" and become available to every agent.", "，并可供所有 Agent 使用。")}
+            {isUser
+              ? tr("Search skills.sh and install into your own skills. Every agent can use it in your conversations.", "在 skills.sh 搜索并安装到你自己的技能中。在你的对话中所有 Agent 都能使用。")
+              : (
+                <>
+                  {tr("Search skills.sh and install into", "在 skills.sh 搜索并安装到")} {" "}
+                  <code className="font-mono text-xs">
+                    ~/.fastclaw/agents/{agentId}/skills/
+                  </code>
+                  {tr(". Only this agent can use the new skill.", "。新技能仅供此 Agent 使用。")}
+                </>
+              )}
           </DialogDescription>
         </DialogHeader>
 
@@ -511,13 +652,8 @@ function InstallSkillDialog({
           ) : visible.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-10 text-center">
               <p className="text-sm text-muted-foreground mb-1">
-                {tr("No skills found on skills.sh for", "skills.sh 中没有找到与以下内容相关的技能：")} {" "}
+                {tr("No skills found for", "没有找到与以下内容相关的技能：")} {" "}
                 <strong className="text-foreground">{query}</strong>
-              </p>
-              <p className="text-xs text-muted-foreground/70 max-w-sm">
-                {tr("Ask an agent to build a custom skill with", "可以让 Agent 使用")} {" "}
-                <code className="font-mono">skill-creator</code>
-                {tr(" to scaffold and refine a new skill for you.", "来创建并完善自定义技能。")}
               </p>
             </div>
           ) : (
@@ -540,9 +676,7 @@ function InstallSkillDialog({
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
-                          <p className="text-sm font-medium truncate">
-                            {r.skillId}
-                          </p>
+                          <p className="text-sm font-medium truncate">{r.skillId}</p>
                           <span className="text-[10px] text-muted-foreground">
                             {tr("{{count}} installs", "安装 {{count}} 次", { count: r.installs.toLocaleString() })}
                           </span>
@@ -565,9 +699,13 @@ function InstallSkillDialog({
                         onClick={() => handleInstall(r)}
                       >
                         {already ? (
-                          <><Check className="h-3.5 w-3.5 mr-1.5" /> {tr("Installed", "已安装")}</>
+                          <>
+                            <Check className="h-3.5 w-3.5 mr-1.5" /> {tr("Installed", "已安装")}
+                          </>
                         ) : busy ? (
-                          <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {tr("Installing…", "正在安装…")}</>
+                          <>
+                            <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> {tr("Installing…", "正在安装…")}
+                          </>
                         ) : (
                           tr("Install", "安装")
                         )}
@@ -581,9 +719,7 @@ function InstallSkillDialog({
         </div>
 
         {installError && (
-          <p className="text-xs text-destructive break-all">
-            {installError}
-          </p>
+          <p className="text-xs text-destructive break-all">{installError}</p>
         )}
       </DialogContent>
     </Dialog>

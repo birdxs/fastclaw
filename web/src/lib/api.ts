@@ -529,6 +529,15 @@ export async function createApp(name: string): Promise<{ app?: AppInfo; error?: 
   return res.json();
 }
 
+export async function renameApp(id: string, name: string): Promise<{ app?: AppInfo; error?: string }> {
+  const res = await apiFetch(`/api/apps/${id}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return res.json();
+}
+
 export async function deleteApp(id: string): Promise<{ ok?: boolean; error?: string }> {
   const res = await apiFetch(`/api/apps/${id}`, { method: "DELETE" });
   return res.json();
@@ -1650,13 +1659,16 @@ export async function deleteAgent(id: string) {
 }
 
 // Skills
-export async function getSkills(): Promise<SkillInfo[]> {
-  const res = await apiFetch("/api/skills");
+// getSkills lists the global skills, or with scope "user" the caller's
+// own skills (loaded in all their conversations).
+export async function getSkills(scope?: "user"): Promise<SkillInfo[]> {
+  const res = await apiFetch(scope === "user" ? "/api/skills?scope=user" : "/api/skills");
   return res.json();
 }
 
-export async function deleteSkill(name: string) {
-  const res = await apiFetch(`/api/skills/${name}`, {
+export async function deleteSkill(name: string, scope?: "user") {
+  const qs = scope === "user" ? "?scope=user" : "";
+  const res = await apiFetch(`/api/skills/${encodeURIComponent(name)}${qs}`, {
     method: "DELETE",
   });
   return res.json();
@@ -1701,6 +1713,7 @@ export interface InstallSkillRequest {
   source?: "skillssh" | "clawhub" | "github" | "auto";
   repo?: string;
   agent?: string;  // omit for global install (admin only)
+  scope?: "user";  // install into the caller's own skills instead
 }
 
 export interface InstallSkillResponse {
@@ -1731,11 +1744,16 @@ export async function uploadSkill(
   file: File,
   agentId?: string,
   name?: string,
+  scope?: "user",
 ): Promise<InstallSkillResponse> {
   const fd = new FormData();
   fd.append("file", file, file.name);
   if (name) fd.append("name", name);
-  const qs = agentId ? `?agent=${encodeURIComponent(agentId)}` : "";
+  const qs = agentId
+    ? `?agent=${encodeURIComponent(agentId)}`
+    : scope === "user"
+      ? "?scope=user"
+      : "";
   const res = await apiFetch(`/api/skills/upload${qs}`, {
     method: "POST",
     body: fd,
