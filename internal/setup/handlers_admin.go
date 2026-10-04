@@ -1019,10 +1019,6 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 				jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "cannot bind agent " + aid + " — not owned by target user"})
 				return
 			}
-			if appID != "" && rec.AppID != appID {
-				jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "cannot bind agent " + aid + " — it belongs to another app"})
-				return
-			}
 		}
 	}
 	_ = isAdmin // currently no admin-only branches inside; kept for future toggles
@@ -1131,10 +1127,6 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 				rec, err := s.dataStore.GetAgent(r.Context(), aid)
 				if err != nil || rec == nil || rec.UserID != ident.UserID {
 					jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "cannot bind agent " + aid})
-					return
-				}
-				if appID != "" && rec.AppID != appID {
-					jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "cannot bind agent " + aid + " — it belongs to another app"})
 					return
 				}
 			}

@@ -422,12 +422,13 @@ func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, agent
 
 // keyOutsideApp reports whether an app-scoped api key is reaching for an
 // agent of another app of the same account. Such keys only see their own
-// app's agents on /api too; platform-admin keys and cookie sessions are
-// unaffected.
+// app's agents on /api too — except agents explicitly granted to an
+// "agent" key (Identity.CanUseAgent). Platform-admin keys and cookie
+// sessions are unaffected.
 func keyOutsideApp(ident auth.Identity, rec *store.AgentRecord) bool {
 	return rec != nil && ident.AuthMethod == "apikey" && ident.AppID != "" &&
 		ident.APIKeyType != users.APIKeyTypeAdmin &&
-		rec.UserID == ident.AccountID() && rec.AppID != ident.AppID
+		rec.UserID == ident.AccountID() && !ident.CanUseAgent(rec.ID, rec.UserID, rec.AppID)
 }
 
 // agentReadable reports whether the current request may read an agent.

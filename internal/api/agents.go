@@ -16,6 +16,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/scope"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
+	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
 // Agents created through /v1 belong to the app — the account that owns
@@ -53,10 +54,11 @@ var v1SystemFiles = map[string]bool{
 // an out-of-scope agent exists.
 var errAgentNotFound = errors.New("agent not found")
 
-// appAgent loads agentID and verifies the caller's app may use it: the
-// agent must belong to the key's app (Identity.AppOwnsAgent) and pass the
-// api key's agent ACL. Platform-admin keys are scoped to their own app
-// here too — /v1 is the app API, not the admin API.
+// appAgent loads agentID and verifies the caller may use it
+// (Identity.CanUseAgent): the agent must belong to the key's app — or, for
+// an "agent" key, be explicitly granted to it — and pass the key's ACL.
+// Platform-admin keys are scoped to their own app here too — /v1 is the
+// app API, not the admin API.
 func (s *Server) appAgent(r *http.Request, agentID string) (*store.AgentRecord, error) {
 	ident, ok := auth.FromContext(r.Context())
 	if !ok {
@@ -73,7 +75,7 @@ func (s *Server) appAgent(r *http.Request, agentID string) (*store.AgentRecord, 
 	if err != nil || rec == nil {
 		return nil, errAgentNotFound
 	}
-	if !ident.AppOwnsAgent(rec.UserID, rec.AppID) || !ident.CanAccessAgent(rec.ID) {
+	if !ident.CanUseAgent(rec.ID, rec.UserID, rec.AppID) {
 		return nil, errAgentNotFound
 	}
 	return rec, nil
@@ -144,6 +146,10 @@ func (s *Server) resolveChatAgent(r *http.Request, agentID string) (*agent.Agent
 // app's only agent, or — as before apps existed — the account's default
 // (or first loaded) agent. The caller still verifies it belongs to the app.
 func (s *Server) defaultAppAgentID(r *http.Request, ident auth.Identity, nsSpace *UserSpaceView) (string, error) {
+	// An "agent" key granted exactly one agent talks to it.
+	if ident.APIKeyType == users.APIKeyTypeAgent && len(ident.APIKeyAgents) == 1 {
+		return ident.APIKeyAgents[0], nil
+	}
 	if s.store != nil && ident.AppID != "" {
 		if ids, err := s.store.ListAgentIDsByApp(r.Context(), ident.AppID); err == nil && len(ids) == 1 {
 			return ids[0], nil
@@ -306,7 +312,9 @@ func (s *Server) HandleListAgents(w http.ResponseWriter, r *http.Request) {
 	filter := metadataFilter(q)
 	var recs []store.AgentRecord
 	var err error
-	if ident.AppID != "" {
+	// An "agent" key's grants may span the account's apps, so list the
+	// account and let CanUseAgent below keep exactly the granted ones.
+	if ident.AppID != "" && ident.APIKeyType != users.APIKeyTypeAgent {
 		recs, err = s.store.ListAgentsByApp(r.Context(), ident.AppID)
 	} else {
 		recs, err = s.store.ListAgents(r.Context(), ident.AccountID())
@@ -317,7 +325,7 @@ func (s *Server) HandleListAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	matched := make([]store.AgentRecord, 0, len(recs))
 	for _, rec := range recs {
-		if !ident.CanAccessAgent(rec.ID) || !metadataMatches(agentMetadata(&rec), filter) {
+		if !ident.CanUseAgent(rec.ID, rec.UserID, rec.AppID) || !metadataMatches(agentMetadata(&rec), filter) {
 			continue
 		}
 		matched = append(matched, rec)

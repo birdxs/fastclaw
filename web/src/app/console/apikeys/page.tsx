@@ -91,8 +91,6 @@ export default function ApikeysPage() {
   const hasApps = apps.length > 0;
   const appName = (id?: string) =>
     apps.find((a) => a.id === id)?.name || tr("Account (all agents)", "账号（全部 Agent）");
-  const agentsInApp = (appId?: string) =>
-    agents.filter((a) => !appId || a.appId === appId);
 
   async function refresh() {
     setError("");
@@ -308,7 +306,7 @@ export default function ApikeysPage() {
                     ) : (
                       <ScopeChips
                         selectedIds={k.agents || []}
-                        agents={agentsInApp(k.appId)}
+                        agents={agents}
                         onClick={() => openScopeDialog(k)}
                       />
                     )}
@@ -368,7 +366,6 @@ export default function ApikeysPage() {
                       type="button"
                       onClick={() => {
                         setCreateAppId(a.id);
-                        setCreateAgents([]);
                       }}
                       className={
                         "rounded-md border px-2.5 py-1 text-xs transition " +
@@ -400,7 +397,11 @@ export default function ApikeysPage() {
                   selected={createType}
                   onSelect={setCreateType}
                   title={tr("User", "用户")}
-                  description={tr("Access all your agents, including future ones, and create new agents.", "可访问自己的所有 Agent（包括之后新建的）并创建 Agent。")}
+                  description={
+                    createAppId
+                      ? tr("Access every agent in this app, including future ones, and create new agents in it.", "可访问该应用的所有 Agent（包括之后新建的），并在该应用中创建 Agent。")
+                      : tr("Access all your agents, including future ones, and create new agents.", "可访问自己的所有 Agent（包括之后新建的）并创建 Agent。")
+                  }
                 />
                 <TypeOption
                   value="agent"
@@ -414,13 +415,13 @@ export default function ApikeysPage() {
             {createType === "agent" && (
               <div className="space-y-1.5">
                 <Label>{tr("Allowed agents", "允许访问的 Agent")}</Label>
-                {agentsInApp(createAppId).length === 0 ? (
+                {agents.length === 0 ? (
                   <p className="text-xs text-muted-foreground">
                     {tr("No agents yet — create one from the Agents page first.", "还没有 Agent，请先在 Agent 页面中创建。")}
                   </p>
                 ) : (
                   <div className="flex flex-wrap gap-2">
-                    {agentsInApp(createAppId).map((a) => {
+                    {agents.map((a) => {
                       const active = createAgents.includes(a.id);
                       return (
                         <button
@@ -507,11 +508,11 @@ export default function ApikeysPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="py-2">
-            {agentsInApp(scopeTarget?.appId).length === 0 ? (
+            {agents.length === 0 ? (
               <p className="text-xs text-muted-foreground">{tr("No agents available.", "没有可用的 Agent。")}</p>
             ) : (
               <div className="flex flex-wrap gap-2">
-                {agentsInApp(scopeTarget?.appId).map((a) => {
+                {agents.map((a) => {
                   const active = scopeAgents.includes(a.id);
                   return (
                     <button

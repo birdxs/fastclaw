@@ -79,6 +79,20 @@ func (i Identity) AccountID() string {
 	return i.EffectiveUserID()
 }
 
+// CanUseAgent is the app-aware agent gate. An "agent" key's explicit
+// grants work for any agent of the key's account, across apps — granting
+// is the authorization. Every other caller is limited to the agents of
+// its app (AppOwnsAgent), and still to the key's ACL (CanAccessAgent).
+func (i Identity) CanUseAgent(agentID, agentUserID, agentAppID string) bool {
+	if !i.CanAccessAgent(agentID) {
+		return false
+	}
+	if i.AuthMethod == "apikey" && i.APIKeyType == users.APIKeyTypeAgent {
+		return agentUserID != "" && agentUserID == i.AccountID()
+	}
+	return i.AppOwnsAgent(agentUserID, agentAppID)
+}
+
 // AppOwnsAgent reports whether an agent (by its owner account and app)
 // belongs to the app this request acts for. Requests without an app
 // (cookie sessions) fall back to account ownership.

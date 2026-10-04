@@ -41,8 +41,9 @@ agent ID will now get a 404 instead of a reply from some other agent.
   and new agents and keys stay account-level, and an account-level `user`
   key still covers every agent of the account. Create apps (e.g.
   `douchat-prod`, `douchat-dev`) under API Keys → New app and pick one when
-  issuing a key: that key only sees, creates and bills agents of its app —
-  on `/v1` and on `/api/agents`. `GET /v1/usage?scope=app` counts the app's
+  issuing a key: a `user` key in an app only sees, creates and bills agents
+  of its app — on `/v1` and on `/api/agents`. An `agent` key uses exactly
+  the agents granted to it, which may be any agent of the account. `GET /v1/usage?scope=app` counts the app's
   agents (the whole account for account-level keys). Console endpoints:
   `GET/POST /api/apps`, `PATCH/DELETE /api/apps/{id}`.
 - **On-demand agent loading:** accounts with more than 50 agents
