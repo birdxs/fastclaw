@@ -12,11 +12,12 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/users"
 )
 
-// Apps are the tenants of the runtime API: an integrating application in
-// one environment (douchat-prod, douchat-dev, weclaw). Each account has a
-// default app that holds everything created before apps existed and
-// everything the console creates. Apps are managed from the console only;
-// api keys can't create or modify them.
+// Apps are optional tenants of the runtime API: an integrating application
+// in one environment (douchat-prod, douchat-dev). Without apps, agents and
+// api keys belong to the account directly and an account-level key covers
+// every agent. An app narrows a key to the agents created in that app.
+// Apps are managed from the console only; api keys can't create or modify
+// them.
 
 const maxAppNameLen = 64
 
@@ -61,10 +62,6 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 	}
 	uid := ident.EffectiveUserID()
 	ctx := r.Context()
-	if _, err := s.dataStore.EnsureDefaultApp(ctx, uid); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
 	apps, err := s.dataStore.ListApps(ctx, uid)
 	if err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -82,7 +79,6 @@ func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
 		out = append(out, map[string]any{
 			"id":         a.ID,
 			"name":       a.Name,
-			"isDefault":  a.IsDefault,
 			"createdAt":  a.CreatedAt,
 			"agentCount": len(ids),
 			"keyCount":   keyCount[a.ID],
@@ -110,12 +106,6 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := ident.EffectiveUserID()
-	// Make sure the default app exists first so the new one is never
-	// mistaken for it.
-	if _, err := s.dataStore.EnsureDefaultApp(r.Context(), uid); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
 	app := &store.AppRecord{OwnerUserID: uid, Name: name}
 	if err := s.dataStore.CreateApp(r.Context(), app); err != nil {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
@@ -154,7 +144,7 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"app": app})
 }
 
-// DELETE /api/apps/{id} — only an empty, non-default app.
+// DELETE /api/apps/{id} — only an app with no agents and no keys left.
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	ident, ok := s.requireAppManager(w, r)
 	if !ok || !s.requireWritable(w, r) {
@@ -162,10 +152,6 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	}
 	app := s.ownedApp(w, r, ident, r.PathValue("id"))
 	if app == nil {
-		return
-	}
-	if app.IsDefault {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "the default app can't be deleted"})
 		return
 	}
 	if err := s.dataStore.DeleteApp(r.Context(), app.ID); err != nil {
@@ -179,15 +165,16 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// resolveKeyApp picks the app a new api key for ownerID belongs to:
-// the requested one (which must be the owner's) or the owner's default.
-func (s *Server) resolveKeyApp(r *http.Request, ownerID, appID string) (*store.AppRecord, error) {
-	if strings.TrimSpace(appID) == "" {
-		return s.dataStore.EnsureDefaultApp(r.Context(), ownerID)
+// resolveKeyApp validates the app a new api key for ownerID should act
+// for. Empty appID is an account-level key and returns "".
+func (s *Server) resolveKeyApp(r *http.Request, ownerID, appID string) (string, error) {
+	appID = strings.TrimSpace(appID)
+	if appID == "" {
+		return "", nil
 	}
 	app, err := s.dataStore.GetApp(r.Context(), appID)
 	if err != nil || app == nil || app.OwnerUserID != ownerID {
-		return nil, errors.New("app not found")
+		return "", errors.New("app not found")
 	}
-	return app, nil
+	return app.ID, nil
 }

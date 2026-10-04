@@ -336,8 +336,8 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 		return
 	}
-	// An app-scoped api key creates into its app; console sessions into
-	// the account's default app (the store fills an empty AppID).
+	// An app-scoped api key creates into its app; console sessions and
+	// account-level keys create account-level agents (empty AppID).
 	rec := &store.AgentRecord{
 		ID:     id,
 		UserID: uid,

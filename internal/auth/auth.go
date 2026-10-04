@@ -54,8 +54,9 @@ type Identity struct {
 	// 403 when this is set.
 	ActAsUserID string
 
-	// AppID is the app (tenant) an api_key acts for. Agents are resolved
-	// within it. Empty for cookie sessions, which act for the account.
+	// AppID is the optional app (tenant) an api_key acts for; agents are
+	// then resolved within it. Empty for account-level keys and cookie
+	// sessions, which act for the whole account.
 	AppID string
 
 	// AppUserID and EndUser are set when an api_key request named an

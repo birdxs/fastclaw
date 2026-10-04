@@ -488,8 +488,8 @@ func TestV1UnauthorizedUsesUnifiedError(t *testing.T) {
 	}
 }
 
-// Two apps of one account (e.g. douchat-prod and douchat-dev) are as
-// isolated from each other as apps of different accounts.
+// An app key only sees its app — not the account's other agents — while
+// an account-level key sees everything of the account.
 func TestAppsOfOneAccountAreIsolated(t *testing.T) {
 	h := newV1Harness(t)
 	ctx := context.Background()
@@ -501,10 +501,17 @@ func TestAppsOfOneAccountAreIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	prodAgent := h.createAgent(h.keyA, "prod agent", nil)
+	prodAgent := h.createAgent(h.keyA, "account agent", nil)
 	devAgent := h.createAgent(devKey, "dev agent", nil)
 	if rec, _ := h.st.GetAgent(ctx, devAgent); rec.AppID != dev.ID || rec.UserID != h.appA {
 		t.Fatalf("dev agent = %+v, want app %s under the same account", rec, dev.ID)
+	}
+	if rec, _ := h.st.GetAgent(ctx, prodAgent); rec.AppID != "" {
+		t.Fatalf("an account-level key creates account-level agents, got app %q", rec.AppID)
+	}
+	// The account-level key covers the whole account, apps included.
+	if _, out := h.do("GET", "/v1/agents", h.keyA, nil); len(out["agents"].([]any)) != 2 {
+		t.Fatalf("account key should list every agent of the account: %v", out)
 	}
 
 	_, out := h.do("GET", "/v1/agents", devKey, nil)

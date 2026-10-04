@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 
@@ -188,11 +187,13 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	return nil
 }
 
-// migrateApps introduces apps as the runtime's tenants: it adds app_id to
-// agents and apikeys, then gives every account that owns agents or keys a
-// default app and files its unassigned agents and keys under it. Existing
-// keys keep working unchanged. Idempotent: only rows with an empty app_id
-// are touched.
+// migrateApps adds the optional app_id column to agents and apikeys.
+// Apps are opt-in: an empty app_id means the agent or key belongs to the
+// account directly, which is what every pre-existing row stays.
+//
+// It also unwinds the short-lived "default app" variant of this
+// migration (dev builds only): rows filed under an account's default app
+// go back to account level and the default apps are removed.
 func (d *DBStore) migrateApps(ctx context.Context) error {
 	for _, table := range []string{"agents", "apikeys"} {
 		has, err := d.tableHasColumn(ctx, table, "app_id")
@@ -210,49 +211,22 @@ func (d *DBStore) migrateApps(ctx context.Context) error {
 			return fmt.Errorf("index %s.app_id: %w", table, err)
 		}
 	}
-	// At most one default app per account, even across replicas.
-	if _, err := d.db.ExecContext(ctx,
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_apps_one_default ON apps (owner_user_id) WHERE is_default = TRUE`); err != nil {
-		return fmt.Errorf("index apps default: %w", err)
-	}
-	rows, err := d.db.QueryContext(ctx, `
-		SELECT DISTINCT user_id FROM agents WHERE app_id = ''
-		UNION
-		SELECT DISTINCT user_id FROM apikeys WHERE app_id = ''`)
-	if err != nil {
+	hasDefault, err := d.tableHasColumn(ctx, "apps", "is_default")
+	if err != nil || !hasDefault {
 		return err
 	}
-	var owners []string
-	for rows.Next() {
-		var uid string
-		if err := rows.Scan(&uid); err != nil {
-			rows.Close()
-			return err
-		}
-		if uid != "" {
-			owners = append(owners, uid)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, uid := range owners {
-		app, err := d.EnsureDefaultApp(ctx, uid)
-		if err != nil {
-			return err
-		}
-		for _, table := range []string{"agents", "apikeys"} {
-			if _, err := d.db.ExecContext(ctx,
-				fmt.Sprintf(`UPDATE `+table+` SET app_id = %s WHERE user_id = %s AND app_id = ''`, d.ph(1), d.ph(2)),
-				app.ID, uid); err != nil {
-				return fmt.Errorf("assign %s to default app: %w", table, err)
-			}
+	for _, q := range []string{
+		`UPDATE agents SET app_id = '' WHERE app_id IN (SELECT id FROM apps WHERE is_default = TRUE)`,
+		`UPDATE apikeys SET app_id = '' WHERE app_id IN (SELECT id FROM apps WHERE is_default = TRUE)`,
+		`DELETE FROM apps WHERE is_default = TRUE`,
+		`DROP INDEX IF EXISTS idx_apps_one_default`,
+		`ALTER TABLE apps DROP COLUMN is_default`,
+	} {
+		if _, err := d.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("undo default apps: %w", err)
 		}
 	}
-	if len(owners) > 0 {
-		slog.Info("migrated accounts to default apps", "accounts", len(owners))
-	}
+	slog.Info("moved default-app agents and keys back to account level")
 	return nil
 }
 
@@ -1684,7 +1658,6 @@ func (d *DBStore) migrationSQL() []string {
 			id TEXT PRIMARY KEY,
 			owner_user_id TEXT NOT NULL,
 			name TEXT NOT NULL DEFAULT '',
-			is_default BOOLEAN NOT NULL DEFAULT FALSE,
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_apps_owner ON apps (owner_user_id)`,
@@ -2427,12 +2400,10 @@ func (d *DBStore) CreateAPIKey(ctx context.Context, ak *APIKeyRecord) error {
 	if ak.Type == "" {
 		ak.Type = "agent"
 	}
-	if ak.AppID == "" {
-		app, err := d.EnsureDefaultApp(ctx, ak.UserID)
-		if err != nil {
-			return err
+	if ak.AppID != "" {
+		if app, err := d.GetApp(ctx, ak.AppID); err != nil || app.OwnerUserID != ak.UserID {
+			return errors.New("store: api key app must belong to the key's owner")
 		}
-		ak.AppID = app.ID
 	}
 	_, err := d.db.ExecContext(ctx,
 		fmt.Sprintf(`INSERT INTO apikeys (id, user_id, name, key_hash, key_prefix, type, created_at, app_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)`,
@@ -2590,11 +2561,11 @@ func (d *DBStore) ListAgentIDsByApp(ctx context.Context, appID string) ([]string
 
 // --- Apps ---
 
-const appSelectCols = `id, owner_user_id, name, is_default, created_at`
+const appSelectCols = `id, owner_user_id, name, created_at`
 
 func scanApp(row interface{ Scan(...any) error }) (*AppRecord, error) {
 	var a AppRecord
-	if err := row.Scan(&a.ID, &a.OwnerUserID, &a.Name, &a.IsDefault, &a.CreatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.OwnerUserID, &a.Name, &a.CreatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	return &a, nil
@@ -2623,9 +2594,9 @@ func (d *DBStore) CreateApp(ctx context.Context, app *AppRecord) error {
 		app.CreatedAt = time.Now().UTC()
 	}
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO apps (id, owner_user_id, name, is_default, created_at) VALUES (%s, %s, %s, %s, %s)`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
-		app.ID, app.OwnerUserID, app.Name, app.IsDefault, app.CreatedAt)
+		fmt.Sprintf(`INSERT INTO apps (id, owner_user_id, name, created_at) VALUES (%s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		app.ID, app.OwnerUserID, app.Name, app.CreatedAt)
 	return err
 }
 
@@ -2636,7 +2607,7 @@ func (d *DBStore) GetApp(ctx context.Context, id string) (*AppRecord, error) {
 
 func (d *DBStore) ListApps(ctx context.Context, ownerUserID string) ([]AppRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT `+appSelectCols+` FROM apps WHERE owner_user_id = %s ORDER BY is_default DESC, created_at`, d.ph(1)),
+		fmt.Sprintf(`SELECT `+appSelectCols+` FROM apps WHERE owner_user_id = %s ORDER BY created_at`, d.ph(1)),
 		ownerUserID)
 	if err != nil {
 		return nil, err
@@ -2666,12 +2637,8 @@ func (d *DBStore) RenameApp(ctx context.Context, id, name string) error {
 }
 
 func (d *DBStore) DeleteApp(ctx context.Context, id string) error {
-	app, err := d.GetApp(ctx, id)
-	if err != nil {
+	if _, err := d.GetApp(ctx, id); err != nil {
 		return err
-	}
-	if app.IsDefault {
-		return errors.New("store: the default app can't be deleted")
 	}
 	var n int
 	if err := d.db.QueryRowContext(ctx,
@@ -2682,44 +2649,10 @@ func (d *DBStore) DeleteApp(ctx context.Context, id string) error {
 	if n > 0 {
 		return ErrAppNotEmpty
 	}
-	_, err = d.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM apps WHERE id = %s`, d.ph(1)), id)
+	_, err := d.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM apps WHERE id = %s`, d.ph(1)), id)
 	return err
 }
 
-// EnsureDefaultApp serializes creation through defaultAppMu so concurrent
-// first requests for one account don't create two default apps.
-func (d *DBStore) EnsureDefaultApp(ctx context.Context, ownerUserID string) (*AppRecord, error) {
-	if ownerUserID == "" {
-		return nil, errors.New("store: EnsureDefaultApp requires owner")
-	}
-	find := func() (*AppRecord, error) {
-		return scanApp(d.db.QueryRowContext(ctx,
-			fmt.Sprintf(`SELECT `+appSelectCols+` FROM apps WHERE owner_user_id = %s AND is_default = TRUE ORDER BY created_at LIMIT 1`, d.ph(1)),
-			ownerUserID))
-	}
-	if app, err := find(); err == nil {
-		return app, nil
-	} else if !errors.Is(err, ErrNotFound) {
-		return nil, err
-	}
-	defaultAppMu.Lock()
-	defer defaultAppMu.Unlock()
-	if app, err := find(); err == nil {
-		return app, nil
-	}
-	app := &AppRecord{OwnerUserID: ownerUserID, Name: "default", IsDefault: true}
-	if err := d.CreateApp(ctx, app); err != nil {
-		// Another replica won the race; idx_apps_one_default makes the
-		// loser fail, so read the winner's row.
-		if existing, ferr := find(); ferr == nil {
-			return existing, nil
-		}
-		return nil, err
-	}
-	return app, nil
-}
-
-var defaultAppMu sync.Mutex
 
 func (d *DBStore) ListPublicAgents(ctx context.Context) ([]AgentRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
@@ -2750,25 +2683,13 @@ func (d *DBStore) SaveAgent(ctx context.Context, agent *AgentRecord) error {
 	if agent.UserID == "" {
 		return errors.New("store: agent.user_id is required")
 	}
+	// app_id is optional: empty means the agent belongs to the account
+	// directly. A record copied from another account (fork, transfer)
+	// carries that account's app, so it drops back to account level — an
+	// agent may only live in its owner's apps.
 	if agent.AppID != "" {
-		// A record copied from another account (fork, transfer) carries
-		// that account's app; an agent may only live in its owner's apps.
 		if app, err := d.GetApp(ctx, agent.AppID); err != nil || app.OwnerUserID != agent.UserID {
 			agent.AppID = ""
-		}
-	}
-	if agent.AppID == "" {
-		// Callers that predate apps (console, admin provisioning, CLI)
-		// don't set one. Keep an existing assignment; otherwise file the
-		// agent under the owner's default app.
-		if cur, err := d.GetAgent(ctx, agent.ID); err == nil && cur.AppID != "" && cur.UserID == agent.UserID {
-			agent.AppID = cur.AppID
-		} else {
-			app, err := d.EnsureDefaultApp(ctx, agent.UserID)
-			if err != nil {
-				return err
-			}
-			agent.AppID = app.ID
 		}
 	}
 	cfgData, _ := json.Marshal(agent.Config)

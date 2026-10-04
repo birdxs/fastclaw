@@ -86,9 +86,9 @@ func (k *APIKeys) Create(ctx context.Context, userID, name, keyType string, agen
 	return k.CreateInApp(ctx, userID, "", name, keyType, agentIDs)
 }
 
-// CreateInApp is Create for a specific app of userID. Empty appID means
-// the owner's default app. Callers must have checked that the app belongs
-// to userID.
+// CreateInApp is Create for a specific app of userID. Empty appID is an
+// account-level key covering every agent of the account. Callers must
+// have checked that the app belongs to userID.
 func (k *APIKeys) CreateInApp(ctx context.Context, userID, appID, name, keyType string, agentIDs []string) (*APIKey, string, error) {
 	if userID == "" {
 		return nil, "", errors.New("users.APIKeys.Create: userID is required")
@@ -228,8 +228,9 @@ func (k *APIKeys) LookupByToken(ctx context.Context, token string) (*Resolved, e
 	case APIKeyTypeAdmin:
 		// Admin keys bypass the per-agent gate entirely; leave empty.
 	case APIKeyTypeUser:
-		// Every agent of the key's app. A second (id-only) list per
-		// request is the price of "no ACL maintenance for new agents".
+		// Every agent of the key's app, or of the whole account for an
+		// account-level key. A second (id-only) list per request is the
+		// price of "no ACL maintenance for new agents".
 		if rec.AppID != "" {
 			agents, err = k.store.ListAgentIDsByApp(ctx, rec.AppID)
 		} else {

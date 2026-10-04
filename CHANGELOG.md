@@ -36,16 +36,15 @@ agent ID will now get a 404 instead of a reply from some other agent.
   rows include `userId` and `endUser`.
 - **Unified `/v1` errors:** `{"error": {"type", "code", "message"}}` with a
   stable `code` (including 401s and rate limits).
-- **Apps (tenants):** new `apps` table; agents and API keys carry `app_id`.
-  On startup every account that owns agents or keys gets a `default` app and
-  its existing agents and keys are filed under it — existing keys keep
-  working with the same access. Create more apps (e.g. `douchat-prod`,
-  `douchat-dev`) under API Keys → New app and pick the app when issuing a
-  key. A `user` key now covers the agents of its app (for existing keys:
-  every agent of the account, as before), agents it creates land in its app,
-  and `/v1` plus `/api/agents` never show it another app's agents.
-  `GET /v1/usage?scope=app` counts only the app's agents. Console
-  endpoints: `GET/POST /api/apps`, `PATCH/DELETE /api/apps/{id}`.
+- **Apps (optional tenants):** new `apps` table; agents and API keys get
+  an optional `app_id`. Nothing changes until you create an app: existing
+  and new agents and keys stay account-level, and an account-level `user`
+  key still covers every agent of the account. Create apps (e.g.
+  `douchat-prod`, `douchat-dev`) under API Keys → New app and pick one when
+  issuing a key: that key only sees, creates and bills agents of its app —
+  on `/v1` and on `/api/agents`. `GET /v1/usage?scope=app` counts the app's
+  agents (the whole account for account-level keys). Console endpoints:
+  `GET/POST /api/apps`, `PATCH/DELETE /api/apps/{id}`.
 - **On-demand agent loading:** accounts with more than 50 agents
   (`FASTCLAW_EAGER_AGENT_LIMIT`) load agents on first use and drop idle ones.
   Agents bound to IM channels or with enabled cron jobs are still loaded at

@@ -504,13 +504,12 @@ export async function createApikey(req: { name: string; type: ApikeyType; appId?
   return res.json();
 }
 
-// Apps: the tenants of the runtime API. Every API key and agent belongs to
-// one app; each account has a default app.
+// Apps: optional tenants of the runtime API. Keys and agents without an app
+// belong to the account; an app key only sees the agents of its app.
 
 export interface AppInfo {
   id: string;
   name: string;
-  isDefault: boolean;
   createdAt: string;
   agentCount: number;
   keyCount: number;

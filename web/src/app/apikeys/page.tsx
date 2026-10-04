@@ -91,13 +91,13 @@ export default function ApikeysPage() {
   const [newAppName, setNewAppName] = useState("");
   const [deleteAppTarget, setDeleteAppTarget] = useState<AppInfo | null>(null);
 
-  // The app layer only surfaces once an account has more than one app;
-  // with just the default app the page reads exactly as before.
-  const multiApp = apps.length > 1;
-  const defaultAppId = apps.find((a) => a.isDefault)?.id || "";
-  const appName = (id?: string) => apps.find((a) => a.id === id)?.name || "";
+  // Apps are optional. The app layer only surfaces once the account has
+  // one; until then the page reads exactly as before.
+  const hasApps = apps.length > 0;
+  const appName = (id?: string) =>
+    apps.find((a) => a.id === id)?.name || tr("Account (all agents)", "账号（全部 Agent）");
   const agentsInApp = (appId?: string) =>
-    agents.filter((a) => !appId || !a.appId || a.appId === appId);
+    agents.filter((a) => !appId || a.appId === appId);
 
   async function refresh() {
     setError("");
@@ -214,7 +214,7 @@ export default function ApikeysPage() {
     setCreateName("");
     setCreateType("user");
     setCreateAgents([]);
-    setCreateAppId(defaultAppId);
+    setCreateAppId("");
     setError("");
     setCreateOpen(true);
   }
@@ -251,7 +251,7 @@ export default function ApikeysPage() {
         </div>
       </div>
 
-      {multiApp && (
+      {hasApps && (
         <div className="rounded-lg border border-border bg-card overflow-hidden">
           <Table>
             <TableHeader>
@@ -265,14 +265,7 @@ export default function ApikeysPage() {
             <TableBody>
               {apps.map((a) => (
                 <TableRow key={a.id}>
-                  <TableCell className="font-medium">
-                    {a.name}
-                    {a.isDefault && (
-                      <Badge variant="secondary" className="ml-2 text-xs">
-                        {tr("Default", "默认")}
-                      </Badge>
-                    )}
-                  </TableCell>
+                  <TableCell className="font-medium">{a.name}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{a.agentCount}</TableCell>
                   <TableCell className="text-xs text-muted-foreground">{a.keyCount}</TableCell>
                   <TableCell className="text-right">
@@ -280,7 +273,7 @@ export default function ApikeysPage() {
                       size="icon"
                       variant="ghost"
                       className="text-destructive hover:text-destructive"
-                      disabled={a.isDefault || a.agentCount > 0 || a.keyCount > 0}
+                      disabled={a.agentCount > 0 || a.keyCount > 0}
                       onClick={() => setDeleteAppTarget(a)}
                       title={tr("Delete (only empty apps)", "删除（仅限空应用）")}
                     >
@@ -347,7 +340,7 @@ export default function ApikeysPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>{tr("Name", "名称")}</TableHead>
-                {multiApp && <TableHead>{tr("App", "应用")}</TableHead>}
+                {hasApps && <TableHead>{tr("App", "应用")}</TableHead>}
                 <TableHead>{tr("Type", "类型")}</TableHead>
                 <TableHead>{tr("Key", "密钥")}</TableHead>
                 <TableHead>{tr("Scope", "范围")}</TableHead>
@@ -359,7 +352,7 @@ export default function ApikeysPage() {
               {keys.map((k) => (
                 <TableRow key={k.id}>
                   <TableCell className="font-medium">{k.name || k.id}</TableCell>
-                  {multiApp && (
+                  {hasApps && (
                     <TableCell className="text-xs text-muted-foreground">{appName(k.appId)}</TableCell>
                   )}
                   <TableCell>
@@ -375,7 +368,7 @@ export default function ApikeysPage() {
                       <span className="text-xs text-muted-foreground">{tr("All agents (platform-wide)", "平台中的所有 Agent")}</span>
                     ) : k.type === "user" ? (
                       <span className="text-xs text-muted-foreground">
-                        {multiApp
+                        {k.appId
                           ? tr("All agents in this app (new ones included automatically)", "该应用的所有 Agent（自动包含新建的 Agent）")
                           : tr("All your agents (new ones included automatically)", "你的所有 Agent（自动包含新建的 Agent）")}
                       </span>
@@ -432,13 +425,13 @@ export default function ApikeysPage() {
                 autoFocus
               />
             </div>
-            {multiApp && (
+            {hasApps && (
               <div className="space-y-1.5">
                 <Label>{tr("App", "应用")}</Label>
                 <div className="flex flex-wrap gap-2">
-                  {apps.map((a) => (
+                  {[{ id: "", name: appName("") }, ...apps].map((a) => (
                     <button
-                      key={a.id}
+                      key={a.id || "account"}
                       type="button"
                       onClick={() => {
                         setCreateAppId(a.id);
@@ -543,8 +536,8 @@ export default function ApikeysPage() {
             <DialogTitle>{tr("New app", "新建应用")}</DialogTitle>
             <DialogDescription>
               {tr(
-                "An app is one integration environment, such as douchat-prod or douchat-dev. Its API keys only see the agents created in it.",
-                "一个应用对应一个接入环境，例如 douchat-prod 或 douchat-dev。应用的密钥只能看到在该应用里创建的 Agent。",
+                "Optional. An app is one integration environment, such as douchat-prod or douchat-dev. Its API keys only see the agents created in it; keys without an app see all your agents.",
+                "可选。一个应用对应一个接入环境，例如 douchat-prod 或 douchat-dev。应用的密钥只能看到在该应用里创建的 Agent；不属于任何应用的密钥能看到你的全部 Agent。",
               )}
             </DialogDescription>
           </DialogHeader>

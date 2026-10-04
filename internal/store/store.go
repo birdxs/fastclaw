@@ -69,18 +69,15 @@ type Store interface {
 	ListAgentsByApp(ctx context.Context, appID string) ([]AgentRecord, error)
 	ListAgentIDsByApp(ctx context.Context, appID string) ([]string, error)
 
-	// Apps are the tenants of the runtime API. Every agent and api key
-	// belongs to exactly one app; every account that owns agents or keys
-	// has a default app.
+	// Apps are optional tenants of the runtime API. An agent or api key
+	// with an empty app_id belongs to the account directly.
 	CreateApp(ctx context.Context, app *AppRecord) error
 	GetApp(ctx context.Context, id string) (*AppRecord, error)
 	ListApps(ctx context.Context, ownerUserID string) ([]AppRecord, error)
 	RenameApp(ctx context.Context, id, name string) error
 	// DeleteApp removes an app that has no agents and no api keys left;
-	// it returns ErrAppNotEmpty otherwise. Default apps can't be deleted.
+	// it returns ErrAppNotEmpty otherwise.
 	DeleteApp(ctx context.Context, id string) error
-	// EnsureDefaultApp returns ownerUserID's default app, creating it.
-	EnsureDefaultApp(ctx context.Context, ownerUserID string) (*AppRecord, error)
 	ListPublicAgents(ctx context.Context) ([]AgentRecord, error)
 	GetAgent(ctx context.Context, agentID string) (*AgentRecord, error)
 	SaveAgent(ctx context.Context, agent *AgentRecord) error
@@ -388,8 +385,8 @@ type PushDeviceRecord struct {
 type APIKeyRecord struct {
 	ID     string `json:"id"`
 	UserID string `json:"userId"`
-	// AppID is the app the key acts for. Empty on create means the
-	// owner's default app.
+	// AppID is the app the key acts for. Empty = an account-level key
+	// covering every agent of the account.
 	AppID     string    `json:"appId"`
 	Name      string    `json:"name,omitempty"`
 	KeyHash   string    `json:"-"`
@@ -414,9 +411,9 @@ type APIKeyRecord struct {
 type AgentRecord struct {
 	ID     string `json:"id"`
 	UserID string `json:"userId"`
-	// AppID is the app the agent belongs to. UserID stays the owning
-	// account (the console works per account); AppID is the tenant the
-	// runtime API isolates on. Empty on save means the owner's default app.
+	// AppID is the optional app the agent belongs to. UserID is always
+	// the owning account; AppID narrows it to one tenant of that account.
+	// Empty = the agent belongs to the account directly.
 	AppID     string                 `json:"appId"`
 	Name      string                 `json:"name"`
 	Config    map[string]interface{} `json:"config,omitempty"`
@@ -425,13 +422,12 @@ type AgentRecord struct {
 	UpdatedAt time.Time              `json:"updatedAt"`
 }
 
-// AppRecord is one integrating application (tenant) owned by an account,
-// e.g. "douchat-prod". IDs are prefixed app_.
+// AppRecord is one optional integrating application (tenant) owned by an
+// account, e.g. "douchat-prod". IDs are prefixed app_.
 type AppRecord struct {
 	ID          string    `json:"id"`
 	OwnerUserID string    `json:"ownerUserId"`
 	Name        string    `json:"name"`
-	IsDefault   bool      `json:"isDefault"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
 

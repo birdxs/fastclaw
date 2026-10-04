@@ -242,8 +242,8 @@ func (s *Server) HandleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeServerError(w, err)
 		return
 	}
-	// AppID empty (cookie session) files the agent under the account's
-	// default app.
+	// An app key creates into its app; an account-level key (or cookie
+	// session) creates an account-level agent with an empty AppID.
 	rec := &store.AgentRecord{ID: id, UserID: owner, AppID: ident.AppID, Name: req.Name, Config: map[string]interface{}{}}
 	if d := strings.TrimSpace(req.Description); d != "" {
 		rec.Config["description"] = d
