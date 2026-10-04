@@ -974,6 +974,24 @@ func (s *Server) workspaceSessionScope(ctx context.Context, agentID, urlToken st
 	return chatID
 }
 
+// foreignSessionChatID resolves a session_key to its chat_id under the
+// session's own user. Only for callers already verified to own the agent.
+func (s *Server) foreignSessionChatID(ctx context.Context, agentID, sessionKey string) string {
+	tok := strings.TrimSpace(sessionKey)
+	if tok == "" || s.dataStore == nil {
+		return ""
+	}
+	owner, err := s.dataStore.LookupSessionOwner(ctx, agentID, tok)
+	if err != nil || owner == "" {
+		return ""
+	}
+	_, _, chatID, err := s.dataStore.LookupSessionTriple(ctx, owner, agentID, tok)
+	if err != nil {
+		return ""
+	}
+	return chatID
+}
+
 func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if s.workspaceStore == nil {
@@ -1099,6 +1117,12 @@ func (s *Server) fileScopeForRequest(r *http.Request, agentID string) fileScope 
 		return rejectAllScope()
 	}
 	chatID := s.workspaceSessionScope(r.Context(), agentID, rawSession)
+	if chatID == "" && s.callerOwnsAgent(r, agentID) {
+		// The agent's owner may read any conversation of their agent —
+		// e.g. one an app's end-user had over the API, which lives under
+		// that end-user's user_id. Resolve it under its real owner.
+		chatID = s.foreignSessionChatID(r.Context(), agentID, rawSession)
+	}
 	if chatID == "" {
 		// sessionId didn't resolve to a chat THIS caller owns — either
 		// it doesn't exist or it belongs to another user. Either way,

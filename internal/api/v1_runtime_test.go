@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
 	"github.com/fastclaw-ai/fastclaw/internal/users"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // recordingProvider answers every turn with a fixed reply and keeps the
@@ -27,6 +29,23 @@ import (
 type recordingProvider struct {
 	mu     sync.Mutex
 	system string
+	// reply overrides "pong"; onChat runs during the model call (a test
+	// stands in for the agent's tools writing files).
+	reply  string
+	onChat func()
+}
+
+func (p *recordingProvider) answer() string {
+	p.mu.Lock()
+	hook, reply := p.onChat, p.reply
+	p.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
+	if reply != "" {
+		return reply
+	}
+	return "pong"
 }
 
 func (p *recordingProvider) record(messages []provider.Message) {
@@ -50,13 +69,13 @@ func (p *recordingProvider) lastSystem() string {
 
 func (p *recordingProvider) Chat(_ context.Context, messages []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Response, error) {
 	p.record(messages)
-	return &provider.Response{Content: "pong"}, nil
+	return &provider.Response{Content: p.answer()}, nil
 }
 
 func (p *recordingProvider) ChatStream(_ context.Context, messages []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.StreamReader, error) {
 	p.record(messages)
 	ch := make(chan provider.StreamChunk, 1)
-	ch <- provider.StreamChunk{Content: "pong", Done: true}
+	ch <- provider.StreamChunk{Content: p.answer(), Done: true}
 	close(ch)
 	return provider.NewStreamReader(ch), nil
 }
@@ -120,6 +139,7 @@ func (f *fakeRuntime) InvalidateAgent(string) {}
 type v1Harness struct {
 	t       *testing.T
 	st      *store.DBStore
+	ws      *workspace.LocalFS
 	rt      *fakeRuntime
 	mux     *http.ServeMux
 	appA    string
@@ -156,6 +176,8 @@ func newV1Harness(t *testing.T) *v1Harness {
 	srv := NewServer(h.rt, authResolver, nil)
 	srv.SetStore(st)
 	srv.SetMeter(usage.NewSQLMeter(st.DB(), "sqlite"))
+	h.ws = workspace.NewLocalFS(t.TempDir())
+	srv.SetWorkspaceStore(h.ws)
 	h.mux = http.NewServeMux()
 	srv.RegisterRoutes(h.mux)
 	return h
@@ -523,5 +545,110 @@ func TestAgentKeyUsesItsGrants(t *testing.T) {
 	})
 	if code != http.StatusNotFound || errCode(out) != "agent_not_found" {
 		t.Fatalf("ungranted chat: %d %v", code, out)
+	}
+}
+
+// Files the agent writes into the conversation workspace come back with
+// the reply — linked ones first, uploads excluded — and download through
+// /v1 only within the caller's namespace.
+func TestChatReturnsProducedFiles(t *testing.T) {
+	h := newV1Harness(t)
+	ctx := context.Background()
+	id := h.createAgent(h.keyA, "Editor", nil)
+	const session = "snapok:edit:1"
+	png := []byte("\x89PNG fake image")
+	h.rt.prov.mu.Lock()
+	h.rt.prov.reply = "Done: ![edited](/workspace/out/edited.png)"
+	h.rt.prov.onChat = func() {
+		_ = h.ws.Put(ctx, id, "", session, "out/edited.png", bytes.NewReader(png), int64(len(png)), "image/png")
+	}
+	h.rt.prov.mu.Unlock()
+
+	upload := "data:image/png;base64,iVBORw0KGgo="
+	code, out := h.do("POST", "/v1/chat/completions", h.keyA, map[string]any{
+		"agent_id": id, "images": []string{upload}, "return_files": "inline",
+		"messages": []map[string]string{{"role": "user", "content": "make the background blue"}},
+	}, "X-Fastclaw-Session-Key", session, "X-Fastclaw-End-User", "alice")
+	if code != http.StatusOK {
+		t.Fatalf("chat: %d %v", code, out)
+	}
+	files, _ := out["files"].([]any)
+	if len(files) != 1 {
+		t.Fatalf("files = %v, want just the produced file (not the upload)", out["files"])
+	}
+	f := files[0].(map[string]any)
+	wantURL := "http://example.com/v1/agents/" + id + "/sessions/snapok:edit:1/files/out/edited.png"
+	if f["path"] != "out/edited.png" || f["content_type"] != "image/png" || f["url"] != wantURL {
+		t.Fatalf("file = %v", f)
+	}
+	if f["data_url"] != "data:image/png;base64,"+base64.StdEncoding.EncodeToString(png) {
+		t.Fatalf("inline data_url = %v", f["data_url"])
+	}
+
+	// The conversation is alice's: record it the way the session store does.
+	alice, _ := h.st.GetUserByExternal(ctx, h.appA, "alice")
+	if _, err := h.st.DB().ExecContext(ctx,
+		`INSERT INTO sessions (user_id, agent_id, session_key, channel, chat_id) VALUES (?, ?, 's-1', 'api', ?)`,
+		alice.ID, id, session); err != nil {
+		t.Fatal(err)
+	}
+	get := func(path string, headers ...string) (int, string) {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer "+h.keyA)
+		for i := 0; i+1 < len(headers); i += 2 {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+		rec := httptest.NewRecorder()
+		h.mux.ServeHTTP(rec, req)
+		return rec.Code, rec.Body.String()
+	}
+	filePath := "/v1/agents/" + id + "/sessions/snapok:edit:1/files/out/edited.png"
+	if code, body := get(filePath, "X-Fastclaw-End-User", "alice"); code != http.StatusOK || body != string(png) {
+		t.Fatalf("download as alice: %d %q", code, body)
+	}
+	for name, hdr := range map[string][]string{
+		"another end-user":  {"X-Fastclaw-End-User", "bob"},
+		"the app namespace": {},
+	} {
+		if code, _ := get(filePath, hdr...); code != http.StatusNotFound {
+			t.Fatalf("download as %s: %d, want 404", name, code)
+		}
+	}
+	// The mux cleans literal ".." (redirect); an encoded one reaches the
+	// handler, which keeps it inside the conversation's workspace.
+	for _, p := range []string{"files/../../../etc/passwd", "files/..%2F..%2F..%2Fsessions%2Fother%2Fx"} {
+		if code, _ := get("/v1/agents/"+id+"/sessions/snapok:edit:1/"+p, "X-Fastclaw-End-User", "alice"); code == http.StatusOK {
+			t.Fatalf("path traversal %s: %d", p, code)
+		}
+	}
+}
+
+func TestStreamedChatReturnsFilesOnFinalChunk(t *testing.T) {
+	h := newV1Harness(t)
+	ctx := context.Background()
+	id := h.createAgent(h.keyA, "Editor", nil)
+	h.rt.prov.mu.Lock()
+	h.rt.prov.onChat = func() {
+		_ = h.ws.Put(ctx, id, "", "s:1", "result.png", bytes.NewReader([]byte("img")), 3, "image/png")
+	}
+	h.rt.prov.mu.Unlock()
+	blob, _ := json.Marshal(map[string]any{
+		"agent_id": id, "stream": true,
+		"messages": []map[string]string{{"role": "user", "content": "go"}},
+	})
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(blob))
+	req.Header.Set("Authorization", "Bearer "+h.keyA)
+	req.Header.Set("X-Fastclaw-Session-Key", "s:1")
+	rec := httptest.NewRecorder()
+	h.mux.ServeHTTP(rec, req)
+	var final map[string]any
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, "data: {") && strings.Contains(line, `"finish_reason":"stop"`) {
+			_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &final)
+		}
+	}
+	files, _ := final["files"].([]any)
+	if len(files) != 1 || files[0].(map[string]any)["path"] != "result.png" {
+		t.Fatalf("final chunk files = %v\n%s", final["files"], rec.Body.String())
 	}
 }

@@ -46,6 +46,13 @@ agent ID will now get a 404 instead of a reply from some other agent.
   console's new **Integration** page links it and builds a ready-to-paste
   prompt for the coding agent wiring another app to FastClaw. It replaces
   `skills/fastclaw-api-integration`; `docs/upstream-api.md` now points to it.
+- **Files from `/v1` conversations:** files the agent creates or changes
+  in a turn come back with the reply in `files` (top level, or on the final
+  streaming chunk) with a download URL —
+  `GET /v1/agents/{id}/sessions/{session_key}/files/{path}`, limited to the
+  caller's namespace (an end-user only reads their own conversations).
+  `"return_files": "inline"` adds small files as data URLs. Agents are told
+  never to upload users' files to third-party hosts to produce a link.
 - **On-demand agent loading:** accounts with more than 50 agents
   (`FASTCLAW_EAGER_AGENT_LIMIT`) load agents on first use and drop idle ones.
   Agents bound to IM channels or with enabled cron jobs are still loaded at
@@ -91,6 +98,16 @@ area they were last in (their last conversation by default). Accounts
 without agents land on `/console/agents/` to create one.
 
 ### Fixed
+
+- **Security: chatters of an agent attached into their own space were
+  treated as its operator.** API end-users (`X-Fastclaw-End-User` / `user`),
+  public-link visitors and admins chatting with someone else's agent got
+  operator trust — on self-hosted installs that meant host-shell `exec` and
+  host file access. Operator trust now follows the agent's real owner
+  (`agents.user_id`); everyone else is a guest whose commands run in the
+  sandbox (or are refused without one).
+- The agent owner's session file panel now shows files of conversations
+  that belong to other users (e.g. an app's end-users over the API).
 
 - `GET /v1/usage?user_id=` and the `/v1/quota` endpoints accepted any user
   ID. They now only accept the key's own account or one of its end-users

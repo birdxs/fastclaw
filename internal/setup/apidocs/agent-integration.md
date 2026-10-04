@@ -187,8 +187,44 @@ curl -sN "$FASTCLAW_BASE_URL/v1/chat/completions" \
 Streaming returns OpenAI SSE chunks
 (`data: {"choices":[{"delta":{"content":"..."}}]}` … `data: [DONE]`);
 non-streaming returns an OpenAI `chat.completion` (`choices[0].message.content`).
-The reply is text. The request's `model` field doesn't change the agent's
-model — the agent's configuration decides it.
+The request's `model` field doesn't change the agent's model — the agent's
+configuration decides it.
+
+API conversations are never trusted with the FastClaw host: the agent's
+tools (shell, scripts) run in FastClaw's sandbox. If the FastClaw operator
+hasn't configured one, the agent can still answer but can't run commands.
+
+### Files the agent produces
+
+Files the agent creates or changes during a turn — e.g. an edited image —
+come back with the reply in `files` (non-streaming: top level; streaming:
+on the final chunk, the one with `finish_reason`). Files the reply links as
+`/workspace/<path>` come first; your own uploads are not echoed back.
+
+```json
+{
+  "choices": [{ "message": { "role": "assistant", "content": "Done: ![edited](/workspace/edited.png)" } }],
+  "files": [
+    {
+      "name": "edited.png",
+      "path": "edited.png",
+      "size": 77490,
+      "content_type": "image/png",
+      "url": "https://claw.example.com/v1/agents/agt_…/sessions/myapp%3Aconv_42/files/edited.png"
+    }
+  ]
+}
+```
+
+- Download `url` with the same `Authorization` header — and the same
+  `X-Fastclaw-End-User` when the conversation had one: end-users can only
+  read their own conversations' files. It is
+  `GET /v1/agents/{agent_id}/sessions/{session_key}/files/{path}`
+  (`?project_id=` for project conversations).
+- Send `"return_files": "inline"` to also get each file's bytes as a
+  `data_url` (files up to 10 MB, 25 MB per reply) — simplest for one image.
+- Don't rely on the agent to put files anywhere else: FastClaw instructs it
+  not to upload your users' files to third-party services.
 
 ## 6. Usage and quotas
 
@@ -226,4 +262,5 @@ Every `/v1` error is `{"error": {"type", "code", "message"}}`. Branch on
 - [ ] Deterministic `X-Fastclaw-Session-Key` per conversation; `user` set when
       a user's history must stay private.
 - [ ] Streaming parsed as SSE; errors handled by `error.code`.
+- [ ] Produced files taken from `files` (download `url` or `return_files: "inline"`).
 - [ ] No FastClaw key or URL in client-side code.

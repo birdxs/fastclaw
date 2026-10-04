@@ -248,6 +248,7 @@ func runGateway(port int) error {
 	apiSrv.SetMeter(gw.Usage())
 	apiSrv.SetQuotaStore(gw.QuotaStore())
 	apiSrv.SetStore(gw.Store())
+	apiSrv.SetWorkspaceStore(gw.Workspace())
 	webSrv.SetAPIServer(apiSrv)
 
 	// Coding-agent project runtime: long-lived dev-server sandbox +

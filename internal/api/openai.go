@@ -72,6 +72,10 @@ type chatCompletionRequest struct {
 	// agent's projects (in the caller's namespace) so it shares that
 	// project's workspace. Omit for a loose chat.
 	ProjectID string `json:"project_id,omitempty"`
+	// ReturnFiles "inline" adds each returned file's bytes as a data URL
+	// (small files only). Files the agent produced always come back in
+	// `files` with a download URL.
+	ReturnFiles string `json:"return_files,omitempty"`
 }
 
 // attachmentRequest is the wire form of a single attachment.
@@ -130,6 +134,9 @@ type chatCompletionChunk struct {
 	Created int64         `json:"created"`
 	Model   string        `json:"model"`
 	Choices []chunkChoice `json:"choices"`
+	// Files (FastClaw extension) rides on the final chunk: files the agent
+	// produced this turn.
+	Files []turnFile `json:"files,omitempty"`
 }
 
 type chunkChoice struct {
@@ -151,6 +158,8 @@ type chatCompletionResponse struct {
 	Model   string             `json:"model"`
 	Choices []completionChoice `json:"choices"`
 	Usage   completionUsage    `json:"usage"`
+	// Files (FastClaw extension): files the agent produced this turn.
+	Files []turnFile `json:"files,omitempty"`
 }
 
 type completionChoice struct {
@@ -255,6 +264,9 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// PhotoURLs is preserved so vision LLMs still see the image inline.
 	// Attachments land in the project's workspace when the request names
 	// a project, otherwise in the loose-chat scope.
+	// Snapshot the conversation's workspace before this turn touches it,
+	// so the reply can return the files the agent produced.
+	wsBefore := s.snapshotWorkspace(r.Context(), ag.Name(), projectID, sessionKey)
 	atts := req.allAttachments()
 	attachmentPaths := ag.WriteSessionAttachments(r.Context(), sessionKey, projectID, atts)
 	if len(attachmentPaths) > 0 {
@@ -308,17 +320,21 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	now := time.Now().Unix()
 
+	inline := req.ReturnFiles == "inline"
+	files := func(reply string) []turnFile {
+		return s.turnFiles(r.Context(), r, ag.Name(), projectID, sessionKey, wsBefore, reply, attachmentPaths, inline)
+	}
 	isStream := req.Stream != nil && *req.Stream
 	if isStream {
-		s.streamResponseFromAgent(w, r, ag, msg, chatID, model, now)
+		s.streamResponseFromAgent(w, r, ag, msg, chatID, model, now, files)
 	} else {
 		// Get reply from agent
 		reply := ag.HandleMessage(r.Context(), msg)
-		s.fullResponse(w, reply, chatID, model, now)
+		s.fullResponse(w, reply, chatID, model, now, files(reply))
 	}
 }
 
-func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request, ag *agent.Agent, msg bus.InboundMessage, chatID, model string, created int64) {
+func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request, ag *agent.Agent, msg bus.InboundMessage, chatID, model string, created int64, files func(reply string) []turnFile) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -328,9 +344,10 @@ func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request,
 	flusher, ok := w.(http.Flusher)
 
 	sr := ag.HandleMessageStream(r.Context(), msg)
+	var reply strings.Builder
 
 	// Send role chunk
-	s.writeSSEChunk(w, chatID, model, created, "assistant", "", nil)
+	s.writeSSEChunk(w, chatID, model, created, "assistant", "", nil, nil)
 	if ok {
 		flusher.Flush()
 	}
@@ -339,7 +356,8 @@ func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request,
 	for {
 		chunk, more := sr.Next()
 		if chunk.Content != "" {
-			s.writeSSEChunk(w, chatID, model, created, "", chunk.Content, nil)
+			reply.WriteString(chunk.Content)
+			s.writeSSEChunk(w, chatID, model, created, "", chunk.Content, nil, nil)
 			if ok {
 				flusher.Flush()
 			}
@@ -351,14 +369,14 @@ func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request,
 
 	// Send finish chunk
 	done := "stop"
-	s.writeSSEChunk(w, chatID, model, created, "", "", &done)
+	s.writeSSEChunk(w, chatID, model, created, "", "", &done, files(reply.String()))
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if ok {
 		flusher.Flush()
 	}
 }
 
-func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created int64, role, content string, finishReason *string) {
+func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created int64, role, content string, finishReason *string, files []turnFile) {
 	chunk := chatCompletionChunk{
 		ID:      id,
 		Object:  "chat.completion.chunk",
@@ -374,12 +392,13 @@ func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created 
 				FinishReason: finishReason,
 			},
 		},
+		Files: files,
 	}
 	data, _ := json.Marshal(chunk)
 	fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
-func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string, created int64) {
+func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string, created int64, files []turnFile) {
 	resp := chatCompletionResponse{
 		ID:      chatID,
 		Object:  "chat.completion",
@@ -397,6 +416,7 @@ func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string
 			CompletionTokens: 0,
 			TotalTokens:      0,
 		},
+		Files: files,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

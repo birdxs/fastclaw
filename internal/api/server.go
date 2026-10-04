@@ -12,6 +12,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/config"
 	"github.com/fastclaw-ai/fastclaw/internal/store"
 	"github.com/fastclaw-ai/fastclaw/internal/usage"
+	"github.com/fastclaw-ai/fastclaw/internal/workspace"
 )
 
 // UserResolver looks up a user space by user ID.
@@ -46,9 +47,12 @@ type Server struct {
 	quotaStore   usage.QuotaStore
 	// store backs the /v1/agents management API and strict agent
 	// resolution. Nil in unit tests that only exercise chat plumbing.
-	store   store.Store
-	acpMu   sync.Mutex
-	acpRuns map[string]*acpRunState
+	store store.Store
+	// workspace holds conversation workspaces; /v1 returns the files an
+	// agent produces from it. Nil disables file return.
+	workspace workspace.Store
+	acpMu     sync.Mutex
+	acpRuns   map[string]*acpRunState
 }
 
 // NewServer creates a new API server. authResolver is mandatory — there is
@@ -84,12 +88,13 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 		// end-user, so X-Fastclaw-End-User does not change what these
 		// endpoints see.
 		for pattern, h := range map[string]http.HandlerFunc{
-			"GET /v1/agents":                          s.HandleListAgents,
-			"POST /v1/agents":                         s.HandleCreateAgent,
-			"GET /v1/agents/{id}":                     s.HandleGetAgent,
-			"PATCH /v1/agents/{id}":                   s.HandleUpdateAgent,
-			"DELETE /v1/agents/{id}":                  s.HandleDeleteAgent,
-			"PUT /v1/agents/{id}/system-files/{name}": s.HandlePutAgentSystemFile,
+			"GET /v1/agents":                                         s.HandleListAgents,
+			"POST /v1/agents":                                        s.HandleCreateAgent,
+			"GET /v1/agents/{id}":                                    s.HandleGetAgent,
+			"PATCH /v1/agents/{id}":                                  s.HandleUpdateAgent,
+			"DELETE /v1/agents/{id}":                                 s.HandleDeleteAgent,
+			"PUT /v1/agents/{id}/system-files/{name}":                s.HandlePutAgentSystemFile,
+			"GET /v1/agents/{id}/sessions/{session}/files/{path...}": s.HandleGetSessionFile,
 		} {
 			mux.HandleFunc(pattern, s.authMiddleware(rateLimitMiddleware(s.limiter, getUserID, h)))
 		}
@@ -129,6 +134,10 @@ func (s *Server) SetQuotaStore(qs usage.QuotaStore) { s.quotaStore = qs }
 // SetStore installs the platform store used by /v1/agents and by strict
 // agent resolution on /v1/chat/completions.
 func (s *Server) SetStore(st store.Store) { s.store = st }
+
+// SetWorkspaceStore installs the conversation workspace store used to
+// return agent-produced files from /v1.
+func (s *Server) SetWorkspaceStore(ws workspace.Store) { s.workspace = ws }
 
 // RegisterAdminRoutes is kept as a no-op for callers that still call it
 // during gateway boot. Admin user/apikey CRUD now lives under /api/admin

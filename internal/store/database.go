@@ -2644,6 +2644,18 @@ func (d *DBStore) LookupSessionOwner(ctx context.Context, agentID, sessionKey st
 	return uid, nil
 }
 
+func (d *DBStore) HasChatSession(ctx context.Context, userID, agentID, chatID string) (bool, error) {
+	var n int
+	err := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM sessions WHERE user_id = %s AND agent_id = %s AND chat_id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		userID, agentID, chatID).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // GetSessionByKey loads a session by (agentID, sessionKey) without
 // user_id scoping. Safe because session_key is globally unique.
 func (d *DBStore) GetSessionByKey(ctx context.Context, agentID, sessionKey string) (*SessionRecord, error) {

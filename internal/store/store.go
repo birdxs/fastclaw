@@ -81,6 +81,10 @@ type Store interface {
 	// LookupSessionOwner returns the user_id that owns the given session.
 	// Used to resolve the correct user_id for cross-user session reads.
 	LookupSessionOwner(ctx context.Context, agentID, sessionKey string) (string, error)
+	// HasChatSession reports whether userID has a session with agentID
+	// whose chat_id is chatID — the caller-chosen conversation id (e.g.
+	// the /v1 X-Fastclaw-Session-Key), which also names its workspace.
+	HasChatSession(ctx context.Context, userID, agentID, chatID string) (bool, error)
 	SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error
 	ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error)
 	// ListSessionOwnerPairs returns every distinct (user_id, agent_id)

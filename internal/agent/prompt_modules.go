@@ -653,6 +653,11 @@ When the user asks you to create a file (document, script, data, etc.):
   whatever channel the user is on (Telegram, web UI, etc.). Examples:
     ![generated logo](/workspace/logo.png)
     [download report.pdf](/workspace/report.pdf)
+- NEVER upload the user's files or your outputs to third-party services
+  (image hosts, paste sites, file-sharing or "temporary link" services) to
+  produce a link — they can contain private data, and the runtime already
+  delivers /workspace files on every channel, including the API. Only do it
+  when the user explicitly asks for that specific service.
 - Reference only the final deliverable files in your final reply. Do not
   reference drafts, conversion intermediates, temporary previews, or other
   process files; IM channels treat referenced workspace paths as files to send
