@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import {
   Sidebar,
   SidebarContent,
@@ -36,7 +36,7 @@ import {
   LayoutDashboardIcon,
   MessagesSquareIcon,
   PlusIcon,
-  SettingsIcon,
+  ShieldIcon,
   SparklesIcon,
   UsersIcon,
   WrenchIcon,
@@ -143,6 +143,7 @@ const AGENT_NAV = (
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const { t, tr } = useLocale();
   const pathname = usePathname();
+  const router = useRouter();
   const searchParams = useSearchParams();
   const activeAgentId = extractAgentId(pathname);
   const activeTeamId = extractTeamId(pathname);
@@ -525,21 +526,34 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         <NavSessions agentId={activeAgentId} sessions={sessions} />
       </SidebarContent>
       <SidebarFooter>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton
-              tooltip={t("common.settings")}
-              onClick={() => {
-                setSettingsUserOnly(!activeAgentId);
-                setSettingsDefaultTab(activeAgentId ? "profile" : "general");
-                setSettingsOpen(true);
-              }}
-            >
-              <SettingsIcon />
-              <span>{t("common.settings")}</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
+        {/* Switch between the two management areas: /admin offers the way
+            back to the console; the console offers super_admins the way
+            into /admin. Settings live in the account menu below. */}
+        {(isAdminRoute(pathname) || isAdmin) && (
+          <SidebarMenu>
+            <SidebarMenuItem>
+              {isAdminRoute(pathname) ? (
+                <SidebarMenuButton
+                  tooltip={tr("Go to console", "进入控制台")}
+                  onClick={() => router.push("/console/")}
+                >
+                  <LayoutDashboardIcon />
+                  <span>{tr("Go to console", "进入控制台")}</span>
+                </SidebarMenuButton>
+              ) : (
+                <SidebarMenuButton
+                  tooltip={tr("Go to admin", "进入管理后台")}
+                  onClick={() => router.push("/admin/")}
+                >
+                  <ShieldIcon />
+                  <span>{tr("Go to admin", "进入管理后台")}</span>
+                </SidebarMenuButton>
+              )}
+            </SidebarMenuItem>
+          </SidebarMenu>
+        )}
+        {/* isAdmin is left off: the footer button above already links to
+            /admin, so the account menu keeps just Settings and Log out. */}
         <NavUser
           name={
             me?.user?.displayName ||
@@ -547,7 +561,6 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             t("common.user")
           }
           subtitle={me?.user?.role || (isAdmin ? "super_admin" : "user")}
-          isAdmin={isAdmin}
         />
       </SidebarFooter>
       <SidebarRail />
