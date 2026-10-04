@@ -212,10 +212,12 @@ export function ConsumerChatSidebar({
         collapsible="icon"
         className="border-r border-black/8 bg-[#f7f7f7] dark:border-white/8 dark:bg-[#171717]"
       >
-      <SidebarHeader className="gap-2 px-2 pb-5 pt-0 group-data-[collapsible=icon]:px-2 group-data-[collapsible=icon]:pb-2">
+      {/* Same header box as the Console / Admin sidebars (SidebarHeader's
+          p-2 + SidebarTitle), with the search row below. */}
+      <SidebarHeader className="pb-5 group-data-[collapsible=icon]:pb-2">
         <SidebarTitle
           title={tr("Chat", "对话")}
-          className="-mx-2 group-data-[collapsible=icon]:justify-center"
+          className="group-data-[collapsible=icon]:justify-center"
         >
           <button
             type="button"

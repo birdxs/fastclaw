@@ -85,7 +85,7 @@ which now holds only personal preferences (Account, General).
 
 A narrow rail on the far left switches between the areas: the FastClaw
 logo on top, then Chat, Console, Admin (super_admins only), and at the
-bottom Settings and the signed-in account (log out). Each area's sidebar
+bottom the signed-in account (menu: Settings, Log out). Each area's sidebar
 is titled with its name. Each area reopens
 the page the user last had open there. After sign-in users return to the
 area they were last in (their last conversation by default). Accounts

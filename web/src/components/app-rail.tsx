@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, SettingsIcon, ShieldIcon } from "lucide-react";
+import { LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, ServerCogIcon, SettingsIcon } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
@@ -24,8 +24,8 @@ import { cn } from "@/lib/utils";
 export const APP_RAIL_WIDTH = "3.5rem";
 
 // AppRail is the far-left switcher between the web UI's areas — chat,
-// console and (super_admin) admin — plus Settings: the FastClaw logo on
-// top, the signed-in account at the bottom. Each area reopens where the
+// console and (super_admin) admin: the FastClaw logo on top, the signed-in
+// account (with Settings and Log out) at the bottom. Each area reopens where the
 // user left it. Desktop only: on mobile the sidebar is a sheet.
 export function AppRail() {
   const { tr } = useLocale();
@@ -84,15 +84,10 @@ export function AppRail() {
             label={tr("Admin", "管理后台")}
             active={area === "admin"}
             onClick={() => go("admin")}
-            icon={ShieldIcon}
+            icon={ServerCogIcon}
           />
         )}
-        <div className="mt-auto flex flex-col items-center gap-2">
-          <RailButton
-            label={tr("Settings", "设置")}
-            onClick={() => window.dispatchEvent(new CustomEvent("fastclaw:open-user-settings"))}
-            icon={SettingsIcon}
-          />
+        <div className="mt-auto">
           <RailAccount me={me} />
         </div>
       </nav>
@@ -175,6 +170,13 @@ function RailAccount({ me }: { me: MeResponse | null }) {
             </div>
           </DropdownMenuLabel>
         </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() => window.dispatchEvent(new CustomEvent("fastclaw:open-user-settings"))}
+        >
+          <SettingsIcon />
+          <span>{t("common.settings")}</span>
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem
           onClick={() => {
