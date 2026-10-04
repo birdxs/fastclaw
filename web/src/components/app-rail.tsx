@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, SettingsIcon, UserCogIcon } from "lucide-react";
+import { LogOutIcon, MessagesSquareIcon, SettingsIcon, SquareTerminalIcon, UserCogIcon } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
@@ -77,7 +77,7 @@ export function AppRail() {
           label={tr("Console", "控制台")}
           active={area === "console"}
           onClick={() => go("console")}
-          icon={LayoutDashboardIcon}
+          icon={SquareTerminalIcon}
         />
         {isAdmin && (
           <RailButton

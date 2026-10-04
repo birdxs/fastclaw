@@ -24,7 +24,7 @@ import {
 } from "@/components/consumer-chat-sidebar";
 import {
   BotIcon,
-  BoxesIcon,
+  GaugeIcon,
   BrainIcon,
   CoinsIcon,
   InfoIcon,
@@ -78,13 +78,13 @@ const consoleNav = (pathname: string): NavItem[] => [
   {
     title: "Overview",
     url: "/console/",
-    icon: LayoutDashboardIcon,
+    icon: GaugeIcon,
     active: pathname.replace(/\/$/, "") === "/console",
   },
   { title: "Agents", url: "/console/agents/", icon: BotIcon },
   { title: "Models", url: "/console/models/", icon: BrainIcon },
   { title: "Skills", url: "/console/skills/", icon: SparklesIcon },
-  { title: "Apps", url: "/console/apps/", icon: BoxesIcon },
+  { title: "Apps", url: "/console/apps/", icon: LayoutDashboardIcon },
   { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
 ];
 

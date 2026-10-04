@@ -32,7 +32,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Boxes, Pencil, Plus, Trash2 } from "lucide-react";
+import { LayoutDashboard, Pencil, Plus, Trash2 } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
 
 // Apps are optional tenants: one integration environment each (e.g.
@@ -116,7 +116,7 @@ export default function AppsPage() {
         <div className="rounded-lg border border-border bg-card">
           <div className="flex flex-col items-center justify-center py-16">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 mb-4">
-              <Boxes className="h-7 w-7 text-primary" />
+              <LayoutDashboard className="h-7 w-7 text-primary" />
             </div>
             <p className="text-sm text-muted-foreground mb-1">{tr("No apps yet", "还没有应用")}</p>
             <p className="text-xs text-muted-foreground/60 mb-4 max-w-sm text-center">
