@@ -37,9 +37,9 @@ bundle-skills:
 	@echo "==> bundled skills synced"
 
 # bundle-docs copies docs served by the binary into its embed tree
-# (/integration.md). TestIntegrationDocMatchesDocs fails when it's stale.
+# (/integration.md). TestIntegrationDocMatchesSkill fails when it's stale.
 bundle-docs:
-	@cp docs/upstream-api.md internal/setup/apidocs/upstream-api.md
+	@cp skills/agent-integration/SKILL.md internal/setup/apidocs/agent-integration.md
 	@echo "==> bundled docs synced"
 
 build: build-web bundle-skills bundle-docs

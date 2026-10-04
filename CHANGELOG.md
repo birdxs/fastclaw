@@ -38,11 +38,14 @@ agent ID will now get a 404 instead of a reply from some other agent.
   stable `code` (including 401s and rate limits).
 - **`agent` keys** default to their only granted agent when a request
   names none.
-- **Integration guide for coding agents:** every FastClaw serves the
-  integration contract (`docs/upstream-api.md`) at `/integration.md`, public
-  and prefixed with that deployment's base URL. The console's new
-  **Integration** page links it and builds a ready-to-paste prompt for the
-  agent wiring another app to a chosen FastClaw agent.
+- **Integration guide for coding agents:** the skill
+  `skills/agent-integration/SKILL.md` is the integration guide — configuring
+  `FASTCLAW_BASE_URL` / `FASTCLAW_API_KEY`, agent-scope keys for fixed
+  agents, user-scope keys to create and manage agents, chat, usage and
+  errors. Every FastClaw serves it at `/integration.md` (public). The
+  console's new **Integration** page links it and builds a ready-to-paste
+  prompt for the coding agent wiring another app to FastClaw. It replaces
+  `skills/fastclaw-api-integration`; `docs/upstream-api.md` now points to it.
 - **On-demand agent loading:** accounts with more than 50 agents
   (`FASTCLAW_EAGER_AGENT_LIMIT`) load agents on first use and drop idle ones.
   Agents bound to IM channels or with enabled cron jobs are still loaded at
