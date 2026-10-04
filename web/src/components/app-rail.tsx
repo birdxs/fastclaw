@@ -2,10 +2,20 @@
 
 import * as React from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { LayoutDashboardIcon, MessagesSquareIcon, SettingsIcon, ShieldIcon } from "lucide-react";
+import { LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, SettingsIcon, ShieldIcon } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useLocale } from "@/components/locale-provider";
-import { getMe } from "@/lib/api";
+import { getMe, type MeResponse } from "@/lib/api";
+import { logout } from "@/lib/auth";
 import { areaHome, areaOf, resolveChatLanding, type Area } from "@/lib/landing";
 import { cn } from "@/lib/utils";
 
@@ -14,19 +24,26 @@ import { cn } from "@/lib/utils";
 export const APP_RAIL_WIDTH = "3.5rem";
 
 // AppRail is the far-left switcher between the web UI's areas — chat,
-// console and (super_admin) admin — plus Settings. Each area reopens where
-// the user left it. Desktop only: on mobile the sidebar is a sheet.
+// console and (super_admin) admin — plus Settings: the FastClaw logo on
+// top, the signed-in account at the bottom. Each area reopens where the
+// user left it. Desktop only: on mobile the sidebar is a sheet.
 export function AppRail() {
   const { tr } = useLocale();
   const pathname = usePathname() || "";
   const router = useRouter();
-  const [isAdmin, setIsAdmin] = React.useState(false);
+  const [me, setMe] = React.useState<MeResponse | null>(null);
+  const isAdmin = me?.user?.role === "super_admin";
   const area = areaOf(pathname);
 
+  // Account settings live in a dialog, so a profile save doesn't remount
+  // the rail; refresh the name/avatar on the same event the sidebar uses.
   React.useEffect(() => {
-    getMe()
-      .then((me) => setIsAdmin(me?.user?.role === "super_admin"))
-      .catch(() => {});
+    const refresh = () => {
+      getMe().then(setMe).catch(() => {});
+    };
+    refresh();
+    window.addEventListener("fastclaw:user-profile-changed", refresh);
+    return () => window.removeEventListener("fastclaw:user-profile-changed", refresh);
   }, []);
 
   const go = async (target: Area) => {
@@ -40,6 +57,16 @@ export function AppRail() {
         aria-label={tr("Areas", "功能区")}
         className="fixed inset-y-0 left-0 z-20 flex w-(--app-rail-width) flex-col items-center gap-1 border-r border-sidebar-border bg-sidebar py-3"
       >
+        <button
+          type="button"
+          onClick={() => go("chat")}
+          aria-label="FastClaw"
+          title="FastClaw"
+          className="mb-3 flex size-10 items-center justify-center rounded-lg"
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="/logo.png" alt="" width={32} height={32} draggable={false} className="size-8 select-none object-contain" />
+        </button>
         <RailButton
           label={tr("Chat", "对话")}
           active={area === "chat"}
@@ -60,12 +87,13 @@ export function AppRail() {
             icon={ShieldIcon}
           />
         )}
-        <div className="mt-auto">
+        <div className="mt-auto flex flex-col items-center gap-2">
           <RailButton
             label={tr("Settings", "设置")}
             onClick={() => window.dispatchEvent(new CustomEvent("fastclaw:open-user-settings"))}
             icon={SettingsIcon}
           />
+          <RailAccount me={me} />
         </div>
       </nav>
     </div>
@@ -103,5 +131,61 @@ function RailButton({
       </TooltipTrigger>
       <TooltipContent side="right">{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+// RailAccount is the signed-in account's avatar with its menu.
+function RailAccount({ me }: { me: MeResponse | null }) {
+  const { t, tr } = useLocale();
+  const name = me?.user?.displayName?.trim() || me?.user?.username || t("common.user");
+  const role = me?.user?.role || tr("user", "用户");
+  const initials = name.slice(0, 2).toUpperCase();
+  const avatar = (size: string) =>
+    me?.user?.avatarUrl ? (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src={me.user.avatarUrl} alt="" className={cn(size, "rounded-lg object-cover")} />
+    ) : (
+      <span className={cn(size, "flex items-center justify-center rounded-lg bg-emerald-500/20 text-xs font-bold text-emerald-500")}>
+        {initials}
+      </span>
+    );
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            aria-label={name}
+            title={name}
+            className="flex size-10 items-center justify-center rounded-lg transition-colors hover:bg-sidebar-accent"
+          />
+        }
+      >
+        {avatar("size-8")}
+      </DropdownMenuTrigger>
+      <DropdownMenuContent side="right" align="end" sideOffset={8} className="min-w-56 rounded-lg">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="p-0 font-normal">
+            <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
+              {avatar("size-8")}
+              <div className="grid flex-1 leading-tight">
+                <span className="truncate font-medium">{name}</span>
+                <span className="truncate text-xs text-muted-foreground">{role}</span>
+              </div>
+            </div>
+          </DropdownMenuLabel>
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          onClick={() => {
+            logout();
+            window.location.href = "/";
+          }}
+        >
+          <LogOutIcon />
+          <span>{t("common.logOut")}</span>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

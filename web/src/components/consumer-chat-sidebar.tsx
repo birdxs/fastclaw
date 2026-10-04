@@ -35,6 +35,7 @@ import {
 import { BotAvatar } from "@/components/bot-avatar";
 import { TeamAvatarStack } from "@/components/team-avatar-stack";
 import { NavUser } from "@/components/nav-user";
+import { SidebarTitle } from "@/components/sidebar-title";
 import { useLocale, type Locale } from "@/components/locale-provider";
 import { apiFetch, createAgent, updateConfig, getTeamInbox, type TeamInboxNotice, type MeResponse, type TeamEntry } from "@/lib/api";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
@@ -212,19 +213,10 @@ export function ConsumerChatSidebar({
         className="border-r border-black/8 bg-[#f7f7f7] dark:border-white/8 dark:bg-[#171717]"
       >
       <SidebarHeader className="gap-2 px-2 pb-5 pt-0 group-data-[collapsible=icon]:px-2 group-data-[collapsible=icon]:pb-2">
-        <div className="-mx-2 flex h-14 items-center gap-2 px-2 group-data-[collapsible=icon]:justify-center">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/logo.png"
-            alt=""
-            width={36}
-            height={36}
-            draggable={false}
-            className="size-9 shrink-0 select-none object-contain group-data-[collapsible=icon]:hidden"
-          />
-          <span className="truncate text-[18px] font-bold tracking-[-0.025em] text-foreground group-data-[collapsible=icon]:hidden">
-            FastClaw
-          </span>
+        <SidebarTitle
+          title={tr("Chat", "对话")}
+          className="-mx-2 group-data-[collapsible=icon]:justify-center"
+        >
           <button
             type="button"
             onClick={toggleSidebar}
@@ -233,23 +225,12 @@ export function ConsumerChatSidebar({
             title={sidebarState === "collapsed" ? t("sidebar.expandContacts") : t("sidebar.collapseContacts")}
           >
             {sidebarState === "collapsed" ? (
-              <>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src="/logo.png"
-                  alt=""
-                  width={36}
-                  height={36}
-                  draggable={false}
-                  className="size-9 select-none object-contain transition-opacity group-hover/sidebar-toggle:opacity-0 group-focus-visible/sidebar-toggle:opacity-0"
-                />
-                <ChevronsRight className="absolute size-4 opacity-0 transition-opacity group-hover/sidebar-toggle:opacity-100 group-focus-visible/sidebar-toggle:opacity-100" />
-              </>
+              <ChevronsRight className="size-4" />
             ) : (
               <ChevronsLeft className="size-4" />
             )}
           </button>
-        </div>
+        </SidebarTitle>
         <div className="flex items-center gap-1.5 group-data-[collapsible=icon]:hidden">
           <div className="relative min-w-0 flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 size-[15px] -translate-y-1/2 text-muted-foreground" />
@@ -437,7 +418,9 @@ export function ConsumerChatSidebar({
         )}
       </SidebarContent>
 
-      <SidebarFooter className="px-2 pb-3 pt-2 group-data-[collapsible=icon]:px-4">
+      {/* The account lives in the AppRail on desktop; the rail is hidden
+          on mobile, so the sheet keeps it here. */}
+      <SidebarFooter className="px-2 pb-3 pt-2 group-data-[collapsible=icon]:px-4 md:hidden">
         <NavUser
           name={me?.user?.displayName || me?.user?.username || tr("User", "用户")}
           subtitle={me?.user?.role || tr("user", "用户")}

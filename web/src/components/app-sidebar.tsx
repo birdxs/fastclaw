@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
   Sidebar,
   SidebarContent,
@@ -9,11 +9,10 @@ import {
   SidebarHeader,
   SidebarRail,
 } from "@/components/ui/sidebar";
-import { AgentSwitcher, AgentSwitcherItem } from "@/components/team-switcher";
+import type { AgentSwitcherItem } from "@/components/team-switcher";
 import { NavMain, NavItem } from "@/components/nav-main";
-import { NavSessions, SessionItem } from "@/components/nav-projects";
-import { NavProjectsList } from "@/components/nav-projects-list";
 import { NavUser } from "@/components/nav-user";
+import { SidebarTitle } from "@/components/sidebar-title";
 import {
   AgentSettingsDialog,
   type AgentSettingsTab,
@@ -32,7 +31,6 @@ import {
   KeyRoundIcon,
   LayoutDashboardIcon,
   MessagesSquareIcon,
-  PlusIcon,
   SparklesIcon,
   UsersIcon,
   WrenchIcon,
@@ -44,18 +42,16 @@ import {
   getConfig,
   getMe,
   getStatus,
-  listProjects,
   type MeResponse,
-  type ProjectEntry,
   type StatusResponse,
 } from "@/lib/api";
 import { useLocale } from "@/components/locale-provider";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
 
 // Extract agent ID from pathname like /agents/default/chat/ or an Agent's
-// console page like /console/agents/default/skills/. The second capture is
-// an explicit allow-list of sub-routes so the Agent list keeps the Platform
-// nav instead of flipping to Agent nav.
+// console page like /console/agents/default/skills/ — the agent the chat
+// sidebar highlights and the agent settings dialog opens for. The second
+// capture is an explicit allow-list of agent sub-routes.
 // Add new agent-scoped routes here when they ship — `project` was
 // missed when the project chat route was introduced and that left
 // the sidebar showing the platform nav for /agents/<id>/project/...
@@ -108,41 +104,12 @@ function isAdminRoute(pathname: string) {
   return pathname === "/admin" || pathname.startsWith("/admin/");
 }
 
-// "New chat" is active iff we're parked on the bare /chat/ page with
-// no session open. A session can be encoded two ways:
-//   - `?session=<id>` query param on `/chat/`
-//   - path segment: `/chat/<sessionId>/`
-// Either form means a specific session is open, so the New chat entry
-// must NOT light up. We check the exact pathname (rather than
-// startsWith) so the path-segment form falls through.
-//
-// Configuration tabs (Customize / Models / Skills / Channels /
-// Scheduler) live in the footer Settings dialog — for owners only —
-// so the sidebar nav itself just exposes "New chat" regardless of role.
-const AGENT_NAV = (
-  agentId: string,
-  pathname: string,
-  hasSession: boolean,
-): NavItem[] => {
-  const base = `/agents/${agentId}/chat`;
-  const onNewChatRoute = pathname === base || pathname === `${base}/`;
-  return [
-    {
-      title: "New chat",
-      url: `${base}/`,
-      icon: PlusIcon,
-      active: onNewChatRoute && !hasSession,
-    },
-  ];
-};
 
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const { t, tr } = useLocale();
   const pathname = usePathname();
-  const searchParams = useSearchParams();
   const activeAgentId = extractAgentId(pathname);
   const activeTeamId = extractTeamId(pathname);
-  const hasOpenSession = !!searchParams?.get("session");
 
   const [status, setStatus] = React.useState<StatusResponse | null>(null);
   const [me, setMe] = React.useState<MeResponse | null>(null);
@@ -154,8 +121,6 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   // shared from another user). Drives whether the AGENT_NAV exposes
   // configuration tabs.
   const [agentRoles, setAgentRoles] = React.useState<Record<string, "owner" | "viewer">>({});
-  const [sessions, setSessions] = React.useState<SessionItem[]>([]);
-  const [projects, setProjects] = React.useState<ProjectEntry[]>([]);
   // Single dialog state covers both entry points: the agent-scoped
   // footer button (full Agent + User tabs) and the platform-nav
   // Settings entry (User tabs only). `settingsUserOnly` picks the mode.
@@ -363,73 +328,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     };
   }, [activeAgentId, agents]);
 
-  // Sessions + projects only matter while a specific agent is selected.
-  // We re-run both whenever the active agent changes *or* the chat page
-  // broadcasts a `fastclaw:sessions-changed` event (e.g. after rename /
-  // new chat / project create) so the sidebar stays in sync without a
-  // page refresh. Projects are bundled with sessions because creating a
-  // chat in a project also affects which sessions appear under it.
-  React.useEffect(() => {
-    if (!activeAgentId) {
-      setSessions([]);
-      setProjects([]);
-      return;
-    }
-    const refetch = () => {
-      getChatSessions(activeAgentId)
-        .then((list) =>
-          setSessions(
-            list.map((s) => ({
-              id: s.id,
-              title: s.title || s.preview || s.id,
-              preview: s.preview,
-              thumbnailUrl: s.thumbnailUrl,
-              channel: s.channel,
-              projectId: s.projectId,
-              updatedAt: s.updatedAt,
-            })),
-          ),
-        )
-        .catch(() => {});
-      listProjects(activeAgentId)
-        .then(setProjects)
-        .catch(() => {});
-    };
-    refetch();
-    const onChange = (e: Event) => {
-      const detail = (e as CustomEvent<{ agentId?: string }>).detail;
-      if (!detail || !detail.agentId || detail.agentId === activeAgentId) {
-        refetch();
-      }
-    };
-    window.addEventListener("fastclaw:sessions-changed", onChange);
-    return () => {
-      window.removeEventListener("fastclaw:sessions-changed", onChange);
-    };
-  }, [activeAgentId]);
 
-  // broadcastSessionsChanged fires the same custom event NavSessions
-  // listens to, so a project mutation refreshes both the projects list
-  // AND the sessions list (a new chat-in-project shows up under its
-  // project, and the project's session count drives the delete-block).
-  const broadcastSessionsChanged = React.useCallback(() => {
-    if (typeof window !== "undefined" && activeAgentId) {
-      window.dispatchEvent(
-        new CustomEvent("fastclaw:sessions-changed", {
-          detail: { agentId: activeAgentId },
-        }),
-      );
-    }
-  }, [activeAgentId]);
 
   const isAdmin = status?.isAdmin ?? false;
-  // quotaLocked = caller has agent_quota=0 (admin-provisions-only,
-  // typical single-agent customer model). The agent switcher header
-  // is locked (static label, no "Manage agents" dropdown), but the
-  // /agents page itself stays reachable so they can browse what's
-  // been provisioned and jump into chat — it just hides the Create
-  // button. So we keep the Agents nav entry visible.
-  const quotaLocked = me?.user?.agentQuota === 0;
   const localizeNavItems = React.useCallback(
     (items: NavItem[]) =>
       items.map((item) => ({
@@ -484,43 +385,22 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   return (
     <Sidebar collapsible="icon" {...props}>
       <SidebarHeader>
-        <AgentSwitcher
-          agents={agents}
-          activeAgentId={activeAgentId}
-          locked={
-            quotaLocked ||
-            (!!activeAgentId && agentRoles[activeAgentId] === "viewer")
-          }
+        <SidebarTitle
+          title={isAdminRoute(pathname) ? tr("Admin", "管理后台") : tr("Console", "控制台")}
         />
       </SidebarHeader>
       <SidebarContent>
-        {activeAgentId ? (
-          <NavMain
-            label={t("common.agent")}
-            items={localizeNavItems(AGENT_NAV(activeAgentId, pathname, hasOpenSession))}
-          />
-        ) : isAdminRoute(pathname) ? (
+        {/* Console agent pages (/console/agents/<id>/…) keep the console
+            nav, with Agents highlighted. */}
+        {isAdminRoute(pathname) ? (
           <NavMain items={localizeNavItems(ADMIN_NAV)} />
         ) : (
           <NavMain items={localizeNavItems(consoleNav(pathname))} />
         )}
-        {/* Projects are per-(user, agent), so viewers on a shared agent
-            see/create their OWN projects — the owner's projects stay
-            private. The owner-only Settings dialog below is unaffected:
-            project CRUD is read-write for whoever opened the agent, but
-            agent configuration (skills, channels, models) stays the
-            owner's. */}
-        {activeAgentId && (
-          <NavProjectsList
-            agentId={activeAgentId}
-            projects={projects}
-            sessions={sessions}
-            onChanged={broadcastSessionsChanged}
-          />
-        )}
-        <NavSessions agentId={activeAgentId} sessions={sessions} />
       </SidebarContent>
-      <SidebarFooter>
+      {/* The account lives in the AppRail on desktop; the rail is hidden on
+          mobile, so the sheet keeps it there. */}
+      <SidebarFooter className="md:hidden">
         <NavUser
           name={
             me?.user?.displayName ||
