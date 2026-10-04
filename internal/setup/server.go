@@ -428,6 +428,10 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/tasks", admin(s.handleListTasks))
 
 	// Apikeys (per-user, with agent multi-select).
+	mux.HandleFunc("GET /api/apps", auth(s.handleListApps))
+	mux.HandleFunc("POST /api/apps", auth(s.handleCreateApp))
+	mux.HandleFunc("PATCH /api/apps/{id}", auth(s.handleUpdateApp))
+	mux.HandleFunc("DELETE /api/apps/{id}", auth(s.handleDeleteApp))
 	mux.HandleFunc("GET /api/apikeys", auth(s.handleListAPIKeys))
 	mux.HandleFunc("POST /api/apikeys", auth(s.handleCreateAPIKey))
 	mux.HandleFunc("DELETE /api/apikeys/{id}", auth(s.handleDeleteAPIKey))

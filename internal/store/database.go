@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -180,6 +181,77 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	// earlier failure_count / user_id steps don't depend on this one).
 	if err := d.migrateCronJobsTimestampTZ(ctx); err != nil {
 		return fmt.Errorf("migrate cron_jobs timestamptz: %w", err)
+	}
+	if err := d.migrateApps(ctx); err != nil {
+		return fmt.Errorf("migrate apps: %w", err)
+	}
+	return nil
+}
+
+// migrateApps introduces apps as the runtime's tenants: it adds app_id to
+// agents and apikeys, then gives every account that owns agents or keys a
+// default app and files its unassigned agents and keys under it. Existing
+// keys keep working unchanged. Idempotent: only rows with an empty app_id
+// are touched.
+func (d *DBStore) migrateApps(ctx context.Context) error {
+	for _, table := range []string{"agents", "apikeys"} {
+		has, err := d.tableHasColumn(ctx, table, "app_id")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := d.db.ExecContext(ctx,
+				`ALTER TABLE `+table+` ADD COLUMN app_id TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("add %s.app_id: %w", table, err)
+			}
+		}
+		if _, err := d.db.ExecContext(ctx,
+			`CREATE INDEX IF NOT EXISTS idx_`+table+`_app ON `+table+` (app_id)`); err != nil {
+			return fmt.Errorf("index %s.app_id: %w", table, err)
+		}
+	}
+	// At most one default app per account, even across replicas.
+	if _, err := d.db.ExecContext(ctx,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_apps_one_default ON apps (owner_user_id) WHERE is_default = TRUE`); err != nil {
+		return fmt.Errorf("index apps default: %w", err)
+	}
+	rows, err := d.db.QueryContext(ctx, `
+		SELECT DISTINCT user_id FROM agents WHERE app_id = ''
+		UNION
+		SELECT DISTINCT user_id FROM apikeys WHERE app_id = ''`)
+	if err != nil {
+		return err
+	}
+	var owners []string
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			rows.Close()
+			return err
+		}
+		if uid != "" {
+			owners = append(owners, uid)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, uid := range owners {
+		app, err := d.EnsureDefaultApp(ctx, uid)
+		if err != nil {
+			return err
+		}
+		for _, table := range []string{"agents", "apikeys"} {
+			if _, err := d.db.ExecContext(ctx,
+				fmt.Sprintf(`UPDATE `+table+` SET app_id = %s WHERE user_id = %s AND app_id = ''`, d.ph(1), d.ph(2)),
+				app.ID, uid); err != nil {
+				return fmt.Errorf("assign %s to default app: %w", table, err)
+			}
+		}
+	}
+	if len(owners) > 0 {
+		slog.Info("migrated accounts to default apps", "accounts", len(owners))
 	}
 	return nil
 }
@@ -1605,8 +1677,17 @@ func (d *DBStore) migrationSQL() []string {
 			key_hash TEXT NOT NULL,
 			key_prefix TEXT NOT NULL DEFAULT '',
 			type TEXT NOT NULL DEFAULT 'agent',
+			app_id TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
+		`CREATE TABLE IF NOT EXISTS apps (
+			id TEXT PRIMARY KEY,
+			owner_user_id TEXT NOT NULL,
+			name TEXT NOT NULL DEFAULT '',
+			is_default BOOLEAN NOT NULL DEFAULT FALSE,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_apps_owner ON apps (owner_user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_apikeys_user ON apikeys (user_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_apikeys_key_hash ON apikeys (key_hash)`,
 		`CREATE TABLE IF NOT EXISTS apikey_agents (
@@ -1628,6 +1709,7 @@ func (d *DBStore) migrationSQL() []string {
 			name TEXT NOT NULL DEFAULT '',
 			config TEXT NOT NULL DEFAULT '{}',
 			is_public BOOLEAN NOT NULL DEFAULT FALSE,
+			app_id TEXT NOT NULL DEFAULT '',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -2176,6 +2258,10 @@ func (d *DBStore) DeleteUser(ctx context.Context, id string) error {
 		fmt.Sprintf("DELETE FROM agents WHERE user_id = %s", d.ph(1)), id); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM apps WHERE owner_user_id = %s", d.ph(1)), id); err != nil {
+		return err
+	}
 	// Per-user state that's not agent-scoped (agent_files is now agent-only).
 	for _, t := range []string{"web_sessions", "apikeys", "sessions", "session_messages", "session_events"} {
 		if _, err := tx.ExecContext(ctx,
@@ -2307,7 +2393,7 @@ func (d *DBStore) ListPushDevices(ctx context.Context, userID string) ([]PushDev
 
 func (d *DBStore) ListAPIKeys(ctx context.Context, userID string) ([]APIKeyRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
-		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE user_id = %s ORDER BY created_at`, d.ph(1)),
+		fmt.Sprintf(`SELECT id, user_id, app_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE user_id = %s ORDER BY created_at`, d.ph(1)),
 		userID)
 	if err != nil {
 		return nil, err
@@ -2316,7 +2402,7 @@ func (d *DBStore) ListAPIKeys(ctx context.Context, userID string) ([]APIKeyRecor
 	var out []APIKeyRecord
 	for rows.Next() {
 		var ak APIKeyRecord
-		if err := rows.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
+		if err := rows.Scan(&ak.ID, &ak.UserID, &ak.AppID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, ak)
@@ -2326,9 +2412,9 @@ func (d *DBStore) ListAPIKeys(ctx context.Context, userID string) ([]APIKeyRecor
 
 func (d *DBStore) GetAPIKey(ctx context.Context, id string) (*APIKeyRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE id = %s`, d.ph(1)), id)
+		fmt.Sprintf(`SELECT id, user_id, app_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE id = %s`, d.ph(1)), id)
 	var ak APIKeyRecord
-	if err := row.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
+	if err := row.Scan(&ak.ID, &ak.UserID, &ak.AppID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	return &ak, nil
@@ -2341,10 +2427,17 @@ func (d *DBStore) CreateAPIKey(ctx context.Context, ak *APIKeyRecord) error {
 	if ak.Type == "" {
 		ak.Type = "agent"
 	}
+	if ak.AppID == "" {
+		app, err := d.EnsureDefaultApp(ctx, ak.UserID)
+		if err != nil {
+			return err
+		}
+		ak.AppID = app.ID
+	}
 	_, err := d.db.ExecContext(ctx,
-		fmt.Sprintf(`INSERT INTO apikeys (id, user_id, name, key_hash, key_prefix, type, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s)`,
-			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7)),
-		ak.ID, ak.UserID, ak.Name, ak.KeyHash, ak.KeyPrefix, ak.Type, ak.CreatedAt)
+		fmt.Sprintf(`INSERT INTO apikeys (id, user_id, name, key_hash, key_prefix, type, created_at, app_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7), d.ph(8)),
+		ak.ID, ak.UserID, ak.Name, ak.KeyHash, ak.KeyPrefix, ak.Type, ak.CreatedAt, ak.AppID)
 	return err
 }
 
@@ -2375,10 +2468,10 @@ func (d *DBStore) RotateAPIKey(ctx context.Context, id, keyHash, keyPrefix strin
 
 func (d *DBStore) LookupAPIKeyByHash(ctx context.Context, keyHash string) (*APIKeyRecord, error) {
 	row := d.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT id, user_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE key_hash = %s`, d.ph(1)),
+		fmt.Sprintf(`SELECT id, user_id, app_id, name, key_hash, key_prefix, type, created_at FROM apikeys WHERE key_hash = %s`, d.ph(1)),
 		keyHash)
 	var ak APIKeyRecord
-	if err := row.Scan(&ak.ID, &ak.UserID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
+	if err := row.Scan(&ak.ID, &ak.UserID, &ak.AppID, &ak.Name, &ak.KeyHash, &ak.KeyPrefix, &ak.Type, &ak.CreatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	return &ak, nil
@@ -2435,7 +2528,7 @@ func (d *DBStore) APIKeyCanAccessAgent(ctx context.Context, apikeyID, agentID st
 
 // --- Agents ---
 
-const agentSelectCols = `id, user_id, name, config, is_public, created_at, updated_at`
+const agentSelectCols = `id, user_id, app_id, name, config, is_public, created_at, updated_at`
 
 func (d *DBStore) ListAgents(ctx context.Context, ownerUserID string) ([]AgentRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
@@ -2466,6 +2559,168 @@ func (d *DBStore) ListAgentIDs(ctx context.Context, ownerUserID string) ([]strin
 	return ids, rows.Err()
 }
 
+func (d *DBStore) ListAgentsByApp(ctx context.Context, appID string) ([]AgentRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT `+agentSelectCols+` FROM agents WHERE app_id = %s ORDER BY created_at DESC`, d.ph(1)),
+		appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanAgents(rows)
+}
+
+func (d *DBStore) ListAgentIDsByApp(ctx context.Context, appID string) ([]string, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT id FROM agents WHERE app_id = %s`, d.ph(1)), appID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// --- Apps ---
+
+const appSelectCols = `id, owner_user_id, name, is_default, created_at`
+
+func scanApp(row interface{ Scan(...any) error }) (*AppRecord, error) {
+	var a AppRecord
+	if err := row.Scan(&a.ID, &a.OwnerUserID, &a.Name, &a.IsDefault, &a.CreatedAt); err != nil {
+		return nil, scanErr(err)
+	}
+	return &a, nil
+}
+
+func newAppID() (string, error) {
+	var buf [10]byte
+	if _, err := cryptorand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return "app_" + hex.EncodeToString(buf[:]), nil
+}
+
+func (d *DBStore) CreateApp(ctx context.Context, app *AppRecord) error {
+	if app.OwnerUserID == "" {
+		return errors.New("store: app.owner_user_id is required")
+	}
+	if app.ID == "" {
+		id, err := newAppID()
+		if err != nil {
+			return err
+		}
+		app.ID = id
+	}
+	if app.CreatedAt.IsZero() {
+		app.CreatedAt = time.Now().UTC()
+	}
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`INSERT INTO apps (id, owner_user_id, name, is_default, created_at) VALUES (%s, %s, %s, %s, %s)`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5)),
+		app.ID, app.OwnerUserID, app.Name, app.IsDefault, app.CreatedAt)
+	return err
+}
+
+func (d *DBStore) GetApp(ctx context.Context, id string) (*AppRecord, error) {
+	return scanApp(d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT `+appSelectCols+` FROM apps WHERE id = %s`, d.ph(1)), id))
+}
+
+func (d *DBStore) ListApps(ctx context.Context, ownerUserID string) ([]AppRecord, error) {
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT `+appSelectCols+` FROM apps WHERE owner_user_id = %s ORDER BY is_default DESC, created_at`, d.ph(1)),
+		ownerUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AppRecord
+	for rows.Next() {
+		a, err := scanApp(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *a)
+	}
+	return out, rows.Err()
+}
+
+func (d *DBStore) RenameApp(ctx context.Context, id, name string) error {
+	res, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE apps SET name = %s WHERE id = %s`, d.ph(1), d.ph(2)), name, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (d *DBStore) DeleteApp(ctx context.Context, id string) error {
+	app, err := d.GetApp(ctx, id)
+	if err != nil {
+		return err
+	}
+	if app.IsDefault {
+		return errors.New("store: the default app can't be deleted")
+	}
+	var n int
+	if err := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT (SELECT COUNT(*) FROM agents WHERE app_id = %s) + (SELECT COUNT(*) FROM apikeys WHERE app_id = %s)`, d.ph(1), d.ph(2)),
+		id, id).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return ErrAppNotEmpty
+	}
+	_, err = d.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM apps WHERE id = %s`, d.ph(1)), id)
+	return err
+}
+
+// EnsureDefaultApp serializes creation through defaultAppMu so concurrent
+// first requests for one account don't create two default apps.
+func (d *DBStore) EnsureDefaultApp(ctx context.Context, ownerUserID string) (*AppRecord, error) {
+	if ownerUserID == "" {
+		return nil, errors.New("store: EnsureDefaultApp requires owner")
+	}
+	find := func() (*AppRecord, error) {
+		return scanApp(d.db.QueryRowContext(ctx,
+			fmt.Sprintf(`SELECT `+appSelectCols+` FROM apps WHERE owner_user_id = %s AND is_default = TRUE ORDER BY created_at LIMIT 1`, d.ph(1)),
+			ownerUserID))
+	}
+	if app, err := find(); err == nil {
+		return app, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	defaultAppMu.Lock()
+	defer defaultAppMu.Unlock()
+	if app, err := find(); err == nil {
+		return app, nil
+	}
+	app := &AppRecord{OwnerUserID: ownerUserID, Name: "default", IsDefault: true}
+	if err := d.CreateApp(ctx, app); err != nil {
+		// Another replica won the race; idx_apps_one_default makes the
+		// loser fail, so read the winner's row.
+		if existing, ferr := find(); ferr == nil {
+			return existing, nil
+		}
+		return nil, err
+	}
+	return app, nil
+}
+
+var defaultAppMu sync.Mutex
+
 func (d *DBStore) ListPublicAgents(ctx context.Context) ([]AgentRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
 		`SELECT `+agentSelectCols+` FROM agents WHERE is_public = TRUE ORDER BY updated_at DESC`)
@@ -2481,7 +2736,7 @@ func (d *DBStore) GetAgent(ctx context.Context, agentID string) (*AgentRecord, e
 		fmt.Sprintf(`SELECT `+agentSelectCols+` FROM agents WHERE id = %s`, d.ph(1)), agentID)
 	var ag AgentRecord
 	var cfgStr string
-	if err := row.Scan(&ag.ID, &ag.UserID, &ag.Name, &cfgStr, &ag.IsPublic, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
+	if err := row.Scan(&ag.ID, &ag.UserID, &ag.AppID, &ag.Name, &cfgStr, &ag.IsPublic, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	json.Unmarshal([]byte(cfgStr), &ag.Config)
@@ -2495,6 +2750,27 @@ func (d *DBStore) SaveAgent(ctx context.Context, agent *AgentRecord) error {
 	if agent.UserID == "" {
 		return errors.New("store: agent.user_id is required")
 	}
+	if agent.AppID != "" {
+		// A record copied from another account (fork, transfer) carries
+		// that account's app; an agent may only live in its owner's apps.
+		if app, err := d.GetApp(ctx, agent.AppID); err != nil || app.OwnerUserID != agent.UserID {
+			agent.AppID = ""
+		}
+	}
+	if agent.AppID == "" {
+		// Callers that predate apps (console, admin provisioning, CLI)
+		// don't set one. Keep an existing assignment; otherwise file the
+		// agent under the owner's default app.
+		if cur, err := d.GetAgent(ctx, agent.ID); err == nil && cur.AppID != "" && cur.UserID == agent.UserID {
+			agent.AppID = cur.AppID
+		} else {
+			app, err := d.EnsureDefaultApp(ctx, agent.UserID)
+			if err != nil {
+				return err
+			}
+			agent.AppID = app.ID
+		}
+	}
 	cfgData, _ := json.Marshal(agent.Config)
 	now := time.Now().UTC()
 	if agent.CreatedAt.IsZero() {
@@ -2503,21 +2779,21 @@ func (d *DBStore) SaveAgent(ctx context.Context, agent *AgentRecord) error {
 	agent.UpdatedAt = now
 	if d.dialect == "postgres" {
 		_, err := d.db.ExecContext(ctx,
-			`INSERT INTO agents (id, user_id, name, config, is_public, created_at, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7)
+			`INSERT INTO agents (id, user_id, name, config, is_public, created_at, updated_at, app_id)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 				ON CONFLICT (id) DO UPDATE
-				SET user_id=$2, name=$3, config=$4, is_public=$5, updated_at=$7`,
-			agent.ID, agent.UserID, agent.Name, string(cfgData), agent.IsPublic, agent.CreatedAt, agent.UpdatedAt)
+				SET user_id=$2, name=$3, config=$4, is_public=$5, updated_at=$7, app_id=$8`,
+			agent.ID, agent.UserID, agent.Name, string(cfgData), agent.IsPublic, agent.CreatedAt, agent.UpdatedAt, agent.AppID)
 		return err
 	}
 	_, err := d.db.ExecContext(ctx,
-		`INSERT INTO agents (id, user_id, name, config, is_public, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO agents (id, user_id, name, config, is_public, created_at, updated_at, app_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET
 			  user_id=excluded.user_id, name=excluded.name,
 			  config=excluded.config, is_public=excluded.is_public,
-			  updated_at=excluded.updated_at`,
-		agent.ID, agent.UserID, agent.Name, string(cfgData), agent.IsPublic, agent.CreatedAt, agent.UpdatedAt)
+			  updated_at=excluded.updated_at, app_id=excluded.app_id`,
+		agent.ID, agent.UserID, agent.Name, string(cfgData), agent.IsPublic, agent.CreatedAt, agent.UpdatedAt, agent.AppID)
 	return err
 }
 
@@ -2576,7 +2852,7 @@ func scanAgents(rows *sql.Rows) ([]AgentRecord, error) {
 	for rows.Next() {
 		var ag AgentRecord
 		var cfgStr string
-		if err := rows.Scan(&ag.ID, &ag.UserID, &ag.Name, &cfgStr, &ag.IsPublic, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
+		if err := rows.Scan(&ag.ID, &ag.UserID, &ag.AppID, &ag.Name, &cfgStr, &ag.IsPublic, &ag.CreatedAt, &ag.UpdatedAt); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(cfgStr), &ag.Config)

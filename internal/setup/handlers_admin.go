@@ -996,6 +996,11 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "admin keys cannot be issued through this path"})
 		return
 	}
+	app, err := s.resolveKeyApp(r, targetUserID, req.AppID)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
 	if req.Type == users.APIKeyTypeAgent {
 		if len(req.AgentIDs) == 0 {
 			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "type=agent requires at least one agentId"})
@@ -1014,10 +1019,14 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 				jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "cannot bind agent " + aid + " — not owned by target user"})
 				return
 			}
+			if rec.AppID != app.ID {
+				jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "cannot bind agent " + aid + " — it belongs to another app"})
+				return
+			}
 		}
 	}
 	_ = isAdmin // currently no admin-only branches inside; kept for future toggles
-	ak, token, err := s.apikeys.Create(r.Context(), targetUserID, req.Name, req.Type, req.AgentIDs)
+	ak, token, err := s.apikeys.CreateInApp(r.Context(), targetUserID, app.ID, req.Name, req.Type, req.AgentIDs)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 		return
@@ -1029,7 +1038,9 @@ func (s *Server) handleCreateUserAPIKey(w http.ResponseWriter, r *http.Request) 
 // --- Apikey CRUD (per-user) ---
 
 type createAPIKeyReq struct {
-	Name     string   `json:"name"`
+	Name string `json:"name"`
+	// AppID is the app the key acts for; empty = the owner's default app.
+	AppID    string   `json:"appId,omitempty"`
 	Type     string   `json:"type,omitempty"` // "admin" | "user" | "agent"; default "agent"
 	AgentIDs []string `json:"agentIds,omitempty"`
 }
@@ -1057,6 +1068,7 @@ func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 		enriched = append(enriched, map[string]any{
 			"id":        ak.ID,
 			"userId":    ak.UserID,
+			"appId":     ak.AppID,
 			"name":      ak.Name,
 			"key":       ak.Key,
 			"type":      ak.Type,
@@ -1102,6 +1114,11 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "only super_admin may issue admin keys"})
 		return
 	}
+	app, err := s.resolveKeyApp(r, ident.UserID, req.AppID)
+	if err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
 	if req.Type == users.APIKeyTypeAgent {
 		if len(req.AgentIDs) == 0 {
 			jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "type=agent requires at least one agentId"})
@@ -1116,10 +1133,14 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 					jsonResponse(w, http.StatusForbidden, map[string]any{"ok": false, "error": "cannot bind agent " + aid})
 					return
 				}
+				if rec.AppID != app.ID {
+					jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "cannot bind agent " + aid + " — it belongs to another app"})
+					return
+				}
 			}
 		}
 	}
-	ak, token, err := s.apikeys.Create(r.Context(), ident.UserID, req.Name, req.Type, req.AgentIDs)
+	ak, token, err := s.apikeys.CreateInApp(r.Context(), ident.UserID, app.ID, req.Name, req.Type, req.AgentIDs)
 	if err != nil {
 		jsonResponse(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return

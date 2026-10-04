@@ -80,7 +80,7 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	}
 	if s.gatewayCfg == nil || s.gatewayCfg.HTTP.Endpoints.Agents.Enabled {
 		// Agent management for integrating apps. Agents created here
-		// belong to the app (the api key's owner account), never to an
+		// belong to the api key's app, never to an
 		// end-user, so X-Fastclaw-End-User does not change what these
 		// endpoints see.
 		for pattern, h := range map[string]http.HandlerFunc{

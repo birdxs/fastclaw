@@ -38,6 +38,7 @@ func IsAPIKeyType(s string) bool {
 type APIKey struct {
 	ID        string    `json:"id"`
 	UserID    string    `json:"userId"`
+	AppID     string    `json:"appId"`
 	Name      string    `json:"name,omitempty"`
 	Key       string    `json:"key"`
 	Type      string    `json:"type"`
@@ -82,6 +83,13 @@ func NewAPIKeys(st store.Store) (*APIKeys, error) {
 // role-vs-type policy check (handlers_admin.go enforces "only super_admin
 // may issue type=admin", etc.).
 func (k *APIKeys) Create(ctx context.Context, userID, name, keyType string, agentIDs []string) (*APIKey, string, error) {
+	return k.CreateInApp(ctx, userID, "", name, keyType, agentIDs)
+}
+
+// CreateInApp is Create for a specific app of userID. Empty appID means
+// the owner's default app. Callers must have checked that the app belongs
+// to userID.
+func (k *APIKeys) CreateInApp(ctx context.Context, userID, appID, name, keyType string, agentIDs []string) (*APIKey, string, error) {
 	if userID == "" {
 		return nil, "", errors.New("users.APIKeys.Create: userID is required")
 	}
@@ -105,6 +113,7 @@ func (k *APIKeys) Create(ctx context.Context, userID, name, keyType string, agen
 	rec := &store.APIKeyRecord{
 		ID:        id,
 		UserID:    userID,
+		AppID:     appID,
 		Name:      name,
 		KeyHash:   hashToken(token),
 		KeyPrefix: keyPrefix(token),
@@ -219,9 +228,13 @@ func (k *APIKeys) LookupByToken(ctx context.Context, token string) (*Resolved, e
 	case APIKeyTypeAdmin:
 		// Admin keys bypass the per-agent gate entirely; leave empty.
 	case APIKeyTypeUser:
-		// All agents owned by the apikey owner. A second list per
+		// Every agent of the key's app. A second (id-only) list per
 		// request is the price of "no ACL maintenance for new agents".
-		agents, err = k.store.ListAgentIDs(ctx, rec.UserID)
+		if rec.AppID != "" {
+			agents, err = k.store.ListAgentIDsByApp(ctx, rec.AppID)
+		} else {
+			agents, err = k.store.ListAgentIDs(ctx, rec.UserID)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -257,6 +270,7 @@ func toAPIKey(rec *store.APIKeyRecord) *APIKey {
 	return &APIKey{
 		ID:        rec.ID,
 		UserID:    rec.UserID,
+		AppID:     rec.AppID,
 		Name:      rec.Name,
 		Key:       masked,
 		Type:      rec.Type,

@@ -10,8 +10,9 @@ Follow that document over guesses from existing dashboard code.
 
 FastClaw is the agent runtime; the upstream app owns its users, permissions,
 billing, chat records and IM channels. The runtime never calls the app back.
-Agents belong to the app (the API key's account), not to any end-user — the
-app must check "may this user use this agent?" before every call.
+Agents belong to the app (the API key's app — e.g. `douchat-prod`, created
+in the console), not to any end-user — the app must check "may this user
+use this agent?" before every call. Use one app per environment.
 
 Use `/v1/*` only:
 

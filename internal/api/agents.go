@@ -54,9 +54,9 @@ var v1SystemFiles = map[string]bool{
 var errAgentNotFound = errors.New("agent not found")
 
 // appAgent loads agentID and verifies the caller's app may use it: the
-// agent must be owned by the app (Identity.AppID) and pass the api key's
-// agent ACL. Platform-admin keys are scoped to their own app here too —
-// /v1 is the app API, not the admin API.
+// agent must belong to the key's app (Identity.AppOwnsAgent) and pass the
+// api key's agent ACL. Platform-admin keys are scoped to their own app
+// here too — /v1 is the app API, not the admin API.
 func (s *Server) appAgent(r *http.Request, agentID string) (*store.AgentRecord, error) {
 	ident, ok := auth.FromContext(r.Context())
 	if !ok {
@@ -73,7 +73,7 @@ func (s *Server) appAgent(r *http.Request, agentID string) (*store.AgentRecord, 
 	if err != nil || rec == nil {
 		return nil, errAgentNotFound
 	}
-	if rec.UserID != ident.AppID() || !ident.CanAccessAgent(rec.ID) {
+	if !ident.AppOwnsAgent(rec.UserID, rec.AppID) || !ident.CanAccessAgent(rec.ID) {
 		return nil, errAgentNotFound
 	}
 	return rec, nil
@@ -102,21 +102,11 @@ func (s *Server) resolveChatAgent(r *http.Request, agentID string) (*agent.Agent
 	}
 
 	if agentID == "" {
-		appSpace := space
-		if appID := ident.AppID(); appID != nsUser {
-			if appSpace, err = s.resolver.UserSpaceFor(appID); err != nil {
-				return nil, err
-			}
+		if agentID, err = s.defaultAppAgentID(r, ident, space); err != nil {
+			return nil, err
 		}
-		def := defaultAgent(appSpace)
-		if def == nil || !ident.CanAccessAgent(def.Name()) {
-			return nil, errAgentNotFound
-		}
-		if appSpace == space {
-			return def, nil
-		}
-		agentID = def.Name()
-	} else if s.store != nil {
+	}
+	if s.store != nil {
 		if _, err := s.appAgent(r, agentID); err != nil {
 			return nil, err
 		}
@@ -148,6 +138,29 @@ func (s *Server) resolveChatAgent(r *http.Request, agentID string) (*agent.Agent
 		}
 	}
 	return nil, errAgentNotFound
+}
+
+// defaultAppAgentID picks the agent for a request that names none: the
+// app's only agent, or — as before apps existed — the account's default
+// (or first loaded) agent. The caller still verifies it belongs to the app.
+func (s *Server) defaultAppAgentID(r *http.Request, ident auth.Identity, nsSpace *UserSpaceView) (string, error) {
+	if s.store != nil && ident.AppID != "" {
+		if ids, err := s.store.ListAgentIDsByApp(r.Context(), ident.AppID); err == nil && len(ids) == 1 {
+			return ids[0], nil
+		}
+	}
+	accountSpace := nsSpace
+	if acct := ident.AccountID(); acct != nsSpace.UserID {
+		var err error
+		if accountSpace, err = s.resolver.UserSpaceFor(acct); err != nil {
+			return "", err
+		}
+	}
+	def := defaultAgent(accountSpace)
+	if def == nil || !ident.CanAccessAgent(def.Name()) {
+		return "", errAgentNotFound
+	}
+	return def.Name(), nil
 }
 
 // defaultAgent returns the space's default agent, falling back to the
@@ -210,7 +223,7 @@ func (s *Server) HandleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, err.Error())
 		return
 	}
-	owner := ident.AppID()
+	owner := ident.AccountID()
 	ctx := r.Context()
 	if u, err := s.store.GetUser(ctx, owner); err == nil && u != nil && u.AgentQuota >= 0 {
 		owned, err := s.store.ListAgentIDs(ctx, owner)
@@ -229,7 +242,9 @@ func (s *Server) HandleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeServerError(w, err)
 		return
 	}
-	rec := &store.AgentRecord{ID: id, UserID: owner, Name: req.Name, Config: map[string]interface{}{}}
+	// AppID empty (cookie session) files the agent under the account's
+	// default app.
+	rec := &store.AgentRecord{ID: id, UserID: owner, AppID: ident.AppID, Name: req.Name, Config: map[string]interface{}{}}
 	if d := strings.TrimSpace(req.Description); d != "" {
 		rec.Config["description"] = d
 	}
@@ -289,7 +304,13 @@ func (s *Server) HandleListAgents(w http.ResponseWriter, r *http.Request) {
 		limit = min(n, maxAgentPageSize)
 	}
 	filter := metadataFilter(q)
-	recs, err := s.store.ListAgents(r.Context(), ident.AppID())
+	var recs []store.AgentRecord
+	var err error
+	if ident.AppID != "" {
+		recs, err = s.store.ListAgentsByApp(r.Context(), ident.AppID)
+	} else {
+		recs, err = s.store.ListAgents(r.Context(), ident.AccountID())
+	}
 	if err != nil {
 		writeServerError(w, err)
 		return
@@ -500,7 +521,7 @@ func (s *Server) HandlePutAgentSystemFile(w http.ResponseWriter, r *http.Request
 // requireAgentAPI checks the preconditions shared by /v1/agents handlers.
 func (s *Server) requireAgentAPI(w http.ResponseWriter, r *http.Request) (auth.Identity, bool) {
 	ident, ok := auth.FromContext(r.Context())
-	if !ok || ident.AppID() == "" {
+	if !ok || ident.AccountID() == "" {
 		writeUnauth(w, "authentication required")
 		return auth.Identity{}, false
 	}
@@ -517,6 +538,7 @@ func (s *Server) agentView(r *http.Request, rec *store.AgentRecord) map[string]a
 	md := agentMetadata(rec)
 	return map[string]any{
 		"id":           rec.ID,
+		"app_id":       rec.AppID,
 		"display_name": rec.Name,
 		// name is the agent id, as /v1/agents has always returned it.
 		// Deprecated: use id, and display_name for the human name.

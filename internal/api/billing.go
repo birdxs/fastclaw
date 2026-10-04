@@ -23,7 +23,8 @@ import (
 //	agent_id — only usage of this agent
 //	end_user — only usage of this end-user (the app's external id, as
 //	           sent in X-Fastclaw-End-User / `user`)
-//	scope    — "app": the app owner plus every end-user it minted
+//	scope    — "app": usage of the app's agents, by the app itself and
+//	           by every end-user
 //	user_id  — legacy: a FastClaw user id; must be the app itself or one
 //	           of its end-users
 //
@@ -61,7 +62,7 @@ func (s *Server) HandleGetUsage(w http.ResponseWriter, r *http.Request) {
 	case strings.TrimSpace(qs.Get("end_user")) != "":
 		endUser := strings.TrimSpace(qs.Get("end_user"))
 		resp["endUser"] = endUser
-		uid, found := s.lookupEndUser(r, ident.AppID(), endUser)
+		uid, found := s.lookupEndUser(r, ident.AccountID(), endUser)
 		if !found {
 			// Never seen → no usage. Don't mint a user just to say so.
 			resp["daily"] = []usage.DailyUsage{}
@@ -72,7 +73,8 @@ func (s *Server) HandleGetUsage(w http.ResponseWriter, r *http.Request) {
 		q.UserID = uid
 		resp["userId"] = uid
 	case qs.Get("scope") == "app":
-		q.AppOwnerID = ident.AppID()
+		q.AppOwnerID = ident.AccountID()
+		q.AppID = ident.AppID
 		resp["scope"] = "app"
 		resp["userId"] = q.AppOwnerID
 	case qs.Get("user_id") != "":
@@ -123,14 +125,14 @@ func (s *Server) userInApp(r *http.Request, ident auth.Identity, userID string) 
 	if userID == "" {
 		return false
 	}
-	if ident.CanAdminPlatform() || userID == ident.AppID() || userID == ident.EffectiveUserID() {
+	if ident.CanAdminPlatform() || userID == ident.AccountID() || userID == ident.EffectiveUserID() {
 		return true
 	}
 	if s.store == nil {
 		return false
 	}
 	u, err := s.store.GetUser(r.Context(), userID)
-	return err == nil && u != nil && u.OwnerUserID == ident.AppID()
+	return err == nil && u != nil && u.OwnerUserID == ident.AccountID()
 }
 
 // HandleSetQuota handles PUT /v1/quota.

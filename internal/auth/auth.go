@@ -54,25 +54,38 @@ type Identity struct {
 	// 403 when this is set.
 	ActAsUserID string
 
+	// AppID is the app (tenant) an api_key acts for. Agents are resolved
+	// within it. Empty for cookie sessions, which act for the account.
+	AppID string
+
 	// AppUserID and EndUser are set when an api_key request named an
 	// end-user (X-Fastclaw-End-User header or the `user` body field) and
 	// SwitchToAppUser rebound UserID to that end-user's app_user record.
-	// AppUserID is the api_key owner — the app that owns the agents.
-	// EndUser is the caller's external id for the end-user. UserID then
-	// only names the data namespace (sessions, USER.md, personal memory);
-	// agents are always resolved against AppUserID.
+	// AppUserID is the api_key owner account. EndUser is the caller's
+	// external id for the end-user. UserID then only names the data
+	// namespace (sessions, USER.md, personal memory); agents are still
+	// resolved from the app.
 	AppUserID string
 	EndUser   string
 }
 
-// AppID returns the account that owns the app this request acts for:
-// the api_key owner, even when UserID was switched to an end-user
-// namespace. Agents are resolved against it.
-func (i Identity) AppID() string {
+// AccountID returns the account behind the request: the api_key owner,
+// even when UserID was switched to an end-user namespace.
+func (i Identity) AccountID() string {
 	if i.AppUserID != "" {
 		return i.AppUserID
 	}
 	return i.EffectiveUserID()
+}
+
+// AppOwnsAgent reports whether an agent (by its owner account and app)
+// belongs to the app this request acts for. Requests without an app
+// (cookie sessions) fall back to account ownership.
+func (i Identity) AppOwnsAgent(agentUserID, agentAppID string) bool {
+	if i.AppID != "" {
+		return agentAppID == i.AppID
+	}
+	return agentUserID != "" && agentUserID == i.AccountID()
 }
 
 // EffectiveUserID is who we read data for. For super_admin in actAs mode
@@ -269,6 +282,7 @@ func (r *Resolver) ResolveBearer(ctx context.Context, token string) (Identity, e
 		AuthMethod:   "apikey",
 		APIKeyID:     res.APIKey.ID,
 		APIKeyType:   res.APIKey.Type,
+		AppID:        res.APIKey.AppID,
 		APIKeyAgents: append([]string(nil), res.Agents...),
 	}, nil
 }

@@ -443,10 +443,13 @@ func TestUsageByEndUserAndApp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	agt1 := h.createAgent(h.keyA, "one", nil)
+	agt2 := h.createAgent(h.keyA, "two", nil)
+	agt3 := h.createAgent(h.keyB, "three", nil)
 	meter := usage.NewSQLMeter(h.st.DB(), "sqlite")
-	_ = meter.RecordTokens(ctx, alice.ID, "agt_1", "s1", "", "m", usage.Tokens{Input: 10, Output: 5})
-	_ = meter.RecordTokens(ctx, h.appA, "agt_2", "s2", "", "m", usage.Tokens{Input: 100})
-	_ = meter.RecordTokens(ctx, h.appB, "agt_3", "s3", "", "m", usage.Tokens{Input: 1000})
+	_ = meter.RecordTokens(ctx, alice.ID, agt1, "s1", "", "m", usage.Tokens{Input: 10, Output: 5})
+	_ = meter.RecordTokens(ctx, h.appA, agt2, "s2", "", "m", usage.Tokens{Input: 100})
+	_ = meter.RecordTokens(ctx, h.appB, agt3, "s3", "", "m", usage.Tokens{Input: 1000})
 
 	totalIn := func(out map[string]any) float64 {
 		return out["totals"].(map[string]any)["inputTokens"].(float64)
@@ -459,7 +462,7 @@ func TestUsageByEndUserAndApp(t *testing.T) {
 	if _, out = h.do("GET", "/v1/usage?scope=app", h.keyA, nil); totalIn(out) != 110 {
 		t.Fatalf("app usage must cover the app and its end-users only: %v", out)
 	}
-	if _, out = h.do("GET", "/v1/usage?scope=app&agent_id=agt_2", h.keyA, nil); totalIn(out) != 100 {
+	if _, out = h.do("GET", "/v1/usage?scope=app&agent_id="+agt2, h.keyA, nil); totalIn(out) != 100 {
 		t.Fatalf("agent filter: %v", out)
 	}
 	if _, out = h.do("GET", "/v1/usage", h.keyA, nil); totalIn(out) != 100 {
@@ -482,5 +485,57 @@ func TestV1UnauthorizedUsesUnifiedError(t *testing.T) {
 	code, out := h.do("GET", "/v1/agents", "fc_bogus", nil)
 	if code != http.StatusUnauthorized || errCode(out) != "unauthorized" {
 		t.Fatalf("bad key: %d %v", code, out)
+	}
+}
+
+// Two apps of one account (e.g. douchat-prod and douchat-dev) are as
+// isolated from each other as apps of different accounts.
+func TestAppsOfOneAccountAreIsolated(t *testing.T) {
+	h := newV1Harness(t)
+	ctx := context.Background()
+	dev := &store.AppRecord{OwnerUserID: h.appA, Name: "douchat-dev"}
+	if err := h.st.CreateApp(ctx, dev); err != nil {
+		t.Fatal(err)
+	}
+	_, devKey, err := h.apikeys.CreateInApp(ctx, h.appA, dev.ID, "dev-key", users.APIKeyTypeUser, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prodAgent := h.createAgent(h.keyA, "prod agent", nil)
+	devAgent := h.createAgent(devKey, "dev agent", nil)
+	if rec, _ := h.st.GetAgent(ctx, devAgent); rec.AppID != dev.ID || rec.UserID != h.appA {
+		t.Fatalf("dev agent = %+v, want app %s under the same account", rec, dev.ID)
+	}
+
+	_, out := h.do("GET", "/v1/agents", devKey, nil)
+	if list := out["agents"].([]any); len(list) != 1 || list[0].(map[string]any)["id"] != devAgent {
+		t.Fatalf("dev key lists %v, want only the dev agent", list)
+	}
+	code, out := h.do("GET", "/v1/agents/"+prodAgent, devKey, nil)
+	if code != http.StatusNotFound || errCode(out) != "agent_not_found" {
+		t.Fatalf("dev key read prod agent: %d %v", code, out)
+	}
+	code, out = h.do("POST", "/v1/chat/completions", devKey, map[string]any{
+		"agent_id": prodAgent, "messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	if code != http.StatusNotFound || errCode(out) != "agent_not_found" {
+		t.Fatalf("dev key chatted with prod agent: %d %v", code, out)
+	}
+	// No agent named: the app's only agent answers, not the account's.
+	code, out = h.do("POST", "/v1/chat/completions", devKey, map[string]any{
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("default agent for dev app: %d %v", code, out)
+	}
+	if got := h.rt.ensured[len(h.rt.ensured)-1]; got != h.appA+"/"+devAgent {
+		t.Fatalf("default agent resolved to %s, want the dev app's agent", got)
+	}
+
+	meter := usage.NewSQLMeter(h.st.DB(), "sqlite")
+	_ = meter.RecordTokens(ctx, h.appA, prodAgent, "s", "", "m", usage.Tokens{Input: 7})
+	_ = meter.RecordTokens(ctx, h.appA, devAgent, "s", "", "m", usage.Tokens{Input: 3})
+	if _, out = h.do("GET", "/v1/usage?scope=app", devKey, nil); out["totals"].(map[string]any)["inputTokens"].(float64) != 3 {
+		t.Fatalf("dev app usage must exclude prod: %v", out)
 	}
 }

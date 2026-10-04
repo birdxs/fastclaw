@@ -18,7 +18,7 @@ agent ID will now get a 404 instead of a reply from some other agent.
 
 - **Agent management on `/v1`:** `POST/GET/PATCH/DELETE /v1/agents[/{id}]`
   and `PUT /v1/agents/{id}/system-files/{name}`. Agents belong to the app
-  (the API key's account). `GET /v1/agents` now returns `display_name`,
+  (the API key's app). `GET /v1/agents` now returns `display_name`,
   `description`, `metadata` and timestamps, reads from the database, and
   supports `limit`/`cursor` pagination and `metadata[key]=value` filters.
   `name` still equals `id` for compatibility.
@@ -36,6 +36,16 @@ agent ID will now get a 404 instead of a reply from some other agent.
   rows include `userId` and `endUser`.
 - **Unified `/v1` errors:** `{"error": {"type", "code", "message"}}` with a
   stable `code` (including 401s and rate limits).
+- **Apps (tenants):** new `apps` table; agents and API keys carry `app_id`.
+  On startup every account that owns agents or keys gets a `default` app and
+  its existing agents and keys are filed under it — existing keys keep
+  working with the same access. Create more apps (e.g. `douchat-prod`,
+  `douchat-dev`) under API Keys → New app and pick the app when issuing a
+  key. A `user` key now covers the agents of its app (for existing keys:
+  every agent of the account, as before), agents it creates land in its app,
+  and `/v1` plus `/api/agents` never show it another app's agents.
+  `GET /v1/usage?scope=app` counts only the app's agents. Console
+  endpoints: `GET/POST /api/apps`, `PATCH/DELETE /api/apps/{id}`.
 - **On-demand agent loading:** accounts with more than 50 agents
   (`FASTCLAW_EAGER_AGENT_LIMIT`) load agents on first use and drop idle ones.
   Agents bound to IM channels or with enabled cron jobs are still loaded at

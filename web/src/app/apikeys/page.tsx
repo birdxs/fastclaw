@@ -7,8 +7,12 @@ import {
   deleteApikey,
   rotateApikey,
   setApikeyAgents,
+  listApps,
+  createApp,
+  deleteApp,
   apiFetch,
   type ApikeyType,
+  type AppInfo,
 } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,12 +45,13 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { KeyRound, RotateCw, Trash2, Copy, Check, Plus } from "lucide-react";
+import { KeyRound, RotateCw, Trash2, Copy, Check, Plus, Boxes } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
 
 interface ApiKey {
   id: string;
   userId: string;
+  appId?: string;
   name?: string;
   key: string;
   type: ApikeyType;
@@ -61,6 +66,7 @@ interface MeResponse {
 interface AgentMeta {
   id: string;
   name: string;
+  appId?: string;
 }
 
 export default function ApikeysPage() {
@@ -79,6 +85,19 @@ export default function ApikeysPage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [scopeTarget, setScopeTarget] = useState<ApiKey | null>(null);
   const [scopeAgents, setScopeAgents] = useState<string[]>([]);
+  const [apps, setApps] = useState<AppInfo[]>([]);
+  const [createAppId, setCreateAppId] = useState("");
+  const [appDialogOpen, setAppDialogOpen] = useState(false);
+  const [newAppName, setNewAppName] = useState("");
+  const [deleteAppTarget, setDeleteAppTarget] = useState<AppInfo | null>(null);
+
+  // The app layer only surfaces once an account has more than one app;
+  // with just the default app the page reads exactly as before.
+  const multiApp = apps.length > 1;
+  const defaultAppId = apps.find((a) => a.isDefault)?.id || "";
+  const appName = (id?: string) => apps.find((a) => a.id === id)?.name || "";
+  const agentsInApp = (appId?: string) =>
+    agents.filter((a) => !appId || !a.appId || a.appId === appId);
 
   async function refresh() {
     setError("");
@@ -91,6 +110,28 @@ export default function ApikeysPage() {
     const me = await apiFetch("/api/me");
     const mj = (await me.json()) as MeResponse;
     setIsSuperAdmin(mj?.user?.role === "super_admin");
+    const ap = await listApps();
+    if (ap.apps) setApps(ap.apps);
+  }
+
+  async function handleCreateApp(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newAppName.trim()) return;
+    const res = await createApp(newAppName.trim());
+    if (res.error) {
+      setError(res.error);
+      return;
+    }
+    setNewAppName("");
+    setAppDialogOpen(false);
+    refresh();
+  }
+
+  async function handleDeleteApp(app: AppInfo) {
+    const res = await deleteApp(app.id);
+    if (res.error) setError(res.error);
+    setDeleteAppTarget(null);
+    refresh();
   }
   useEffect(() => {
     refresh();
@@ -107,6 +148,7 @@ export default function ApikeysPage() {
     const res = await createApikey({
       name: createName.trim(),
       type: createType,
+      appId: createAppId || undefined,
       agentIds: createType === "agent" ? createAgents : undefined,
     });
     if (res.error) {
@@ -172,6 +214,7 @@ export default function ApikeysPage() {
     setCreateName("");
     setCreateType("user");
     setCreateAgents([]);
+    setCreateAppId(defaultAppId);
     setError("");
     setCreateOpen(true);
   }
@@ -196,11 +239,60 @@ export default function ApikeysPage() {
             )}
           </p>
         </div>
-        <Button onClick={openCreateDialog}>
-          <Plus className="h-4 w-4 mr-2" />
-          {tr("Add API key", "添加 API 密钥")}
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={() => setAppDialogOpen(true)}>
+            <Boxes className="h-4 w-4 mr-2" />
+            {tr("New app", "新建应用")}
+          </Button>
+          <Button onClick={openCreateDialog}>
+            <Plus className="h-4 w-4 mr-2" />
+            {tr("Add API key", "添加 API 密钥")}
+          </Button>
+        </div>
       </div>
+
+      {multiApp && (
+        <div className="rounded-lg border border-border bg-card overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>{tr("App", "应用")}</TableHead>
+                <TableHead>{tr("Agents", "Agent 数")}</TableHead>
+                <TableHead>{tr("API keys", "密钥数")}</TableHead>
+                <TableHead className="text-right">{tr("Actions", "操作")}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {apps.map((a) => (
+                <TableRow key={a.id}>
+                  <TableCell className="font-medium">
+                    {a.name}
+                    {a.isDefault && (
+                      <Badge variant="secondary" className="ml-2 text-xs">
+                        {tr("Default", "默认")}
+                      </Badge>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{a.agentCount}</TableCell>
+                  <TableCell className="text-xs text-muted-foreground">{a.keyCount}</TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="text-destructive hover:text-destructive"
+                      disabled={a.isDefault || a.agentCount > 0 || a.keyCount > 0}
+                      onClick={() => setDeleteAppTarget(a)}
+                      title={tr("Delete (only empty apps)", "删除（仅限空应用）")}
+                    >
+                      <Trash2 className="size-4" />
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
 
       {showToken && (
         <Card className="border-amber-500/40 bg-amber-500/5">
@@ -255,6 +347,7 @@ export default function ApikeysPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>{tr("Name", "名称")}</TableHead>
+                {multiApp && <TableHead>{tr("App", "应用")}</TableHead>}
                 <TableHead>{tr("Type", "类型")}</TableHead>
                 <TableHead>{tr("Key", "密钥")}</TableHead>
                 <TableHead>{tr("Scope", "范围")}</TableHead>
@@ -266,6 +359,9 @@ export default function ApikeysPage() {
               {keys.map((k) => (
                 <TableRow key={k.id}>
                   <TableCell className="font-medium">{k.name || k.id}</TableCell>
+                  {multiApp && (
+                    <TableCell className="text-xs text-muted-foreground">{appName(k.appId)}</TableCell>
+                  )}
                   <TableCell>
                     <Badge variant={typeBadgeVariant(k.type)} className="text-xs">
                       {k.type === "admin" ? tr("Admin", "管理员") : k.type === "user" ? tr("User", "用户") : "Agent"}
@@ -278,11 +374,15 @@ export default function ApikeysPage() {
                     {k.type === "admin" ? (
                       <span className="text-xs text-muted-foreground">{tr("All agents (platform-wide)", "平台中的所有 Agent")}</span>
                     ) : k.type === "user" ? (
-                      <span className="text-xs text-muted-foreground">{tr("All your agents (new ones included automatically)", "你的所有 Agent（自动包含新建的 Agent）")}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {multiApp
+                          ? tr("All agents in this app (new ones included automatically)", "该应用的所有 Agent（自动包含新建的 Agent）")
+                          : tr("All your agents (new ones included automatically)", "你的所有 Agent（自动包含新建的 Agent）")}
+                      </span>
                     ) : (
                       <ScopeChips
                         selectedIds={k.agents || []}
-                        agents={agents}
+                        agents={agentsInApp(k.appId)}
                         onClick={() => openScopeDialog(k)}
                       />
                     )}
@@ -332,6 +432,31 @@ export default function ApikeysPage() {
                 autoFocus
               />
             </div>
+            {multiApp && (
+              <div className="space-y-1.5">
+                <Label>{tr("App", "应用")}</Label>
+                <div className="flex flex-wrap gap-2">
+                  {apps.map((a) => (
+                    <button
+                      key={a.id}
+                      type="button"
+                      onClick={() => {
+                        setCreateAppId(a.id);
+                        setCreateAgents([]);
+                      }}
+                      className={
+                        "rounded-md border px-2.5 py-1 text-xs transition " +
+                        (createAppId === a.id
+                          ? "border-primary bg-primary/10 text-primary"
+                          : "border-border hover:bg-muted")
+                      }
+                    >
+                      {a.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label>{tr("Type", "类型")}</Label>
               <div className="space-y-2">
@@ -363,13 +488,13 @@ export default function ApikeysPage() {
             {createType === "agent" && (
               <div className="space-y-1.5">
                 <Label>{tr("Allowed agents", "允许访问的 Agent")}</Label>
-                {agents.length === 0 ? (
+                {agentsInApp(createAppId).length === 0 ? (
                   <p className="text-xs text-muted-foreground">
                     {tr("No agents yet — create one from the Agents page first.", "还没有 Agent，请先在 Agent 页面中创建。")}
                   </p>
                 ) : (
                   <div className="flex flex-wrap gap-2">
-                    {agents.map((a) => {
+                    {agentsInApp(createAppId).map((a) => {
                       const active = createAgents.includes(a.id);
                       return (
                         <button
@@ -411,6 +536,59 @@ export default function ApikeysPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <Dialog open={appDialogOpen} onOpenChange={setAppDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{tr("New app", "新建应用")}</DialogTitle>
+            <DialogDescription>
+              {tr(
+                "An app is one integration environment, such as douchat-prod or douchat-dev. Its API keys only see the agents created in it.",
+                "一个应用对应一个接入环境，例如 douchat-prod 或 douchat-dev。应用的密钥只能看到在该应用里创建的 Agent。",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <form onSubmit={handleCreateApp} className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="app-name">{tr("Name", "名称")}</Label>
+              <Input
+                id="app-name"
+                value={newAppName}
+                maxLength={64}
+                onChange={(e) => setNewAppName(e.target.value)}
+                placeholder={tr("e.g. douchat-prod", "例如 douchat-prod")}
+                autoFocus
+              />
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setAppDialogOpen(false)}>
+                {tr("Cancel", "取消")}
+              </Button>
+              <Button type="submit" disabled={!newAppName.trim()}>
+                {tr("Create app", "创建应用")}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={deleteAppTarget !== null} onOpenChange={(o) => !o && setDeleteAppTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{tr("Delete app?", "删除应用？")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{deleteAppTarget?.name}</code>{" "}
+              {tr("has no agents or keys and will be removed.", "没有 Agent 和密钥，将被删除。")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{tr("Cancel", "取消")}</AlertDialogCancel>
+            <AlertDialogAction onClick={() => deleteAppTarget && handleDeleteApp(deleteAppTarget)}>
+              {tr("Delete", "删除")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => !o && setDeleteTarget(null)}>
         <AlertDialogContent>
@@ -456,11 +634,11 @@ export default function ApikeysPage() {
             </DialogDescription>
           </DialogHeader>
           <div className="py-2">
-            {agents.length === 0 ? (
+            {agentsInApp(scopeTarget?.appId).length === 0 ? (
               <p className="text-xs text-muted-foreground">{tr("No agents available.", "没有可用的 Agent。")}</p>
             ) : (
               <div className="flex flex-wrap gap-2">
-                {agents.map((a) => {
+                {agentsInApp(scopeTarget?.appId).map((a) => {
                   const active = scopeAgents.includes(a.id);
                   return (
                     <button
