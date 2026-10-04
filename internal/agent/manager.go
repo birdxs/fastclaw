@@ -218,6 +218,7 @@ func (m *Manager) buildAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider
 	// were never reaching the sandbox.
 	ag := NewAgentWithSkillsCfg(rc, providerForAgent(rc, prov), mb, homeDir, skillsCfg)
 	ag.SetOwnerUserID(m.uid)
+	ag.SetAgentOwnerID(rc.UserID)
 	// Per-user skills bucket: chat-time `skills/...` writes route to
 	// ~/.fastclaw/users/<uid>/, where SkillsLoader's "personal" layer
 	// also scans (see SkillsLoader.WithUserID). Set userID on the

@@ -60,7 +60,12 @@ type Agent struct {
 	homePath      string // agent's home: SOUL.md, sessions, memory, skills
 	workspacePath string // working dir where agent creates user files
 	homeDir       string // FastClaw root, ~/.fastclaw
-	ownerUserID   string // the user that owns this agent (for hook namespacing)
+	ownerUserID   string // the UserSpace user the agent runs for (hook / data namespacing)
+	// agentOwnerID is agents.user_id — the account that actually owns the
+	// agent. It differs from ownerUserID whenever the agent runs in another
+	// user's space (an app's end-user, a public-link visitor, an admin
+	// browsing). Owner/operator trust is decided against it.
+	agentOwnerID string
 	// admins is the per-channel allowlist of chatters who can run write-
 	// mode slash commands (/new /undo /retry /compact /model /personality).
 	// Keyed by channel name (e.g. "discord" → ["123...", "456..."]). Empty
@@ -698,6 +703,19 @@ func (a *Agent) ToolRegistry() *tools.Registry {
 // data per user.
 func (a *Agent) SetOwnerUserID(uid string) {
 	a.ownerUserID = uid
+}
+
+// SetAgentOwnerID records agents.user_id, the account that owns the agent.
+func (a *Agent) SetAgentOwnerID(uid string) { a.agentOwnerID = uid }
+
+// trustOwnerID is the user treated as the agent's owner for operator
+// trust: the real owner, or — on legacy installs without one — the
+// UserSpace user.
+func (a *Agent) trustOwnerID() string {
+	if a.agentOwnerID != "" {
+		return a.agentOwnerID
+	}
+	return a.ownerUserID
 }
 
 // OwnerUserID returns the agent's owning user ID — the user that

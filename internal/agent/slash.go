@@ -174,8 +174,12 @@ func slashRequiresAdmin(cmd string, msg bus.InboundMessage) bool {
 // slash command on this channel.
 //
 // Web / api: the chatter's UserID is the FastClaw user UUID — owner is
-// identified by direct equality with the agent's ownerUserID. No
-// per-platform allowlist needed.
+// identified by direct equality with the agent's real owner
+// (agents.user_id, trustOwnerID). Not the UserSpace user: an agent
+// attached into someone else's space (an app's end-user, a public-link
+// visitor) runs with that user as ownerUserID, and comparing against it
+// would make every such chatter the operator. No per-platform allowlist
+// needed.
 //
 // IM channels (discord, telegram, slack, ...): UserID is the platform's
 // own user ID (Discord snowflake, Telegram numeric ID, ...), which has
@@ -188,7 +192,7 @@ func slashRequiresAdmin(cmd string, msg bus.InboundMessage) bool {
 func (a *Agent) isAdminChatter(msg bus.InboundMessage) bool {
 	// Web / api carry FastClaw UUIDs directly; owner check is sufficient.
 	if msg.Channel == "web" || msg.Channel == "api" {
-		return msg.UserID != "" && msg.UserID == a.ownerUserID
+		return msg.UserID != "" && msg.UserID == a.trustOwnerID()
 	}
 	// Shared-identity channels rewrite EVERY speaker's UserID to the
 	// channel owner's id (routing.processInbound), which makes the
@@ -208,7 +212,7 @@ func (a *Agent) isAdminChatter(msg bus.InboundMessage) bool {
 		// user_id matches the agent owner, they're admin. Otherwise
 		// deny — an unconfigured allowlist should NOT grant admin
 		// to every anonymous chatter on a public-facing IM channel.
-		return msg.UserID != "" && msg.UserID == a.ownerUserID
+		return msg.UserID != "" && msg.UserID == a.trustOwnerID()
 	}
 	for _, id := range list {
 		if id == msg.UserID {
