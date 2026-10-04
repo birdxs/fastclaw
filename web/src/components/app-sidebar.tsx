@@ -24,11 +24,13 @@ import {
 import {
   ConsumerChatSidebar,
   type ConsumerAgentItem,
+  type ConsumerTeamItem,
 } from "@/components/consumer-chat-sidebar";
 import {
   BotIcon,
   BrainIcon,
   CoinsIcon,
+  InfoIcon,
   KeyRoundIcon,
   LayoutDashboardIcon,
   MessagesSquareIcon,
@@ -42,6 +44,7 @@ import {
   getAgent,
   getAgents,
   getChatSessions,
+  getConfig,
   getMe,
   getStatus,
   listProjects,
@@ -52,60 +55,60 @@ import {
 import { useLocale } from "@/components/locale-provider";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
 
-// Extract agent ID from pathname like /agents/default/chat/. The second
-// capture is an explicit allow-list of sub-routes so the bare /agents/
-// index keeps the Platform nav instead of flipping to Agent nav.
+// Extract agent ID from pathname like /agents/default/chat/ or an Agent's
+// console page like /console/agents/default/skills/. The second capture is
+// an explicit allow-list of sub-routes so the Agent list keeps the Platform
+// nav instead of flipping to Agent nav.
 // Add new agent-scoped routes here when they ship — `project` was
 // missed when the project chat route was introduced and that left
 // the sidebar showing the platform nav for /agents/<id>/project/...
 function extractAgentId(pathname: string): string | null {
   const match = pathname.match(
-    /^\/agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler|project)/,
+    /^\/(?:console\/)?agents\/([^/]+)\/(chat|customize|skills|models|sessions|channels|chats|scheduler|project|team|context|knowledge|mcp|plugins|usage)/,
   );
   return match ? match[1] : null;
 }
 
-// Sidebar nav is rendered as a series of labeled sections so users can
-// scan it by domain instead of one flat list:
-//
-//   (no label)  Overview                              — landing dashboard
-//   Agent       Agents · Models · Skills · Tools      — agent-building surfaces
-//   User        Users · Chats · Token Usage · API Keys — admin platform tools
-//   (no label)  Settings                              — opens the user dialog
-//
-// Skills / Tools and the Users/Chats/Token-Usage admin entries are
-// admin-only. Non-admin sees the Agent group with just Agents + Models,
-// and a slim User group with API Keys. Settings is a click-only item —
-// its onClick is attached at render time so it can call into component
-// state.
-const OVERVIEW_ITEM: NavItem = {
-  title: "Overview",
-  url: "/overview/",
-  icon: LayoutDashboardIcon,
-};
+function extractTeamId(pathname: string): string | null {
+  const match = pathname.match(/^\/teams\/([^/]+)\/chat\/[^/]+/) ||
+    pathname.match(/^\/agents\/[^/]+\/team\/([^/]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
 
-const USER_AGENT_GROUP: NavItem[] = [
-  { title: "Agents", url: "/agents/?manage=1", icon: BotIcon },
-  { title: "Models", url: "/models/", icon: BrainIcon },
+// The console sidebar is one flat list of the caller's own (user-level)
+// pages — the same for every account. Deployment-wide configuration
+// (users, all chats, token usage, system models / skills / tools) lives
+// under /admin for super_admins instead (adminNav).
+// Overview is the console root, so a prefix match would light it up on
+// every console page; it's active only on /console itself.
+const consoleNav = (pathname: string): NavItem[] => [
+  {
+    title: "Overview",
+    url: "/console/",
+    icon: LayoutDashboardIcon,
+    active: pathname.replace(/\/$/, "") === "/console",
+  },
+  { title: "Agents", url: "/console/agents/", icon: BotIcon },
+  { title: "Models", url: "/console/models/", icon: BrainIcon },
+  { title: "Skills", url: "/console/skills/", icon: SparklesIcon },
+  { title: "API Keys", url: "/console/apikeys/", icon: KeyRoundIcon },
 ];
 
-const ADMIN_AGENT_GROUP: NavItem[] = [
-  { title: "Agents", url: "/agents/?manage=1", icon: BotIcon },
-  { title: "Models", url: "/models/", icon: BrainIcon },
-  { title: "Skills", url: "/skills/", icon: SparklesIcon },
-  { title: "Tools", url: "/tools/", icon: WrenchIcon },
-];
-
-const USER_USER_GROUP: NavItem[] = [
-  { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
-];
-
-const ADMIN_USER_GROUP: NavItem[] = [
+// The /admin sidebar: deployment-wide pages, super_admin only (AuthGuard
+// gates the routes, the APIs enforce it).
+const ADMIN_NAV: NavItem[] = [
   { title: "Users", url: "/admin/users/", icon: UsersIcon },
   { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
   { title: "Token Usage", url: "/admin/usage/", icon: CoinsIcon },
-  { title: "API Keys", url: "/apikeys/", icon: KeyRoundIcon },
+  { title: "Models", url: "/admin/models/", icon: BrainIcon },
+  { title: "Skills", url: "/admin/skills/", icon: SparklesIcon },
+  { title: "Tools", url: "/admin/tools/", icon: WrenchIcon },
+  { title: "About", url: "/admin/about/", icon: InfoIcon },
 ];
+
+function isAdminRoute(pathname: string) {
+  return pathname === "/admin" || pathname.startsWith("/admin/");
+}
 
 // "New chat" is active iff we're parked on the bare /chat/ page with
 // no session open. A session can be encoded two ways:
@@ -140,12 +143,14 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const activeAgentId = extractAgentId(pathname);
+  const activeTeamId = extractTeamId(pathname);
   const hasOpenSession = !!searchParams?.get("session");
 
   const [status, setStatus] = React.useState<StatusResponse | null>(null);
   const [me, setMe] = React.useState<MeResponse | null>(null);
   const [agents, setAgents] = React.useState<AgentSwitcherItem[]>([]);
   const [consumerAgents, setConsumerAgents] = React.useState<ConsumerAgentItem[]>([]);
+  const [consumerTeams, setConsumerTeams] = React.useState<ConsumerTeamItem[]>([]);
   const [consumerAgentsLoading, setConsumerAgentsLoading] = React.useState(true);
   // role flag per agent the caller can see — owner vs viewer (read-only
   // shared from another user). Drives whether the AGENT_NAV exposes
@@ -251,7 +256,11 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       Promise.all(
         agents.map(async (agent) => {
           const list = await getChatSessions(agent.id).catch(() => []);
-          const latest = [...list].sort(
+          // Group-member sessions use their team id as a hidden project
+          // scope. They belong to the group row, not the Agent's direct
+          // contact row; otherwise creating a group would make clicking an
+          // Agent unexpectedly reopen its private group transcript.
+          const latest = list.filter((session) => !session.projectId?.startsWith("tm-")).sort(
             (a, b) =>
               (b.lastMessageAt || b.updatedAt || b.createdAt || 0) -
               (a.lastMessageAt || a.updatedAt || a.createdAt || 0),
@@ -299,6 +308,31 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
       window.removeEventListener("fastclaw:sessions-changed", refresh);
     };
   }, [agents]);
+
+  React.useEffect(() => {
+    let aborted = false;
+    const refreshTeams = () => {
+      getConfig("user")
+        .then((cfg) => {
+          if (aborted) return;
+          const items = Object.entries(cfg.teams || {}).map(([id, team]) => ({
+            id,
+            ...team,
+            name: team.name?.trim() || tr("Group chat", "群聊"),
+          }));
+          setConsumerTeams(items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+        })
+        .catch(() => {
+          if (!aborted) setConsumerTeams([]);
+        });
+    };
+    refreshTeams();
+    window.addEventListener("fastclaw:teams-changed", refreshTeams);
+    return () => {
+      aborted = true;
+      window.removeEventListener("fastclaw:teams-changed", refreshTeams);
+    };
+  }, [tr]);
 
   // When the active agent isn't in the caller's owned list — e.g. a
   // super_admin chatting with another user's agent — fetch its name
@@ -414,6 +448,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             Chats: "聊天记录",
             "Token Usage": "Token 用量",
             "API Keys": "API 密钥",
+            About: "关于",
             "New chat": "新建对话",
           } as Record<string, string>)[item.title] || item.title,
         ),
@@ -422,15 +457,17 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   );
 
   const isConsumerChat =
-    !!activeAgentId &&
-    /^\/agents\/[^/]+\/(chat|project|chats)(?:\/|$)/.test(pathname);
+    (!!activeAgentId && /^\/agents\/[^/]+\/(chat|project|chats|team)(?:\/|$)/.test(pathname)) ||
+    /^\/teams\/[^/]+\/chat\/[^/]+(?:\/|$)/.test(pathname);
 
-  if (isConsumerChat && activeAgentId) {
+  if (isConsumerChat) {
     return (
       <>
         <ConsumerChatSidebar
-          activeAgentId={activeAgentId}
+          activeAgentId={activeAgentId || undefined}
+          activeTeamId={activeTeamId || undefined}
           agents={consumerAgents}
+          teams={consumerTeams}
           loading={consumerAgentsLoading}
           me={me}
         />
@@ -438,9 +475,8 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
           defaultTab={settingsDefaultTab}
-          role={agentRoles[activeAgentId] === "viewer" ? "viewer" : "owner"}
-          userOnly={settingsUserOnly}
-          isAdmin={isAdmin}
+          role={activeAgentId && agentRoles[activeAgentId] === "viewer" ? "viewer" : "owner"}
+          userOnly={settingsUserOnly || !activeAgentId}
         />
       </>
     );
@@ -464,18 +500,10 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             label={t("common.agent")}
             items={localizeNavItems(AGENT_NAV(activeAgentId, pathname, hasOpenSession))}
           />
+        ) : isAdminRoute(pathname) ? (
+          <NavMain items={localizeNavItems(ADMIN_NAV)} />
         ) : (
-          <>
-            <NavMain items={localizeNavItems([OVERVIEW_ITEM])} />
-            <NavMain
-              label={t("common.agent")}
-              items={localizeNavItems(isAdmin ? ADMIN_AGENT_GROUP : USER_AGENT_GROUP)}
-            />
-            <NavMain
-              label={t("common.user")}
-              items={localizeNavItems(isAdmin ? ADMIN_USER_GROUP : USER_USER_GROUP)}
-            />
-          </>
+          <NavMain items={localizeNavItems(consoleNav(pathname))} />
         )}
         {/* Projects are per-(user, agent), so viewers on a shared agent
             see/create their OWN projects — the owner's projects stay
@@ -516,6 +544,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             t("common.user")
           }
           subtitle={me?.user?.role || (isAdmin ? "super_admin" : "user")}
+          isAdmin={isAdmin}
         />
       </SidebarFooter>
       <SidebarRail />
@@ -529,7 +558,6 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             ? "viewer"
             : "owner"
         }
-        isAdmin={isAdmin}
       />
     </Sidebar>
   );

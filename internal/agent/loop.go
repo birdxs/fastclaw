@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/codeany-ai/open-agent-sdk-go/costtracker"
@@ -104,6 +105,7 @@ type Agent struct {
 	workspaceStore workspace.Store
 	skillsLearner  *SkillsLearner
 	turnCount      int
+	turnCounter    *atomic.Int64
 	engine         *sdkEngine
 	costTracker    *costtracker.Tracker
 	agentID        string
@@ -185,9 +187,8 @@ func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 // can stamp it onto persisted rows for later replay. Called at the top
 // of HandleMessage / HandleMessageStream before any tool runs.
 //
-// Mutating the shared registry across concurrent chats would race, but
-// the current invariant is one chat-in-flight per agent — the gateway
-// serializes per-agent turns. Documenting it here in case that changes.
+// HandleMessage and HandleMessageStream fork the registry before binding,
+// so concurrent topics never mutate each other's tool or workspace scope.
 func (a *Agent) bindSession(ctx context.Context, channel, accountID, sessionID, projectID string) {
 	a.registry.SetSessionID(sessionID)
 	a.registry.SetProjectID(projectID)
@@ -372,6 +373,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 
 	ag := &Agent{
 		name:                 rc.ID,
+		turnCounter:          &atomic.Int64{},
 		provider:             prov,
 		registry:             registry,
 		sessions:             session.NewManager(rc.Home + "/sessions"),
@@ -1054,7 +1056,11 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	sess := a.sessions.GetByKey(resolved)
 	msgs := sess.ArchivedMessages()
 	var history []map[string]any
+	var groupTurnID string
 	for _, m := range msgs {
+		if value, ok := m.Metadata["groupTurnId"].(string); ok && value != "" {
+			groupTurnID = value
+		}
 		// Hide runtime-injected messages (currently only goal_context
 		// continuations). They live in the session for the LLM's
 		// benefit; surfacing them to the user would expose audit
@@ -1094,6 +1100,9 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 				continue
 			}
 			entry := map[string]any{"role": "user", "content": text}
+			if m.Timestamp > 0 {
+				entry["timestamp"] = m.Timestamp
+			}
 			if len(imageURLs) > 0 {
 				entry["imageUrls"] = imageURLs
 			}
@@ -1109,9 +1118,18 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 					entry["senderChannel"] = v
 				}
 			}
+			if value, ok := m.Metadata["groupTurnId"].(string); ok && value != "" {
+				entry["groupTurnId"] = value
+			}
 			history = append(history, entry)
 		case "assistant":
 			entry := map[string]any{"role": "assistant"}
+			if groupTurnID != "" {
+				entry["groupTurnId"] = groupTurnID
+			}
+			if m.Timestamp > 0 {
+				entry["timestamp"] = m.Timestamp
+			}
 			if m.Content != "" {
 				entry["content"] = m.Content
 			}
@@ -1143,6 +1161,9 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 				"content":    m.Content,
 				"name":       m.Name,
 				"toolCallId": m.ToolCallID,
+			}
+			if m.Timestamp > 0 {
+				entry["timestamp"] = m.Timestamp
 			}
 			if len(m.Metadata) > 0 {
 				entry["metadata"] = m.Metadata
@@ -1336,10 +1357,17 @@ func filepathDir(p string) string {
 // LLMs honor structured params framed as a separate document
 // section much more reliably than as inline prose.
 func renderClientParams(params map[string]any) string {
-	if len(params) == 0 {
+	publicParams := make(map[string]any, len(params))
+	for key, value := range params {
+		if strings.HasPrefix(key, "__fastclaw") {
+			continue
+		}
+		publicParams[key] = value
+	}
+	if len(publicParams) == 0 {
 		return ""
 	}
-	blob, err := json.MarshalIndent(params, "", "  ")
+	blob, err := json.MarshalIndent(publicParams, "", "  ")
 	if err != nil {
 		return ""
 	}
@@ -1357,6 +1385,43 @@ func renderClientParams(params map[string]any) string {
 		"The user's client app submitted these parameters alongside " +
 		"the message. Forward them to whichever tool / skill you call.\n\n" +
 		"```json\n" + string(blob) + "\n```"
+}
+
+func groupContextFromParams(params map[string]any) *GroupContext {
+	raw, ok := params["__fastclawGroupChat"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	botUsername, _ := raw["botUsername"].(string)
+	botUsername = strings.TrimSpace(botUsername)
+	if botUsername == "" {
+		return nil
+	}
+	var teammates []string
+	switch values := raw["teammates"].(type) {
+	case []string:
+		teammates = append(teammates, values...)
+	case []any:
+		for _, value := range values {
+			if name, ok := value.(string); ok && strings.TrimSpace(name) != "" {
+				teammates = append(teammates, strings.TrimSpace(name))
+			}
+		}
+	}
+	instruction, _ := raw["instruction"].(string)
+	return &GroupContext{BotUsername: botUsername, Teammates: teammates, Instruction: instruction}
+}
+
+func applyInternalMessageMetadata(message *provider.Message, params map[string]any) {
+	turnID, _ := params["__fastclawGroupTurnId"].(string)
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return
+	}
+	if message.Metadata == nil {
+		message.Metadata = map[string]any{}
+	}
+	message.Metadata["groupTurnId"] = turnID
 }
 
 // stripSenderPrefix removes the leading "\[name\]: " (or unescaped
@@ -1586,6 +1651,9 @@ func isIMChannel(channel string) bool {
 // Returns "" for web chats and any other caller that doesn't populate
 // SenderName, so we don't waste tokens.
 func renderSender(msg bus.InboundMessage) string {
+	if speaker := renderSpeaker(msg.Params); speaker != "" {
+		return speaker
+	}
 	if msg.SenderName == "" {
 		return ""
 	}
@@ -1601,6 +1669,37 @@ func renderSender(msg bus.InboundMessage) string {
 	}
 	if msg.PeerKind != "" {
 		fmt.Fprintf(&b, "- peer_kind: %s\n", msg.PeerKind)
+	}
+	return b.String()
+}
+
+// SpeakerParamKey is the internal params key carrying the group-chat
+// speaker an API caller named in `params.speaker`. Like every
+// __fastclaw key it is hidden from the Client Parameters block.
+const SpeakerParamKey = "__fastclawSpeaker"
+
+// renderSpeaker renders the API caller's group-chat speaker
+// ({"id": "...", "name": "..."}) as per-turn context. It lives only in
+// this turn's prompt — never in session history — and grants nothing:
+// the id is the calling app's user id, not a FastClaw identity.
+func renderSpeaker(params map[string]any) string {
+	raw, ok := params[SpeakerParamKey].(map[string]any)
+	if !ok {
+		return ""
+	}
+	id, _ := raw["id"].(string)
+	name, _ := raw["name"].(string)
+	id, name = strings.TrimSpace(id), strings.TrimSpace(name)
+	if id == "" && name == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Current Speaker\n\nThis conversation has several participants. The latest user turn was sent by:\n")
+	if name != "" {
+		fmt.Fprintf(&b, "- name: %s\n", name)
+	}
+	if id != "" {
+		fmt.Fprintf(&b, "- id: %s\n", id)
 	}
 	return b.String()
 }
@@ -1741,16 +1840,20 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// + IM-bridge payloads (PhotoURL / PhotoURLs) land in session
 	// history the same way they would on a non-plan turn.
 	userMsg := buildUserMessage(msg)
+	applyInternalMessageMetadata(&userMsg, msg.Params)
 	sess.Append(userMsg)
 
 	if a.provider == nil {
 		noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
-		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
+		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{
+			"code":    chatErrorCodeLLMProviderNotConfigured,
+			"message": noProviderMsg,
+		}})
 		emitEvent(ctx, ChatEvent{Type: "done"})
 		return noProviderMsg
 	}
 
-	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, a.memory.WithUserID(chatterUID), a.isTrustedTurn(msg))
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAsWithGroup(chatterUID, a.memory.WithUserID(chatterUID), a.isTrustedTurn(msg), groupContextFromParams(msg.Params))
 	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
@@ -1768,7 +1871,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	if catalog != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: catalog})
 	}
-	messages = append(messages, withConversationGapContext(sess.GetMessages())...)
+	messages = append(messages, withConversationGapContext(modelMessagesWithRecentImages(sess.GetMessages()))...)
 	if a.piiScrubEnabled {
 		messages = privacy.ScrubMessages(messages)
 	}
@@ -2182,6 +2285,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		return result.reply
 	}
 
+	a = a.forkTurn()
+
 	// Quota gate: reject the turn early when the agent owner has
 	// exceeded their billing ceiling. Checked before plan-mode and
 	// the main ReAct loop so no LLM tokens are burned.
@@ -2296,7 +2401,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 
 	chatterMem := a.memory.WithUserID(chatterUID)
-	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem, a.isTrustedTurn(msg))
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAsWithGroup(chatterUID, chatterMem, a.isTrustedTurn(msg), groupContextFromParams(msg.Params))
 	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 
@@ -2311,6 +2416,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// `[SenderName]:` content-prefix policy lives there (group-only;
 	// DMs stay bare to avoid SOUL.md language-bias regressions).
 	userMsg := buildUserMessage(msg)
+	applyInternalMessageMetadata(&userMsg, msg.Params)
 	sess.Append(userMsg)
 
 	// Context compaction: check if session messages are too large
@@ -2345,7 +2451,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, withConversationGapContext(sessionMsgs)...)
+	messages = append(messages, withConversationGapContext(modelMessagesWithRecentImages(sessionMsgs))...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 
@@ -2418,7 +2524,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		if a.provider == nil {
 			slog.Error("agent has no provider configured", "agent", a.name, "model", a.model)
 			noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
-			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
+			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{
+				"code":    chatErrorCodeLLMProviderNotConfigured,
+				"message": noProviderMsg,
+			}})
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			return noProviderMsg
 		}
@@ -2929,7 +3038,11 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 	if chatterMem == nil {
 		chatterMem = a.memory
 	}
-	a.turnCount++
+	if a.turnCounter != nil {
+		a.turnCount = int(a.turnCounter.Add(1))
+	} else {
+		a.turnCount++
+	}
 
 	// Index user/assistant messages in FTS. Skip runtime-injected
 	// messages (e.g. goal_context continuations) — they're synthetic
@@ -3059,6 +3172,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		return provider.NewStreamReader(ch)
 	}
 
+	a = a.forkTurn()
+
 	// Quota gate — mirrors the check in HandleMessage.
 	if rejection := a.checkQuota(ctx); rejection != "" {
 		return a.stringStream(rejection)
@@ -3102,7 +3217,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	chatterMem := a.memory.WithUserID(chatterUID)
-	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem, a.isTrustedTurn(msg))
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAsWithGroup(chatterUID, chatterMem, a.isTrustedTurn(msg), groupContextFromParams(msg.Params))
 	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
@@ -3111,6 +3226,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// flatten + senderMetadata. Group msgs keep their `[SenderName]:`
 	// prefix (applied in buildUserMessage); DMs stay bare.
 	userMsg := buildUserMessage(msg)
+	applyInternalMessageMetadata(&userMsg, msg.Params)
 	sess.Append(userMsg)
 
 	sessionMsgs := sess.GetMessages()
@@ -3137,7 +3253,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, withConversationGapContext(sessionMsgs)...)
+	messages = append(messages, withConversationGapContext(modelMessagesWithRecentImages(sessionMsgs))...)
 
 	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
 

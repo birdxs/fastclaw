@@ -123,7 +123,7 @@ function presetModelRows(preset: string): ModelEntry[] {
   return ids.map((id) => ({ ...emptyModel(), id, name: id }));
 }
 
-export default function ModelsPage({ scope = "auto" }: { scope?: "auto" | "user" | "system" }) {
+export default function ModelsPage({ scope = "user" }: { scope?: "auto" | "user" | "system" }) {
   const { tr } = useLocale();
   // Agent context is auto-detected from the URL. The standalone /models
   // page lives outside any /agents/<id>/ path, so the hook returns
@@ -149,9 +149,10 @@ export default function ModelsPage({ scope = "auto" }: { scope?: "auto" | "user"
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  // The settings dialog supplies an explicit scope so a super_admin can
-  // manage both a personal override and the system default. Standalone uses
-  // "auto" for backwards compatibility: admin → system, everyone else → user.
+  // Defaults to the caller's own (user-scope) models: /console is the
+  // personal console for every account. The settings dialog passes
+  // scope="system" for a super_admin's deployment-wide defaults; "auto"
+  // (admin → system, everyone else → user) remains available.
   const [me, setMe] = useState<{ id: string; role: string } | null>(null);
   const isSuperAdmin = me?.role === "super_admin";
   const isSystemScope = scope === "system" || (scope === "auto" && isSuperAdmin);

@@ -176,9 +176,8 @@ html.theme-transition *::after {
   background: oklch(0.7 0 0 / 30%);
 }
 
-/* Tailwind Typography normally paints markdown with its own foreground,
-   which would turn text inside the black user bubble dark again. Keep every
-   prose role on the bubble's current color while preserving code-block fills. */
+/* Keep markdown aligned with the user bubble's theme-aware foreground while
+   preserving code-block fills. */
 .user-chat-bubble .chat-md {
   --tw-prose-body: currentColor;
   --tw-prose-headings: currentColor;

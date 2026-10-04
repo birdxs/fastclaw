@@ -36,7 +36,7 @@ import {
 import { ConfigureSkillDialog, type SkillEntryView } from "@/components/configure-skill-dialog";
 import { useLocale } from "@/components/locale-provider";
 
-export default function SkillsPage({ scope = "system" }: { scope?: "user" | "system" }) {
+export default function SkillsPage({ scope = "user" }: { scope?: "user" | "system" }) {
   const { tr } = useLocale();
   const canManage = scope === "system";
   const [skills, setSkills] = useState<SkillInfo[]>([]);

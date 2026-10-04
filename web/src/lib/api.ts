@@ -263,6 +263,7 @@ export interface ConfigResponse {
     // first, falling back to the global entries map.
     agentEntries?: Record<string, Record<string, SkillEntryCfg>>;
   };
+  teams?: Record<string, TeamEntry>;
   // Presentation hints the dashboard needs to render inheritance state
   // without re-resolving the scope chain client-side. systemDefaultModel
   // is the value `agents.defaults.model` would resolve to from system
@@ -272,6 +273,17 @@ export interface ConfigResponse {
     systemDefaultModel?: string;
     serverTimezone?: string;
   };
+}
+
+export interface TeamEntry {
+  description?: string;
+  humanName?: string;
+  name?: string;
+  agents: string[];
+  defaultAgent?: string;
+  sessionId?: string;
+  groupBehavior?: string;
+  createdAt?: number;
 }
 
 // Auth token for cloud mode. Set via setAuthToken() on login; empty in local mode.
@@ -483,12 +495,42 @@ export async function listApikeys() {
 
 export type ApikeyType = "admin" | "user" | "agent";
 
-export async function createApikey(req: { name: string; type: ApikeyType; agentIds?: string[] }) {
+export async function createApikey(req: { name: string; type: ApikeyType; appId?: string; agentIds?: string[] }) {
   const res = await apiFetch("/api/apikeys", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
+  return res.json();
+}
+
+// Apps: optional tenants of the runtime API. Keys and agents without an app
+// belong to the account; an app key only sees the agents of its app.
+
+export interface AppInfo {
+  id: string;
+  name: string;
+  createdAt: string;
+  agentCount: number;
+  keyCount: number;
+}
+
+export async function listApps(): Promise<{ apps?: AppInfo[]; error?: string }> {
+  const res = await apiFetch("/api/apps");
+  return res.json();
+}
+
+export async function createApp(name: string): Promise<{ app?: AppInfo; error?: string }> {
+  const res = await apiFetch("/api/apps", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  return res.json();
+}
+
+export async function deleteApp(id: string): Promise<{ ok?: boolean; error?: string }> {
+  const res = await apiFetch(`/api/apps/${id}`, { method: "DELETE" });
   return res.json();
 }
 
@@ -840,6 +882,7 @@ export interface ChatHistoryMessage {
   // attachments. The chat UI renders these as inline thumbnails on
   // bubbles loaded from history.
   imageUrls?: string[];
+  attachments?: Array<{ url: string; name: string }>;
   // Populated for user turns that arrived via an IM bridge (Discord,
   // Telegram, ...). The chat panel renders an avatar + nickname header
   // on each such bubble so the agent owner can see who they're looking
@@ -849,6 +892,8 @@ export interface ChatHistoryMessage {
   senderAvatarUrl?: string;
   senderId?: string;
   senderChannel?: string;
+  timestamp?: number;
+  groupTurnId?: string;
 }
 
 export interface TodoItem {
@@ -924,6 +969,7 @@ export async function getChatHistoryWithCursor(
 }
 
 export interface ChatSessionEntry {
+  status?: "running" | "completed" | "stopped" | "failed";
   id: string;
   // channel/accountId/chatId let the sidebar render a per-channel icon
   // and the chats page tell apart "the same agent's wechat thread vs
@@ -1164,6 +1210,7 @@ export interface ChatStreamEvent {
     name?: string;
     arguments?: string;
     result?: string;
+    code?: string;
     message?: string;
     metadata?: ToolResultMetadata;
     // subagent_progress payload — only populated when type === "subagent_progress".
@@ -1172,6 +1219,10 @@ export interface ChatStreamEvent {
     phase?: "thinking" | "running" | "final-delivery" | "done";
     tools?: string[];
   };
+}
+
+export interface TeamChatStreamEvent extends ChatStreamEvent {
+  agentId?: string;
 }
 
 export async function sendChatStream(
@@ -1267,6 +1318,113 @@ export async function sendChatStream(
   if (!sawEvent) {
     throw new Error("stream ended without any response from the server");
   }
+}
+
+export interface TeamMessage {
+  id: string;
+  role: "user" | "agent" | "status" | "tool";
+  imageUrls?: string[];
+  attachments?: Array<{ url: string; name: string }>;
+  content: string;
+  timestamp: number;
+  agentId?: string;
+  groupTurnId?: string;
+}
+
+export interface TeamTopic {
+  phase?: string;
+  phaseDetail?: { kind: string; name?: string; attempt?: number; total?: number };
+  rounds?: number;
+  limited?: boolean;
+  sessionId: string;
+  turnId?: string;
+  title: string;
+  status: "idle" | "running" | "completed" | "stopped" | "failed";
+  updatedAt: number;
+  activeAgents: string[];
+}
+
+export interface TeamRun extends TeamTopic { messages: TeamMessage[]; completeHistory?: boolean }
+
+async function teamRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await apiFetch(path, init);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || `Group request failed: ${response.status}`);
+  return body as T;
+}
+
+export function getTeamTopics(teamId: string) {
+  return teamRequest<{ topics: TeamTopic[] }>(`/api/chat/team/topics?${new URLSearchParams({ teamId })}`);
+}
+export async function getTeamRun(teamId: string, sessionId: string): Promise<{ run: TeamRun | null; deleted?: boolean }> {
+  const response = await apiFetch(`/api/chat/team/run?${new URLSearchParams({ teamId, sessionId })}`);
+  const body = await response.json();
+  if (response.status === 410 && body.code === "team_topic_deleted") return { run: null, deleted: true };
+  if (!response.ok) throw new Error(body.error || `Group request failed: ${response.status}`);
+  return body;
+}
+export function startTeamRun(teamId: string, sessionId: string, message: string, imageUrls: string[] = [], attachments: Array<{ url: string; name: string }> = []) {
+  return teamRequest<TeamRun>("/api/chat/team/run", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ teamId, sessionId, message, imageUrls, attachments }),
+  });
+}
+export function stopTeamRun(teamId: string, sessionId: string) {
+  return teamRequest<{ ok: boolean }>(`/api/chat/team/stop?${new URLSearchParams({ teamId, sessionId })}`, { method: "POST" });
+}
+
+// Team chat uses the same SSE event vocabulary as one-to-one chat, with
+// agentId on each member event so the UI can keep simultaneous identities
+// visually separate. The final team-level done event has no agentId.
+export async function sendTeamChatStream(
+  teamId: string,
+  sessionId: string,
+  members: Array<{ agentId: string; sessionId?: string }>,
+  message: string,
+  onEvent: (evt: TeamChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await apiFetch("/api/chat/team/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ teamId, sessionId, members, message }),
+    signal,
+  });
+  if (!res.ok) {
+    let msg = `team stream failed: ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data?.error) msg = String(data.error);
+    } catch { /* keep the status fallback */ }
+    throw new Error(msg);
+  }
+  if (!res.body) throw new Error("team stream failed: no body");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let sawEvent = false;
+  let finished = false;
+  while (!finished) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        const event = JSON.parse(line.slice(6)) as TeamChatStreamEvent;
+        sawEvent = true;
+        onEvent(event);
+        if (event.type === "done" && !event.agentId) finished = true;
+      } catch {
+        throw new Error("team stream failed: malformed event from server");
+      }
+    }
+  }
+  try { await reader.cancel(); } catch { /* ignore */ }
+  if (!sawEvent) throw new Error("team stream ended without a response");
 }
 
 export interface UploadedFile {
@@ -2080,4 +2238,18 @@ export async function restoreSessionHistory(
     },
   );
   if (!res.ok) throw new Error(`restore failed: ${res.status}`);
+}
+
+export function renameTeamTopic(teamId: string, sessionId: string, title: string) {
+  return teamRequest<{ ok: boolean }>(`/api/chat/team/topic?${new URLSearchParams({ teamId, sessionId })}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }),
+  });
+}
+export function deleteTeamTopic(teamId: string, sessionId: string) {
+  return teamRequest<{ ok: boolean }>(`/api/chat/team/topic?${new URLSearchParams({ teamId, sessionId })}`, { method: "DELETE" });
+}
+
+export interface TeamInboxNotice { id: string; agentId: string; sessionId: string; timestamp: number }
+export function getTeamInbox() {
+  return teamRequest<{ messages: TeamInboxNotice[] }>("/api/chat/team/inbox");
 }

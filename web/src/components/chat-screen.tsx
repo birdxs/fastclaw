@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { beginChatRun, finishChatRun, stopChatRun, useChatRunStatus, type ChatRunStatus } from "@/lib/chat-runs";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
@@ -11,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { createProject, deleteChatSession, fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, getSessionHistory, listAgentFiles, listProjects, renameChatSession, restoreSessionHistory, revealAgentWorkspace, sendChatStream, steerChat, updateAgent, updateProject, uploadAgentFiles, getSkills, type AgentDetail, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type ProjectEntry, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile, type WorkspaceHistoryEntry } from "@/lib/api";
-import { ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsRight, Clock, Code2, Copy, Download, Eye, ExternalLink, File, FileCode, FileText, Film, Folder, FolderOpen, FolderPlus, FolderSearch, Globe2, Image as ImageIcon, Link2, ListChecks, LockKeyhole, MoreHorizontal, Music, PanelLeftClose, PanelLeftOpen, PanelRight, Paperclip, Pencil, Plus, Puzzle, Radio, RefreshCw, RotateCcw, Settings, Share2, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsRight, CircleAlert, CircleCheck, CirclePause, Clock, Code2, Copy, Download, Eye, ExternalLink, File, FileCode, FileText, Film, Folder, FolderOpen, FolderPlus, FolderSearch, Globe2, Image as ImageIcon, Link2, ListChecks, LoaderCircle, LockKeyhole, MoreHorizontal, Music, PanelLeftClose, PanelLeftOpen, PanelRight, Paperclip, Pencil, Plus, Puzzle, Radio, RefreshCw, RotateCcw, Settings, Share2, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import type { AgentSettingsTab } from "@/components/agent-settings-dialog";
@@ -189,6 +190,82 @@ interface ChatMessage {
 // web UI renders one bubble per split chunk so the experience matches.
 const SPLIT_MARKER = "<|split|>";
 const CHAT_HISTORY_PAGE_SIZE = 20;
+const LLM_PROVIDER_NOT_CONFIGURED = "llm_provider_not_configured";
+const MAX_INLINE_IMAGE_EDGE = 2048;
+const MAX_INLINE_IMAGE_BYTES = 1.5 * 1024 * 1024;
+const MAX_INLINE_IMAGES_TOTAL_BYTES = 4 * 1024 * 1024;
+const MAX_INLINE_IMAGES_PER_MESSAGE = 4;
+
+function isLLMProviderConfigurationError(code: string | undefined, message: string): boolean {
+  return code === LLM_PROVIDER_NOT_CONFIGURED
+    || /not configured with a usable LLM provider/i.test(message);
+}
+
+function openAgentModelsSettings(agentId: string) {
+  if (typeof window === "undefined" || !agentId) return;
+  window.dispatchEvent(
+    new CustomEvent("fastclaw:open-agent-settings", {
+      detail: { agentId, tab: "models" satisfies AgentSettingsTab },
+    }),
+  );
+}
+
+function readBlobAsDataURL(blob: Blob): Promise<string | null> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
+    reader.onerror = () => resolve(null);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob | null> {
+  return new Promise((resolve) => canvas.toBlob(resolve, "image/webp", quality));
+}
+
+// Keep inline vision payloads small enough for common LLM gateways while the
+// original file remains untouched in /workspace. Small images retain their
+// original encoding; large/high-resolution images are progressively resized
+// and encoded as WebP before being embedded in the chat request.
+async function prepareImageForModel(file: File, targetBytes: number): Promise<string | null> {
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    return file.size <= targetBytes ? readBlobAsDataURL(file) : null;
+  }
+
+  try {
+    const longestEdge = Math.max(bitmap.width, bitmap.height);
+    if (longestEdge <= MAX_INLINE_IMAGE_EDGE && file.size <= targetBytes) {
+      return readBlobAsDataURL(file);
+    }
+
+    let scale = Math.min(1, MAX_INLINE_IMAGE_EDGE / longestEdge);
+    let quality = 0.86;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const width = Math.max(1, Math.round(bitmap.width * scale));
+      const height = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext("2d");
+      if (!context) return null;
+      context.drawImage(bitmap, 0, 0, width, height);
+
+      const blob = await canvasToBlob(canvas, quality);
+      if (!blob) return null;
+      if (blob.size <= targetBytes) return readBlobAsDataURL(blob);
+
+      const sizeRatio = Math.sqrt(targetBytes / blob.size);
+      scale *= Math.max(0.55, Math.min(0.88, sizeRatio * 0.92));
+      quality = Math.max(0.64, quality - 0.06);
+    }
+    return null;
+  } finally {
+    bitmap.close();
+  }
+}
 
 // splitOnMarker breaks `s` on SPLIT_MARKER, trims each chunk, and
 // drops the empty ones. Used at render time so a streamed assistant
@@ -283,6 +360,7 @@ function findTodoAnchorMessageId(messages: ChatMessage[]): string | null {
 }
 
 interface ChatSession {
+  status?: ChatRunStatus;
   id: string;
   projectId?: string;
   title?: string;
@@ -622,7 +700,22 @@ export function ChatScreen() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
-  const [sending, setSending] = useState(false);
+  const [localSending, setSending] = useState(false);
+  const runStatus = useChatRunStatus(selectedAgent, sessionId);
+  const sending = localSending || runStatus === "running" || sessions.some((topic) => (topic.id === sessionId || topic.chatId === sessionId) && topic.status === "running");
+  const viewGenerationRef = useRef(0);
+  const viewScopeRef = useRef(`${selectedAgent}/${routeSessionId || sessionId}`);
+  useLayoutEffect(() => {
+    const scope = `${selectedAgent}/${routeSessionId || sessionId}`;
+    if (viewScopeRef.current === scope) return;
+    viewScopeRef.current = scope;
+    viewGenerationRef.current++;
+    setSending(false);
+    inFlightSendSessionRef.current = null;
+    streamingMsgIdRef.current = null;
+    abortRef.current = null;
+  }, [selectedAgent, routeSessionId, sessionId]);
+  useLayoutEffect(() => () => { viewGenerationRef.current++; }, []);
   // todo.md state for the current session — agent maintains the file,
   // we re-fetch on every write_file/edit_file event that touches
   // todo.md plus once at mount. Empty `items` hides the panel.
@@ -964,14 +1057,17 @@ export function ChatScreen() {
 
   // Load sessions when agent changes
   const loadSessions = useCallback((agentId: string) => {
+    const generation = viewGenerationRef.current;
     getChatSessions(agentId)
-      .then((list) => setSessions(list || []))
-      .catch(() => setSessions([]));
+      .then((list) => { if (generation === viewGenerationRef.current) setSessions(list || []); })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
     if (!selectedAgent) return;
     loadSessions(selectedAgent);
+    const timer = setInterval(() => loadSessions(selectedAgent), 2500);
+    return () => clearInterval(timer);
   }, [selectedAgent, loadSessions]);
 
   // Live + replay subscription. Two job:
@@ -997,13 +1093,19 @@ export function ChatScreen() {
     const since = subscribeSinceRef.current;
     const url = `/api/chat/subscribe?agentId=${encodeURIComponent(selectedAgent)}&sessionId=${encodeURIComponent(sessionId)}&since=${since}`;
     const es = new EventSource(url, { withCredentials: true });
+    const generation = viewGenerationRef.current;
+    const scopedMessages: typeof setMessages = (value) => setMessages((current) => generation === viewGenerationRef.current ? (typeof value === "function" ? value(current) : value) : current);
+    let deltaBubbleId: string | null = null;
     es.onmessage = (ev) => {
+      if (generation !== viewGenerationRef.current) return;
       let data: {
         seq?: number;
         type?: string;
         text?: string;
         data?: {
           content?: string;
+          delta?: string;
+          code?: string;
           message?: string;
           metadata?: ToolResultMetadata;
           // subagent_progress fields
@@ -1040,10 +1142,31 @@ export function ChatScreen() {
           if (seq >= 0) maxSeqRef.current = seq;
         };
         switch (data.type) {
+          case "content_delta": {
+            const delta = data.data?.delta;
+            if (!delta) break;
+            if (!deltaBubbleId) deltaBubbleId = `resume-delta-${crypto.randomUUID()}`;
+            const id = deltaBubbleId;
+            transientBubbleIdRef.current = id;
+            scopedMessages((prev) => {
+              if (generation !== viewGenerationRef.current) return prev;
+              const index = prev.findIndex((message) => message.id === id);
+              if (index < 0) return [...prev, { id, role: "agent", content: delta, timestamp: Date.now() }];
+              return prev.map((message) => message.id === id ? { ...message, content: message.content + delta } : message);
+            });
+            break;
+          }
           case "content": {
             const content = data.data?.content || "";
             const meta = data.data?.metadata;
             if (!content && !meta) break;
+            if (deltaBubbleId && content) {
+              const id = deltaBubbleId;
+              deltaBubbleId = null;
+              claim();
+              scopedMessages((prev) => generation !== viewGenerationRef.current ? prev : prev.map((message) => message.id === id ? { ...message, content, metadata: meta } : message));
+              break;
+            }
             // The active POST sendChatStream is rendering this turn
             // via content_delta into streamingMsgIdRef. Both
             // subscriptions sit on the same hub, so the `content`
@@ -1060,7 +1183,7 @@ export function ChatScreen() {
               break;
             }
             claim();
-            setMessages((prev) => {
+            scopedMessages((prev) => {
               if (transientBubbleIdRef.current) {
                 const idx = prev.findIndex((m) => m.id === transientBubbleIdRef.current);
                 if (idx >= 0) {
@@ -1099,9 +1222,18 @@ export function ChatScreen() {
             // Ignore those on replay so Stop produces one clear status
             // instead of "(Stopped)" followed by a stale error bubble.
             if (/\bcontext canceled\b/i.test(msg)) break;
-            setMessages((prev) => [
+            const needsModelConfiguration = isLLMProviderConfigurationError(data.data?.code, msg);
+            if (needsModelConfiguration) openAgentModelsSettings(selectedAgent);
+            scopedMessages((prev) => [
               ...prev,
-              { id: `e-${Date.now()}`, role: "agent", content: `Error: ${msg}`, timestamp: Date.now() },
+              {
+                id: `e-${Date.now()}`,
+                role: "agent",
+                content: needsModelConfiguration
+                  ? tr("Configure an LLM provider before chatting.", "请先配置可用的模型服务商，再继续聊天。")
+                  : tr("Error: {{error}}", "错误：{{error}}", { error: msg }),
+                timestamp: Date.now(),
+              },
             ]);
             break;
           }
@@ -1126,6 +1258,8 @@ export function ChatScreen() {
           }
           case "done": {
             claim();
+            deltaBubbleId = null;
+            setSending(false);
             // Defensive clear — content events should already have
             // sealed the streaming bubble, but a turn that errors out
             // before the trailing `content` event lands would leave
@@ -1145,11 +1279,12 @@ export function ChatScreen() {
               transientBubbleIdRef.current = null;
               getChatHistoryWithCursor(selectedAgent, sessionId, { limit: CHAT_HISTORY_PAGE_SIZE })
                 .then(({ history, latestEventSeq, historyStart, hasMoreHistory }) => {
+                  if (generation !== viewGenerationRef.current) return;
                   if (latestEventSeq > maxSeqRef.current) maxSeqRef.current = latestEventSeq;
                   subscribeSinceRef.current = latestEventSeq;
                   historyStartRef.current = historyStart;
                   setHasOlderHistory(hasMoreHistory);
-                  setMessages(buildChatMessages(history, historyStart));
+                  scopedMessages(buildChatMessages(history, historyStart));
                 })
                 .catch(() => {});
             }
@@ -1173,7 +1308,7 @@ export function ChatScreen() {
       // Shape B: legacy WebChannel { text } — cron-fired async messages.
       const text = data.text || "";
       if (!text) return;
-      setMessages((prev) => [
+      scopedMessages((prev) => [
         ...prev,
         {
           id: `async-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -1623,6 +1758,11 @@ export function ChatScreen() {
     });
   }, []);
 
+  const sendMessages = setMessages;
+  const sendInput = setInput;
+  const sendAttachments = setAttachments;
+  const sendSending = setSending;
+  const sendSubagentProgress = setSubagentProgress;
   const handleSend = useCallback(async (overrideText?: string, force?: boolean) => {
     // overrideText lets caller post a message that didn't come from
     // the composer (e.g. the plan-approval button clicking "go"). When
@@ -1649,6 +1789,20 @@ export function ChatScreen() {
     // drops back to the bare chat form.
     const projectIdHint = urlProjectId;
 
+    const generation = viewGenerationRef.current;
+    const isCurrent = () => generation === viewGenerationRef.current;
+    const setMessages: typeof sendMessages = (value) => { sendMessages((current) => isCurrent() ? (typeof value === "function" ? value(current) : value) : current); };
+    const setInput: typeof sendInput = (value) => { sendInput((current) => isCurrent() ? (typeof value === "function" ? value(current) : value) : current); };
+    const setAttachments: typeof sendAttachments = (value) => { sendAttachments((current) => isCurrent() ? (typeof value === "function" ? value(current) : value) : current); };
+    const setSending: typeof sendSending = (value) => { sendSending((current) => isCurrent() ? (typeof value === "function" ? value(current) : value) : current); };
+    const setSubagentProgress: typeof sendSubagentProgress = (value) => { sendSubagentProgress((current) => isCurrent() ? (typeof value === "function" ? value(current) : value) : current); };
+
+    const controller = beginChatRun(selectedAgent, sessionId);
+    if (!controller) return;
+    setSending(true);
+    abortRef.current = controller;
+    let outcome: ChatRunStatus = "failed";
+    try {
     // Pin the sessionId into the URL on the first send so a refresh
     // keeps the user in the same conversation. We use the native
     // History API instead of `router.replace` because output:'export'
@@ -1661,7 +1815,7 @@ export function ChatScreen() {
     // useSearchParams (and the sidebar's navigateOnce dedupe that
     // derives from them) still see the new URL.
     const target = `/agents/${selectedAgent}/chat/${sessionId}/`;
-    inFlightSendSessionRef.current = sessionId;
+    if (isCurrent()) inFlightSendSessionRef.current = sessionId;
     if (pathname !== target) {
       window.history.replaceState(null, "", target);
     }
@@ -1680,12 +1834,23 @@ export function ChatScreen() {
     let imageDataUrls: string[] = [];
 
     if (filesToUpload.length > 0) {
-      userBubbleAttachments = filesToUpload.map((f) => ({
-        name: f.name,
-        isImage: f.type.startsWith("image/"),
-        previewUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : undefined,
-      }));
-
+      const imageFiles = filesToUpload.filter((file) => file.type.startsWith("image/"));
+      if (imageFiles.length > MAX_INLINE_IMAGES_PER_MESSAGE) {
+        setAttachments(filesToUpload);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `e-${Date.now()}`,
+            role: "agent",
+            content: tr(
+              "You can send up to 4 images in one message.",
+              "每条消息最多可以发送 4 张图片。",
+            ),
+            timestamp: Date.now(),
+          },
+        ]);
+        return;
+      }
       try {
         await uploadAgentFiles(selectedAgent, sessionId, filesToUpload);
       } catch (err) {
@@ -1696,22 +1861,39 @@ export function ChatScreen() {
         return;
       }
 
-      // Read each image as a base64 data URL. We do this AFTER upload —
-      // upload only needs the File object; data URL conversion is for the
-      // provider call. Done in parallel for snappy UX on multi-attach.
-      imageDataUrls = (
-        await Promise.all(
-          filesToUpload.map(async (f) => {
-            if (!f.type.startsWith("image/")) return null;
-            return await new Promise<string | null>((resolve) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : null);
-              reader.onerror = () => resolve(null);
-              reader.readAsDataURL(f);
-            });
-          }),
-        )
-      ).filter((s): s is string => !!s);
+      // Prepare only this turn's images for inline vision. Divide a bounded
+      // aggregate budget across the selected images so multi-attach cannot
+      // accidentally create a huge JSON request. The original uploads stay
+      // lossless in /workspace for file/image tools.
+      const perImageBudget = Math.min(
+        MAX_INLINE_IMAGE_BYTES,
+        Math.max(64 * 1024, Math.floor(MAX_INLINE_IMAGES_TOTAL_BYTES / Math.max(1, imageFiles.length))),
+      );
+      const preparedImages = await Promise.all(
+        imageFiles.map((file) => prepareImageForModel(file, perImageBudget)),
+      );
+      if (preparedImages.some((image) => !image)) {
+        setAttachments(filesToUpload);
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `e-${Date.now()}`,
+            role: "agent",
+            content: tr(
+              "One or more images could not be prepared. Try a smaller PNG, JPEG, or WebP file.",
+              "图片处理失败，请尝试使用尺寸更小的 PNG、JPEG 或 WebP 图片。",
+            ),
+            timestamp: Date.now(),
+          },
+        ]);
+        return;
+      }
+      imageDataUrls = preparedImages.filter((image): image is string => !!image);
+      userBubbleAttachments = filesToUpload.map((file) => ({
+        name: file.name,
+        isImage: file.type.startsWith("image/"),
+        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : undefined,
+      }));
     }
     // Build the prompt actually sent to the model. Images travel as
     // `imageUrls` for vision, but the model also needs the on-disk path
@@ -1736,7 +1918,7 @@ export function ChatScreen() {
     // Sending always means "I want to see what happens next" — re-pin
     // to bottom even if the user had scrolled up to read earlier in the
     // conversation.
-    stickToBottomRef.current = true;
+    if (isCurrent()) stickToBottomRef.current = true;
     setMessages((prev) => [
       ...prev,
       {
@@ -1748,13 +1930,12 @@ export function ChatScreen() {
       },
     ]);
     setSending(true);
-    abortRef.current = new AbortController();
 
     // Snapshot the workspace before the turn so we can diff at `done` and
     // attach newly-created / modified files (PDFs, images, …) to the
     // final reply. Fire-and-forget; if the snapshot fails we just won't
     // surface files this turn. `path → size|modTime` key.
-    const preTurnFilesPromise = listAgentFiles(selectedAgent)
+    const preTurnFilesPromise = listAgentFiles(selectedAgent, sessionId)
       .then((items) => {
         const m = new Map<string, string>();
         for (const f of items) m.set(f.path, `${f.size}|${f.modTime}`);
@@ -1779,12 +1960,15 @@ export function ChatScreen() {
       curGroupId = `tg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
       curCalls = [];
       curContent = "";
-      streamingMsgIdRef.current = null;
+      if (isCurrent()) streamingMsgIdRef.current = null;
     };
     startNewGroup();
 
     try {
+      outcome = "completed";
       await sendChatStream(selectedAgent, sessionId, fullText, (evt: ChatStreamEvent) => {
+        if (evt.type === "error") outcome = "failed";
+        if (!isCurrent()) return;
         // Dedup against /api/chat/subscribe SSE, which subscribes to
         // the same chat-events hub server-side. Whichever path arrives
         // first renders; the other skips. seq < 0 means persistence
@@ -1836,7 +2020,7 @@ export function ChatScreen() {
             const meta = evt.data?.metadata;
             if (content === "__NEW_SESSION__") {
               handleNewChat();
-              loadSessions(selectedAgent);
+              if (isCurrent()) loadSessions(selectedAgent);
               return;
             }
             if (!content && !meta) {
@@ -2005,20 +2189,29 @@ export function ChatScreen() {
             // gateway log line the user can't see.
             const msg = evt.data?.message || tr("Unknown error", "未知错误");
             if (/\bcontext canceled\b/i.test(msg)) break;
+            const needsModelConfiguration = isLLMProviderConfigurationError(evt.data?.code, msg);
+            if (needsModelConfiguration) openAgentModelsSettings(selectedAgent);
             setMessages((prev) => [
               ...prev,
-              { id: `e-${Date.now()}`, role: "agent", content: tr("Error: {{error}}", "错误：{{error}}", { error: msg }), timestamp: Date.now() },
+              {
+                id: `e-${Date.now()}`,
+                role: "agent",
+                content: needsModelConfiguration
+                  ? tr("Configure an LLM provider before chatting.", "请先配置可用的模型服务商，再继续聊天。")
+                  : tr("Error: {{error}}", "错误：{{error}}", { error: msg }),
+                timestamp: Date.now(),
+              },
             ]);
             break;
           }
         }
-      }, abortRef.current.signal, imageDataUrls, projectIdHint);
+      }, controller.signal, imageDataUrls, projectIdHint);
       // Diff the workspace against the pre-turn snapshot so files
       // produced by *exec* (e.g. a Python script that saves PDFs) get
       // surfaced too — `turnFiles` only catches write_file tool calls
       // with relative, non-identity paths, which misses most real-
       // world flows. Union both sources by path.
-      const postTurnFiles = await listAgentFiles(selectedAgent).catch(() => []);
+      const postTurnFiles = await listAgentFiles(selectedAgent, sessionId).catch(() => []);
       const preSnap = await preTurnFilesPromise;
       const diffFiles: ProducedFile[] = [];
       for (const f of postTurnFiles) {
@@ -2060,7 +2253,7 @@ export function ChatScreen() {
           return updated;
         });
       }
-      loadSessions(selectedAgent);
+      if (isCurrent()) loadSessions(selectedAgent);
       // First-turn of a brand-new session just got persisted — tell the
       // global sidebar to refetch its Chats list so the new title shows
       // up without a full page reload.
@@ -2072,6 +2265,8 @@ export function ChatScreen() {
         );
       }
     } catch (err) {
+      outcome = controller.signal.aborted ? "stopped" : "failed";
+      if (!isCurrent()) return;
       // AbortError from the user clicking Stop is expected — surface a
       // brief "Stopped" line so they see the cancellation took effect,
       // not a generic failure message.
@@ -2112,6 +2307,11 @@ export function ChatScreen() {
           { id: `e-${Date.now()}`, role: "agent", content: tr("(Stopped)", "（已停止）"), timestamp: Date.now() },
         ]);
       } else {
+        const rawErrorMessage = err instanceof Error && err.message
+          ? err.message
+          : tr("Failed to get a response. Is the gateway running?", "获取回复失败，请确认网关是否正在运行。");
+        const needsModelConfiguration = isLLMProviderConfigurationError(undefined, rawErrorMessage);
+        if (needsModelConfiguration) openAgentModelsSettings(selectedAgent);
         setMessages((prev) => {
           const lastUser = [...prev].reverse().findIndex((m) => m.role === "user");
           if (lastUser >= 0) {
@@ -2120,9 +2320,9 @@ export function ChatScreen() {
               .some((m) => m.role === "agent" || m.role === "tool-group");
             if (replyAfter) return prev; // turn already produced output
           }
-          const errMsg = err instanceof Error && err.message
-            ? err.message
-            : tr("Failed to get a response. Is the gateway running?", "获取回复失败，请确认网关是否正在运行。")
+          const errMsg = needsModelConfiguration
+            ? tr("Configure an LLM provider before chatting.", "请先配置可用的模型服务商，再继续聊天。")
+            : rawErrorMessage;
           return [
             ...prev,
             {
@@ -2134,23 +2334,25 @@ export function ChatScreen() {
           ];
         });
       }
+    }
+    } catch (err) {
+      outcome = controller.signal.aborted ? "stopped" : "failed";
+      setMessages((prev) => [...prev, { id: `e-${Date.now()}`, role: "agent", content: err instanceof Error ? err.message : String(err), timestamp: Date.now() }]);
     } finally {
-      if (inFlightSendSessionRef.current === sessionId) {
-        inFlightSendSessionRef.current = null;
+      finishChatRun(selectedAgent, sessionId, controller, controller.signal.aborted ? "stopped" : outcome);
+      if (isCurrent()) {
+        if (inFlightSendSessionRef.current === sessionId) inFlightSendSessionRef.current = null;
+        abortRef.current = null;
+        setSending(false);
+        setSubagentProgress(null);
+        textareaRef.current?.focus();
       }
-      abortRef.current = null;
-      setSending(false);
-      // Belt-and-suspenders: the subagent's done event clears this on
-      // the happy path, but if a network blip drops that event we don't
-      // want a stale "iteration 5/20" sitting under a finished turn.
-      setSubagentProgress(null);
-      textareaRef.current?.focus();
     }
   }, [input, attachments, selectedAgent, sessionId, sending, isReadOnlyView, isReadOnlySafeSlashCommand, loadSessions, pathname, refreshTodoForScope, router, tr, urlProjectId]);
 
   const handleStop = useCallback(() => {
-    abortRef.current?.abort();
-  }, []);
+    stopChatRun(selectedAgent, sessionId);
+  }, [selectedAgent, sessionId]);
 
   // handleSteer fires while a turn is streaming: it buffers the message
   // into the running turn (the agent folds it in between tool rounds and
@@ -2614,7 +2816,7 @@ export function ChatScreen() {
                     <div
                       className={`rounded-2xl px-4 py-2.5 break-words ${
                         msg.role === "user"
-                          ? "user-chat-bubble bg-[#111111] text-white rounded-br-md dark:bg-white dark:text-black"
+                          ? "user-chat-bubble rounded-br-md border border-[#ded5e2] bg-[#eee9f0] text-[#29252a] dark:border-[#4b404e] dark:bg-[#342d36] dark:text-[#f8f5f9]"
                           : "bg-[#f1f1f1] text-[#202020] rounded-bl-md dark:bg-white/[0.09] dark:text-foreground"
                       }`}
                     >
@@ -3723,6 +3925,7 @@ function BotControlPanel({
                             <BotTopicNavigationRow
                               key={topic.id}
                               topic={topic}
+                              agentId={agentId}
                               active={topic.id === activeTopicId}
                               nested
                               onSelect={() => onSelectTopic(topic.id)}
@@ -3794,6 +3997,7 @@ function BotControlPanel({
                       >
                         <ChatSessionLeadingVisual topic={topic} />
                         <span className="min-w-0 flex-1 truncate">{topicTitle}</span>
+                        <TopicRunStatus agentId={agentId} sessionId={topic.id} fallback={topic.status} />
                       </button>
                       <DropdownMenu>
                         <DropdownMenuTrigger
@@ -3896,6 +4100,24 @@ function BotControlPanel({
   );
 }
 
+function TopicRunStatus({ agentId, sessionId, fallback }: { agentId: string; sessionId: string; fallback?: ChatRunStatus }) {
+  const local = useChatRunStatus(agentId, sessionId);
+  const status = local || fallback;
+  const { tr } = useLocale();
+  if (!status) return null;
+  const label = status === "running" ? tr("Running", "进行中")
+    : status === "completed" ? tr("Completed", "已完成")
+    : status === "stopped" ? tr("Stopped", "已停止") : tr("Failed", "失败");
+  const Icon = status === "running" ? LoaderCircle
+    : status === "completed" ? CircleCheck
+    : status === "stopped" ? CirclePause : CircleAlert;
+  return (
+    <span role="img" title={label} aria-label={label} className={`flex size-4 shrink-0 items-center justify-center ${status === "running" ? "text-violet-600 dark:text-violet-300" : status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
+      <Icon aria-hidden="true" className={`size-3.5 ${status === "running" ? "animate-spin motion-reduce:animate-none" : ""}`} />
+    </span>
+  );
+}
+
 function ChatSessionLeadingVisual({ topic }: { topic: ChatSession }) {
   const isWeb = !topic.channel || topic.channel === "web";
   if (isWeb && topic.thumbnailUrl) {
@@ -3918,6 +4140,7 @@ function ChatSessionLeadingVisual({ topic }: { topic: ChatSession }) {
 
 function BotTopicNavigationRow({
   topic,
+  agentId,
   active,
   nested = false,
   onSelect,
@@ -3925,6 +4148,7 @@ function BotTopicNavigationRow({
   onDelete,
 }: {
   topic: ChatSession;
+  agentId: string;
   active: boolean;
   nested?: boolean;
   onSelect: () => void;
@@ -3951,6 +4175,7 @@ function BotTopicNavigationRow({
       >
         <ChatSessionLeadingVisual topic={topic} />
         <span className="min-w-0 flex-1 truncate">{topicTitle}</span>
+        <TopicRunStatus agentId={agentId} sessionId={topic.id} fallback={topic.status} />
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger
@@ -5775,7 +6000,7 @@ function SlashMenu({
         })}
       </div>
       <Link
-        href="/skills/"
+        href="/console/skills/"
         className="flex items-center gap-2 border-t border-border px-3 py-2 text-xs text-muted-foreground hover:text-foreground hover:bg-muted/30 transition-colors"
       >
         <SlidersHorizontal className="h-3.5 w-3.5" />

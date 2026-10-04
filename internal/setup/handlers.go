@@ -462,23 +462,45 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			resp["channels"] = chs
 		}
 	}
-	allAgents := s.resolveAllAgents(r)
-	if len(allAgents) > 0 {
-		var agentList []map[string]string
-		for _, ag := range allAgents {
-			id := ag.Name() // AgentHandle.Name() returns the agent id
-			entry := map[string]string{"id": id}
-			// Surface the human-friendly name from the agents row so the
-			// dashboard list reads "default" / "ImgAny" instead of
-			// "agt_…". Look-up failures fall back to id-only so a
-			// transient store error doesn't black out the panel.
-			if s.dataStore != nil {
-				if rec, _ := s.dataStore.GetAgent(r.Context(), id); rec != nil && rec.Name != "" {
+	var agentList []map[string]string
+	listed := map[string]bool{}
+	// Owned agents come from the agents table: accounts with many agents
+	// load them on demand, so the runtime only holds the ones in use.
+	if ident, ok := auth.FromContext(r.Context()); ok && s.dataStore != nil {
+		if recs, err := s.dataStore.ListAgents(r.Context(), ident.EffectiveUserID()); err == nil {
+			for _, rec := range recs {
+				if !ident.CanAccessAgent(rec.ID) {
+					continue
+				}
+				entry := map[string]string{"id": rec.ID}
+				if rec.Name != "" {
 					entry["name"] = rec.Name
 				}
+				agentList = append(agentList, entry)
+				listed[rec.ID] = true
 			}
-			agentList = append(agentList, entry)
 		}
+	}
+	// Plus anything attached to the caller's runtime that they don't own
+	// (public agents, api-key grants).
+	for _, ag := range s.resolveAllAgents(r) {
+		id := ag.Name() // AgentHandle.Name() returns the agent id
+		if listed[id] {
+			continue
+		}
+		entry := map[string]string{"id": id}
+		// Surface the human-friendly name from the agents row so the
+		// dashboard list reads "default" / "ImgAny" instead of
+		// "agt_…". Look-up failures fall back to id-only so a
+		// transient store error doesn't black out the panel.
+		if s.dataStore != nil {
+			if rec, _ := s.dataStore.GetAgent(r.Context(), id); rec != nil && rec.Name != "" {
+				entry["name"] = rec.Name
+			}
+		}
+		agentList = append(agentList, entry)
+	}
+	if len(agentList) > 0 {
 		resp["agents"] = agentList
 	}
 	jsonResponse(w, http.StatusOK, resp)
@@ -1198,6 +1220,19 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
+	if req.SessionID == "" {
+		req.SessionID = "web-ui"
+	}
+	agentCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentTurnTimeout)
+	streamSessionID := s.chatEventSessionID(r, ag.Name(), req.SessionID)
+	key := teamRunKey{uid, ag.Name(), streamSessionID}
+	if !s.beginChatTurn(key, cancel) {
+		cancel()
+		jsonResponse(w, http.StatusConflict, map[string]any{"error": "this topic is already running"})
+		return
+	}
+	failed := false
+	defer func() { s.endChatTurn(key, agentCtx, failed); cancel() }()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1220,7 +1255,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// dispatch from emitEvent never blocks even if we're slow to drain.
 	hub := s.chatEventHub()
 	agentID := ag.Name()
-	sub, unsubscribe := hub.Subscribe(uid, agentID, req.SessionID)
+	sub, unsubscribe := hub.Subscribe(uid, agentID, streamSessionID)
 	defer unsubscribe()
 
 	// Detach the agent's ctx from the request: when the browser tab
@@ -1228,13 +1263,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// keep running so its already-paid-for LLM call finishes and the
 	// reply lands in session_events. The 15-minute cap is the only thing
 	// that can kill it.
-	agentCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentTurnTimeout)
 	// cancel lives on the handler, not the agent goroutine: when a slash
 	// queues a continuation we keep the SSE open past HandleMessage's
 	// return, and inner-scope cancel would tear down agentCtx before the
 	// continuation's events can reach this handler's safety-net check.
-	defer cancel()
-	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
+	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, streamSessionID)
 
 	agentDone := make(chan struct{})
 	go func() {
@@ -1269,7 +1302,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			// its detached ctx and persists every event it emits.
 			// User reloading the chat page will pick up the rest via
 			// /api/chat/subscribe?since=N.
-			return
+			clientGone = nil
 		case <-agentDone:
 			// Race: HandleMessage publishes `turn_pending` to the hub
 			// AND `defer close(agentDone)` fires from the same goroutine.
@@ -1283,6 +1316,9 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 				case env, ok := <-sub:
 					if !ok {
 						return
+					}
+					if env.Event.Type == "error" {
+						failed = true
 					}
 					if env.Event.Type == "turn_pending" {
 						turnPending = true
@@ -1325,6 +1361,9 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		case env, ok := <-sub:
 			if !ok {
 				return
+			}
+			if env.Event.Type == "error" {
+				failed = true
 			}
 			if env.Event.Type == "turn_pending" {
 				turnPending = true
@@ -1430,6 +1469,7 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sessionID = s.chatEventSessionID(r, agentID, sessionID)
 	hub := s.chatEventHub()
 	// Subscribe BEFORE replay so any event that lands while we're
 	// scanning the DB ends up either in the replayed range OR in the
@@ -1482,17 +1522,9 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			// content_delta is the high-volume token-by-token stream
-			// that drives the active turn's bubble. It is intentionally
-			// NOT persisted (see emitEvent), arrives with seq=-1, and is
-			// already delivered to the initiating tab via the POST
-			// /api/chat/stream subscription on the same hub. Forwarding
-			// it here would double-render on the active tab; reloaders
-			// who join mid-turn miss the partial reveal but still get
-			// the trailing `content` event with the full text.
-			if env.Event.Type == "content_delta" {
-				continue
-			}
+			// The client scopes callbacks to the selected conversation and
+			// lets the active POST own rendering. Reconnected views therefore
+			// also receive live deltas without double-rendering the sender.
 			// Drop replay-overlap events: any event with seq <= the
 			// highest seq we already streamed during replay. Without
 			// this, a browser that reconnects at exactly the wrong
@@ -1705,7 +1737,7 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	if s.dataStore != nil {
 		uid := s.effectiveUserID(r)
 		if uid != "" {
-			if seq, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, ag.Name(), sessionID); err == nil {
+			if seq, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, ag.Name(), s.chatEventSessionID(r, ag.Name(), sessionID)); err == nil {
 				resp["latestEventSeq"] = seq
 			}
 		}
@@ -1744,7 +1776,19 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]any{"sessions": []session.WebSession{}})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"sessions": ag.WebChatSessions()})
+	sessions := ag.WebChatSessions()
+	s.chatTurnsMu.Lock()
+	for i := range sessions {
+		run := s.chatTurns[teamRunKey{s.effectiveUserID(r), ag.Name(), sessions[i].ID}]
+		if run == nil {
+			run = s.chatTurns[teamRunKey{s.effectiveUserID(r), ag.Name(), sessions[i].ChatID}]
+		}
+		if run != nil {
+			sessions[i].Status = run.status
+		}
+	}
+	s.chatTurnsMu.Unlock()
+	jsonResponse(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
 // handleChats returns chat sessions scoped by the caller's API key type:

@@ -16,10 +16,12 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { useRouter } from "next/navigation";
 import {
   ChevronsUpDownIcon,
   LogOutIcon,
   SettingsIcon,
+  ShieldIcon,
 } from "lucide-react";
 import { useLocale } from "@/components/locale-provider";
 import { logout as doLogout } from "@/lib/auth";
@@ -27,11 +29,15 @@ import { logout as doLogout } from "@/lib/auth";
 export function NavUser({
   name,
   subtitle = "Gateway running",
+  isAdmin = false,
 }: {
   name?: string;
   subtitle?: string;
+  // isAdmin (super_admin) adds the entry to the /admin area.
+  isAdmin?: boolean;
 }) {
   const { isMobile } = useSidebar();
+  const router = useRouter();
   const { t, tr } = useLocale();
 
   // `name` comes from the current user's profile. Render it verbatim — a
@@ -98,6 +104,12 @@ export function NavUser({
               <SettingsIcon />
               <span>{t("common.settings")}</span>
             </DropdownMenuItem>
+            {isAdmin && (
+              <DropdownMenuItem onClick={() => router.push("/admin/")}>
+                <ShieldIcon />
+                <span>{tr("Admin", "管理后台")}</span>
+              </DropdownMenuItem>
+            )}
             <DropdownMenuSeparator />
             <DropdownMenuItem
               onClick={() => {

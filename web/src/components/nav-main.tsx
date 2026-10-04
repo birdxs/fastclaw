@@ -64,7 +64,7 @@ export function NavMain({
   return (
     <SidebarGroup>
       {label && <SidebarGroupLabel>{label}</SidebarGroupLabel>}
-      <SidebarMenu>
+      <SidebarMenu className="gap-1">
         {items.map((item) => {
           const active =
             item.active ?? (item.url ? isActive(pathname, item.url) : false);

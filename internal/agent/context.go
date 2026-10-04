@@ -13,6 +13,7 @@ import (
 
 // GroupContext holds information about the group chat environment for system prompt injection.
 type GroupContext struct {
+	Instruction string   // authenticated topic transcript and turn instructions
 	BotUsername string   // this agent's bot username
 	Teammates   []string // other agent names in the group
 }
@@ -163,6 +164,17 @@ func (cb *ContextBuilder) BuildSystemPrompt() string {
 // every mode so the model internalizes "who it is" before operational
 // instructions.
 func (cb *ContextBuilder) BuildSystemPromptAs(chatterUID string, chatterMem *Memory, trusted bool) string {
+	return cb.buildSystemPromptAs(chatterUID, chatterMem, trusted, cb.groupCtx)
+}
+
+// BuildSystemPromptAsWithGroup supplies group identity for one turn only.
+// Unlike SetGroupContext it cannot leak a web group's membership into a
+// simultaneous direct-message turn handled by the same Agent instance.
+func (cb *ContextBuilder) BuildSystemPromptAsWithGroup(chatterUID string, chatterMem *Memory, trusted bool, groupCtx *GroupContext) string {
+	return cb.buildSystemPromptAs(chatterUID, chatterMem, trusted, groupCtx)
+}
+
+func (cb *ContextBuilder) buildSystemPromptAs(chatterUID string, chatterMem *Memory, trusted bool, groupCtx *GroupContext) string {
 	if chatterUID == "" {
 		chatterUID = cb.userID
 	}
@@ -176,6 +188,7 @@ func (cb *ContextBuilder) BuildSystemPromptAs(chatterUID string, chatterMem *Mem
 
 	p := &promptCtx{
 		cb:         cb,
+		groupCtx:   groupCtx,
 		chatterUID: chatterUID,
 		chatterMem: chatterMem,
 		mode:       mode,

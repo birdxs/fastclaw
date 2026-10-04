@@ -8,17 +8,24 @@ Follow that document over guesses from existing dashboard code.
 
 ## Integration Boundary
 
-Use `/v1/*` for upstream applications:
+FastClaw is the agent runtime; the upstream app owns its users, permissions,
+billing, chat records and IM channels. The runtime never calls the app back.
+Agents belong to the integrator's FastClaw account (and optionally to an
+app such as `douchat-prod`), never to an end-user — the integrating app must
+check "may this user use this agent?" before every call. For fixed agents an
+account-level `agent` key scoped to them is enough; use apps to separate
+environments or integrations that create their own agents.
 
-- `POST /v1/chat/completions` for end-user chat.
-- `GET /v1/agents` to list agents accessible to the API key.
-- `POST /v1/users` to provision upstream end-users, or lazy-provision via chat.
-- `GET /v1/usage` for billing dashboards.
+Use `/v1/*` only:
+
+- `POST/GET/PATCH/DELETE /v1/agents[/{id}]` to manage the app's agents;
+  `PUT /v1/agents/{id}/system-files/{name}` for SOUL.md / IDENTITY.md / ….
+- `POST /v1/chat/completions` for chat.
+- `GET /v1/usage` for billing (`scope=app`, `agent_id`, `end_user`).
 - `PUT /v1/quota`, `GET /v1/quota`, `DELETE /v1/quota` for paid-plan limits.
+- `POST /v1/users` to provision end-users up front (optional).
 
-Use `/api/*` or the `fastclaw` CLI only for operator/admin workflows such as
-creating agents, configuring providers, installing skills, managing channels,
-and runtime/project administration.
+`/api/*` serves FastClaw's own console and has no stability promise.
 
 ## Required Inputs
 
@@ -26,7 +33,7 @@ Before writing integration code, identify:
 
 - FastClaw base URL.
 - API key, stored server-side only.
-- Agent ID.
+- Whether agents are created per user (`POST /v1/agents`) or fixed.
 - Upstream stable user ID field.
 - Upstream conversation/session ID field.
 - Whether usage/quota billing must be wired.
@@ -63,9 +70,14 @@ Body:
 Rules:
 
 - `agent_id` selects the FastClaw agent. Body wins over
-  `X-Fastclaw-Agent-ID`.
+  `X-Fastclaw-Agent-ID`. It is strict: an agent outside the app returns
+  `404` with `error.code = "agent_not_found"` — there is no fallback.
 - `user` is the upstream stable user ID. Body wins over
-  `X-Fastclaw-End-User`.
+  `X-Fastclaw-End-User`. It only selects where session history, USER.md and
+  personal memory live; it never changes which agents are usable. Omit it
+  when the agent's memory should be shared (a user's own agent, group chats).
+- In group chats, send the current speaker as
+  `params.speaker = {"id": "...", "name": "..."}`; it is turn context only.
 - `X-Fastclaw-Session-Key` controls conversation history. Use a deterministic
   key such as `<app>:<user-id>:<conversation-id>`.
 - `params` is per-turn structured context. It is shown to the agent but not
@@ -96,10 +108,11 @@ Store the returned `user_id` if the upstream app needs usage/quota lookups.
 
 ## Usage And Quota
 
-Query usage:
+Query usage (each daily row has `agentId` and `endUser`):
 
 ```http
-GET /v1/usage?user_id=u_...&days=30
+GET /v1/usage?scope=app&days=30
+GET /v1/usage?end_user=upstream-user-id&agent_id=agt_...
 Authorization: Bearer <FASTCLAW_API_KEY>
 ```
 
@@ -130,12 +143,9 @@ Content-Type: application/json
 5. Persist or derive `X-Fastclaw-Session-Key` per conversation.
 6. Add attachment support only if the product UI needs it.
 7. Add `/v1/usage` and `/v1/quota` only if billing/paid limits are required.
-8. Handle OpenAI-style error objects:
-   - `400` invalid request
-   - `401` auth failure
-   - `404` inaccessible agent
-   - `429` rate/quota limit
-   - `503` subsystem disabled
+8. Handle errors by `error.code` (stable), e.g. `invalid_request`,
+   `unauthorized`, `forbidden`, `agent_not_found`, `rate_limited`,
+   `not_configured`.
 
 ## Do Not
 
@@ -144,5 +154,6 @@ Content-Type: application/json
 - Do not put FastClaw API keys in frontend code.
 - Do not use email/display name as the stable FastClaw `user` value.
 - Do not reuse one session key across unrelated conversations.
-- Do not configure agents/providers/skills through `/v1`; use dashboard,
-  `/api/*`, or CLI for admin workflows.
+- Do not rely on FastClaw for per-user access control between agents; the
+  runtime only isolates apps from each other.
+- Do not bind your users to FastClaw-hosted IM bots; run channels in your app.

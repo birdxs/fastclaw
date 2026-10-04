@@ -35,7 +35,7 @@ func (g *Gateway) InvalidateAgent(agentID string) {
 		if sp.Agents == nil {
 			continue
 		}
-		if sp.Agents.AgentByID(agentID) != nil {
+		if sp.Agents.Has(agentID) {
 			g.users.invalidate(sp.UserID)
 		}
 	}

@@ -3,7 +3,8 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { register, getAgents, getStatus } from "@/lib/api";
+import { register, getStatus } from "@/lib/api";
+import { resolveAppLanding } from "@/lib/landing";
 import { useLocale } from "@/components/locale-provider";
 
 export default function SignupPage() {
@@ -51,12 +52,7 @@ export default function SignupPage() {
       }
       // Server set the session cookie on us. New users normally have no
       // provisioned Bot yet; existing invite flows may have one waiting.
-      const agents = await getAgents().catch(() => []);
-      router.replace(
-        agents.length > 0
-          ? `/agents/${encodeURIComponent(agents[0].id)}/chat/`
-          : "/agents/",
-      );
+      router.replace(await resolveAppLanding());
     } catch {
       setError(tr("Cannot reach server", "无法连接服务器"));
       setLoading(false);

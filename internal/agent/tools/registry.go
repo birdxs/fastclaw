@@ -771,7 +771,9 @@ func (r *Registry) GetFunc(name string) ToolFunc {
 	if !ok {
 		return nil
 	}
-	return t.fn
+	return func(ctx context.Context, args json.RawMessage) (string, error) {
+		return t.fn(context.WithValue(ctx, turnRegistryKey{}, r), args)
+	}
 }
 
 // Definitions returns all tool definitions for the LLM.
@@ -894,7 +896,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args string) (strin
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
 
-	result, err := tool.fn(ctx, json.RawMessage(args))
+	result, err := tool.fn(context.WithValue(ctx, turnRegistryKey{}, r), json.RawMessage(args))
 	if err != nil {
 		return result + "\n[Analyze the error above and try a different approach.]", err
 	}

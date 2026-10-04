@@ -61,6 +61,23 @@ type Store interface {
 
 	// --- Agents (atomic; agents.id is globally unique) ---
 	ListAgents(ctx context.Context, ownerUserID string) ([]AgentRecord, error)
+	// ListAgentIDs returns just the ids of the agents ownerUserID owns.
+	// Cheap enough to run per request (api-key ACL resolution) even for
+	// accounts with thousands of agents.
+	ListAgentIDs(ctx context.Context, ownerUserID string) ([]string, error)
+	// ListAgentsByApp / ListAgentIDsByApp list the agents of one app.
+	ListAgentsByApp(ctx context.Context, appID string) ([]AgentRecord, error)
+	ListAgentIDsByApp(ctx context.Context, appID string) ([]string, error)
+
+	// Apps are optional tenants of the runtime API. An agent or api key
+	// with an empty app_id belongs to the account directly.
+	CreateApp(ctx context.Context, app *AppRecord) error
+	GetApp(ctx context.Context, id string) (*AppRecord, error)
+	ListApps(ctx context.Context, ownerUserID string) ([]AppRecord, error)
+	RenameApp(ctx context.Context, id, name string) error
+	// DeleteApp removes an app that has no agents and no api keys left;
+	// it returns ErrAppNotEmpty otherwise.
+	DeleteApp(ctx context.Context, id string) error
 	ListPublicAgents(ctx context.Context) ([]AgentRecord, error)
 	GetAgent(ctx context.Context, agentID string) (*AgentRecord, error)
 	SaveAgent(ctx context.Context, agent *AgentRecord) error
@@ -366,8 +383,11 @@ type PushDeviceRecord struct {
 //   - "agent": locked to the explicit list in apikey_agents — cannot
 //     create agents
 type APIKeyRecord struct {
-	ID        string    `json:"id"`
-	UserID    string    `json:"userId"`
+	ID     string `json:"id"`
+	UserID string `json:"userId"`
+	// AppID is the app the key acts for. Empty = an account-level key
+	// covering every agent of the account.
+	AppID     string    `json:"appId"`
 	Name      string    `json:"name,omitempty"`
 	KeyHash   string    `json:"-"`
 	KeyPrefix string    `json:"keyPrefix,omitempty"`
@@ -389,14 +409,30 @@ type APIKeyRecord struct {
 // into their own UserSpace; sessions/memory/agent_files still
 // partition per chatter, so only the agent identity is shared.
 type AgentRecord struct {
-	ID        string                 `json:"id"`
-	UserID    string                 `json:"userId"`
+	ID     string `json:"id"`
+	UserID string `json:"userId"`
+	// AppID is the optional app the agent belongs to. UserID is always
+	// the owning account; AppID narrows it to one tenant of that account.
+	// Empty = the agent belongs to the account directly.
+	AppID     string                 `json:"appId"`
 	Name      string                 `json:"name"`
 	Config    map[string]interface{} `json:"config,omitempty"`
 	IsPublic  bool                   `json:"isPublic"`
 	CreatedAt time.Time              `json:"createdAt"`
 	UpdatedAt time.Time              `json:"updatedAt"`
 }
+
+// AppRecord is one optional integrating application (tenant) owned by an
+// account, e.g. "douchat-prod". IDs are prefixed app_.
+type AppRecord struct {
+	ID          string    `json:"id"`
+	OwnerUserID string    `json:"ownerUserId"`
+	Name        string    `json:"name"`
+	CreatedAt   time.Time `json:"createdAt"`
+}
+
+// ErrAppNotEmpty is returned by DeleteApp while agents or keys remain.
+var ErrAppNotEmpty = errors.New("store: app still has agents or api keys")
 
 // KnowledgeDoc is one raw owner-uploaded knowledge source file
 // (an agent_files row under the knowledge/ prefix).
