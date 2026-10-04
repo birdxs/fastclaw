@@ -19,6 +19,7 @@ import {
 
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { AgentIdContext } from "@/hooks/use-agent-id";
 import { useLocale, type MessageKey } from "@/components/locale-provider";
 
 import AgentProfilePanel from "@/components/agent-profile-panel";
@@ -107,6 +108,7 @@ export function AgentSettingsDialog({
   defaultTab,
   role = "owner",
   userOnly = false,
+  agentId = "",
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -117,6 +119,9 @@ export function AgentSettingsDialog({
   // models, skills and API keys live in /console; deployment-wide pages
   // in /admin.
   userOnly?: boolean;
+  // agentId names the agent to edit when the dialog is opened away from
+  // that agent's URL (the console Agent list). Defaults to the URL's agent.
+  agentId?: string;
 }) {
   const { t } = useLocale();
   const agentTabs = userOnly
@@ -150,6 +155,7 @@ export function AgentSettingsDialog({
   }, [open, initialTab]);
 
   return (
+    <AgentIdContext.Provider value={agentId}>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className={cn(
@@ -212,6 +218,7 @@ export function AgentSettingsDialog({
         </div>
       </DialogContent>
     </Dialog>
+    </AgentIdContext.Provider>
   );
 }
 

@@ -25,8 +25,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, Plus, Trash2, ImagePlus, Pencil, Copy, Check } from "lucide-react";
-import { Switch } from "@/components/ui/switch";
+import { Bot, Plus, Trash2, ImagePlus, Pencil } from "lucide-react";
 import {
   adminListAgents,
   apiFetch,
@@ -34,11 +33,11 @@ import {
   getMe,
   getStatus,
   createAgent,
-  updateAgent,
   deleteAgent,
   type AgentDetail,
 } from "@/lib/api";
 import { useLocale } from "@/components/locale-provider";
+import { AgentSettingsDialog } from "@/components/agent-settings-dialog";
 
 interface OtherAgent {
   id: string;
@@ -99,7 +98,8 @@ export default function AgentsPage() {
   // state tells them to contact their admin.
   const [quotaLocked, setQuotaLocked] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [editTarget, setEditTarget] = useState<AgentDetail | null>(null);
+  // The agent whose full settings dialog is open (Edit on a card).
+  const [editAgentId, setEditAgentId] = useState<string | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -116,15 +116,6 @@ export default function AgentsPage() {
   const [createError, setCreateError] = useState<string | null>(null);
   const createAvatarInput = useRef<HTMLInputElement>(null);
 
-  // Edit dialog state
-  const [editName, setEditName] = useState("");
-  const [editDescription, setEditDescription] = useState("");
-  const [editIsPublic, setEditIsPublic] = useState(false);
-  const [editAvatar, setEditAvatar] = useState<File | null>(null);
-  const [editAvatarPreview, setEditAvatarPreview] = useState<string | null>(null);
-  const [editError, setEditError] = useState<string | null>(null);
-  const [editLinkCopied, setEditLinkCopied] = useState(false);
-  const editAvatarInput = useRef<HTMLInputElement>(null);
 
   const resetCreateForm = () => {
     setNewName("");
@@ -135,24 +126,6 @@ export default function AgentsPage() {
     setCreateError(null);
   };
 
-  const resetEditForm = () => {
-    setEditName("");
-    setEditDescription("");
-    setEditIsPublic(false);
-    setEditAvatar(null);
-    if (editAvatarPreview) URL.revokeObjectURL(editAvatarPreview);
-    setEditAvatarPreview(null);
-    setEditError(null);
-    setEditLinkCopied(false);
-  };
-
-  const openEdit = (agent: AgentDetail) => {
-    resetEditForm();
-    setEditTarget(agent);
-    setEditName(agent.name || "");
-    setEditDescription(agent.description || "");
-    setEditIsPublic(!!agent.isPublic);
-  };
 
   const fetchAgents = async () => {
     setLoading(true);
@@ -235,32 +208,6 @@ export default function AgentsPage() {
     fetchAgents();
   };
 
-  const handleEdit = async () => {
-    if (!editTarget || !editName.trim()) return;
-    setSaving(true);
-    setEditError(null);
-    const resp = await updateAgent(editTarget.id, {
-      name: editName.trim(),
-      description: editDescription.trim(),
-      isPublic: editIsPublic,
-    });
-    if (resp && (resp.ok === false || resp.error)) {
-      setEditError(resp.error || tr("Failed to update agent", "更新 Agent 失败"));
-      setSaving(false);
-      return;
-    }
-    if (editAvatar) {
-      try {
-        await uploadAvatar(editTarget.id, editAvatar);
-      } catch {
-        // non-fatal — text fields saved; user can retry avatar upload
-      }
-    }
-    setSaving(false);
-    setEditTarget(null);
-    resetEditForm();
-    fetchAgents();
-  };
 
   const handleDelete = async () => {
     if (!deleteId) return;
@@ -408,7 +355,7 @@ export default function AgentsPage() {
                     className="h-8 text-xs"
                     onClick={(e) => {
                       e.stopPropagation();
-                      openEdit(agent);
+                      setEditAgentId(agent.id);
                     }}
                   >
                     <Pencil className="h-3 w-3 mr-1.5" />
@@ -567,155 +514,21 @@ export default function AgentsPage() {
       </Dialog>
 
       {/* Edit Dialog */}
-      <Dialog
-        open={editTarget !== null}
-        onOpenChange={(v) => {
-          if (!v) {
-            setEditTarget(null);
-            resetEditForm();
+      {/* Edit opens the same full Agent settings dialog as the chat
+          (profile, customize, models, skills, channels, …). Closing it
+          refreshes the list and re-fetches the avatar. */}
+      <AgentSettingsDialog
+        open={editAgentId !== null}
+        agentId={editAgentId || ""}
+        onOpenChange={(open) => {
+          if (open) return;
+          if (editAgentId) {
+            setAvatarBust((prev) => ({ ...prev, [editAgentId]: Date.now() }));
           }
+          setEditAgentId(null);
+          fetchAgents();
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{tr("Edit Agent", "编辑 Agent")}</DialogTitle>
-            <DialogDescription>
-              {tr("ID cannot be changed —", "ID 无法修改——")} {" "}
-              <code className="rounded bg-muted px-1 py-0.5 font-mono text-xs">
-                {editTarget?.id}
-              </code>
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-2">
-            <div className="flex items-start gap-4">
-              <button
-                type="button"
-                onClick={() => editAvatarInput.current?.click()}
-                className="group relative flex size-20 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-dashed bg-muted/40 transition hover:bg-muted"
-                aria-label={tr("Upload avatar", "上传头像")}
-              >
-                {editAvatarPreview ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img src={editAvatarPreview} alt={tr("Agent avatar", "Agent 头像")} className="size-full object-cover" />
-                ) : editTarget ? (
-                  <AgentAvatar agent={editTarget} bust={avatarBust[editTarget.id]} size={80} />
-                ) : null}
-                <input
-                  ref={editAvatarInput}
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0] ?? null;
-                    setEditAvatar(f);
-                    if (editAvatarPreview) URL.revokeObjectURL(editAvatarPreview);
-                    setEditAvatarPreview(f ? URL.createObjectURL(f) : null);
-                  }}
-                />
-              </button>
-              <div className="flex-1 space-y-2">
-                <Label htmlFor="agent-edit-name">{tr("Name", "名称")}</Label>
-                <Input
-                  id="agent-edit-name"
-                  value={editName}
-                  onChange={(e) => {
-                    setEditName(e.target.value);
-                    setEditError(null);
-                  }}
-                  placeholder={tr("My Helper", "我的助手")}
-                />
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="agent-edit-desc">{tr("Description", "说明")}</Label>
-              <Textarea
-                id="agent-edit-desc"
-                value={editDescription}
-                onChange={(e) => setEditDescription(e.target.value)}
-                placeholder={tr("What is this agent for?", "这个 Agent 有什么用途？")}
-                rows={3}
-              />
-            </div>
-
-            {/* Public/Private toggle. Off (default) = owner-only.
-                On = anyone with the chat URL can chat under their own
-                account; sessions/memory partition per chatter. */}
-            <div className="space-y-3 rounded-lg border border-border p-4">
-              <div className="flex items-start justify-between gap-4">
-                <div className="space-y-1">
-                  <Label htmlFor="agent-edit-public" className="text-sm font-medium">
-                    {tr("Public access", "公开访问")}
-                  </Label>
-                  <p className="text-xs text-muted-foreground">
-                    {editIsPublic
-                      ? tr("Anyone with the link can chat. Their history stays private to them.", "任何获得链接的人都能聊天，各自的历史记录彼此隔离。")
-                      : tr("Only you can use this agent.", "只有你可以使用此 Agent。")}
-                  </p>
-                </div>
-                <Switch
-                  id="agent-edit-public"
-                  checked={editIsPublic}
-                  onCheckedChange={(v) => {
-                    setEditIsPublic(!!v);
-                    setEditLinkCopied(false);
-                  }}
-                />
-              </div>
-              {editIsPublic && editTarget && (
-                <div className="flex gap-2">
-                  <Input
-                    readOnly
-                    value={
-                      typeof window !== "undefined"
-                        ? `${window.location.origin}/agents/${editTarget.id}/chat/`
-                        : `/agents/${editTarget.id}/chat/`
-                    }
-                    onFocus={(e) => e.currentTarget.select()}
-                    className="font-mono text-xs"
-                  />
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={async () => {
-                      if (!editTarget) return;
-                      const url = `${window.location.origin}/agents/${editTarget.id}/chat/`;
-                      try {
-                        await navigator.clipboard.writeText(url);
-                        setEditLinkCopied(true);
-                        setTimeout(() => setEditLinkCopied(false), 2000);
-                      } catch {
-                        // clipboard blocked — user can still select the input
-                      }
-                    }}
-                  >
-                    {editLinkCopied ? (
-                      <>
-                        <Check className="h-4 w-4 mr-1.5" />
-                        {tr("Copied", "已复制")}
-                      </>
-                    ) : (
-                      <>
-                        <Copy className="h-4 w-4 mr-1.5" />
-                        {tr("Copy", "复制")}
-                      </>
-                    )}
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {editError && <p className="text-sm text-destructive">{editError}</p>}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditTarget(null)}>
-              {tr("Cancel", "取消")}
-            </Button>
-            <Button onClick={handleEdit} disabled={!editName.trim() || saving}>
-              {saving ? tr("Saving…", "正在保存…") : tr("Save", "保存")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      />
 
       {/* Delete Confirmation */}
       <AlertDialog
