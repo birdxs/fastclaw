@@ -301,7 +301,7 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
           </p>
         </div>
         <Button variant="ghost" size="icon" className="ml-auto size-8 text-muted-foreground"
-          aria-label={tr("Toggle members and recent topics", "展开或收起群成员和最近话题")}
+          aria-label={tr("Toggle members and recent sessions", "展开或收起群成员和最近会话")}
           onClick={() => onPanelChange(!(panelOpen ?? window.matchMedia("(min-width: 1280px)").matches))}>
           <PanelRight className="size-4" />
         </Button>
@@ -400,7 +400,7 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
     return tr("Idle", "空闲");
   };
   const visibleTopics = topics.some((topic) => topic.sessionId === sessionId) ? topics : [
-    { sessionId, title: tr("New topic", "新话题"), status: "idle" as const, updatedAt: Date.now(), activeAgents: [] }, ...topics,
+    { sessionId, title: tr("New session", "新会话"), status: "idle" as const, updatedAt: Date.now(), activeAgents: [] }, ...topics,
   ];
 
   return (
@@ -600,14 +600,14 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
             </section>
             <section className="mt-5">
               <div className="mb-2 flex items-center justify-between px-1">
-                <h3 className="text-sm font-medium text-muted-foreground">{tr("Topics", "话题")}</h3>
+                <h3 className="text-sm font-medium text-muted-foreground">{tr("Sessions", "会话")}</h3>
                 <Button variant="ghost" size="icon" className="size-8 text-muted-foreground"
-                  aria-label={tr("New topic", "新话题")} title={tr("New topic", "新话题")}
+                  aria-label={tr("New session", "新会话")} title={tr("New session", "新会话")}
                   onClick={() => openTopic(`team-${teamId}-topic-${crypto.randomUUID()}`)}>
                   <Plus className="size-4" />
                 </Button>
               </div>
-              <nav aria-label={tr("Group topics", "群聊话题")} className="space-y-1">
+              <nav aria-label={tr("Group sessions", "群聊会话")} className="space-y-1">
                 {visibleTopics.map((topic) => {
                   const running = topic.status === "running" || !!topic.activeAgents?.length;
                   return <div key={topic.sessionId} className="group/topic relative"><button onClick={() => {
@@ -615,17 +615,17 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
                     if (!window.matchMedia("(min-width: 1280px)").matches) onPanelChange(false);
                   }} aria-current={topic.sessionId === sessionId ? "page" : undefined}
                     className={`w-full rounded-lg py-2 pl-3 pr-9 text-left transition focus-visible:outline-2 focus-visible:outline-ring ${topic.sessionId === sessionId ? "bg-black/[0.07] dark:bg-white/[0.09]" : "hover:bg-muted"}`}>
-                    <span className="block truncate text-sm">{topic.title || tr("Untitled topic", "未命名话题")}</span>
+                    <span className="block truncate text-sm">{topic.title || tr("Untitled session", "未命名会话")}</span>
                     <span className={`mt-1 flex items-center gap-1.5 text-[11px] ${running ? "text-violet-600 dark:text-violet-300" : topic.status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
                       {running && <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" />}
                       {statusLabel(topic)}
                       {running && <span className="truncate">{topic.activeAgents.map((id) => members.find((m) => m.id === id)?.name || id).join(" · ")}</span>}
                     </span>
                   </button>
-                  <DropdownMenu><DropdownMenuTrigger render={<button aria-label={tr("Topic actions", "话题操作")} className="absolute right-1 top-2 rounded-md p-1 text-muted-foreground hover:bg-muted"><MoreHorizontal className="size-4" /></button>} />
+                  <DropdownMenu><DropdownMenuTrigger render={<button aria-label={tr("Session actions", "会话操作")} className="absolute right-1 top-2 rounded-md p-1 text-muted-foreground hover:bg-muted"><MoreHorizontal className="size-4" /></button>} />
                     <DropdownMenuContent align="end">
                       <DropdownMenuItem disabled={running} onClick={() => { setTopicTitle(topic.title); setTopicEdit({ topic, remove: false }); }}><Pencil className="size-4" />{tr("Rename", "重命名")}</DropdownMenuItem>
-                      <DropdownMenuItem disabled={running} onClick={() => setTopicEdit({ topic, remove: true })}><Trash2 className="size-4" />{tr("Delete topic", "删除话题")}</DropdownMenuItem>
+                      <DropdownMenuItem disabled={running} onClick={() => setTopicEdit({ topic, remove: true })}><Trash2 className="size-4" />{tr("Delete session", "删除会话")}</DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
                   </div>;
@@ -638,9 +638,9 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
       {settingsOpen && team && <TeamSettingsDialog teamId={teamId} team={team} onClose={() => setSettingsOpen(false)}
         onSaved={(next, nextMembers) => { setTeam(next); setMembers(nextMembers); setSettingsOpen(false); window.dispatchEvent(new CustomEvent("fastclaw:teams-changed")); }} />}
       {topicEdit && <Dialog open onOpenChange={(open) => { if (!open && !topicSaving) setTopicEdit(null); }}><DialogContent>
-        <DialogHeader><DialogTitle>{topicEdit.remove ? tr("Delete topic", "删除话题") : tr("Rename topic", "重命名话题")}</DialogTitle>
-          <DialogDescription>{topicEdit.remove ? tr("Remove this topic from the group?", "确定从群聊中删除这个话题？") : tr("Set a title for this topic.", "设置话题名称。")}</DialogDescription></DialogHeader>
-        {!topicEdit.remove && <Input aria-label={tr("Topic title", "话题名称")} value={topicTitle} onChange={(e) => setTopicTitle(e.target.value)} />}
+        <DialogHeader><DialogTitle>{topicEdit.remove ? tr("Delete session", "删除会话") : tr("Rename session", "重命名会话")}</DialogTitle>
+          <DialogDescription>{topicEdit.remove ? tr("Remove this session from the group?", "确定从群聊中删除这个会话？") : tr("Set a title for this session.", "设置会话名称。")}</DialogDescription></DialogHeader>
+        {!topicEdit.remove && <Input aria-label={tr("Session title", "会话名称")} value={topicTitle} onChange={(e) => setTopicTitle(e.target.value)} />}
         {actionError && <p role="alert" className="text-sm text-destructive">{actionError}</p>}
         <DialogFooter><Button variant="outline" disabled={topicSaving} onClick={() => setTopicEdit(null)}>{tr("Cancel", "取消")}</Button>
           <Button disabled={topicSaving || (!topicEdit.remove && !topicTitle.trim())} onClick={() => void updateTopic()}>{tr("Confirm", "确定")}</Button></DialogFooter>
