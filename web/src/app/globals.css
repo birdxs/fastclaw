@@ -286,9 +286,9 @@ html.theme-transition *::after {
   .chat-md [data-streamdown="horizontal-rule"] { @apply my-3; }
   .chat-md [data-streamdown="blockquote"] { @apply my-2; }
   .chat-md [data-streamdown="list-item"] { @apply py-0; }
-  /* Nested lists: Streamdown indents them 24px ([li_&]:pl-6); 10px tucks the
-     sub-bullet just inside the parent item's text. */
-  .chat-md [data-streamdown="list-item"] > :is([data-streamdown="unordered-list"], [data-streamdown="ordered-list"]) { @apply pl-2.5; }
+  /* Lists, top-level and nested, indent 10px (Streamdown nests at 24px via
+     [li_&]:pl-6, prose at ~26px): the marker sits just inside the text. */
+  .chat-md :is([data-streamdown="unordered-list"], [data-streamdown="ordered-list"]) { @apply pl-2.5; }
   .chat-md > div { @apply space-y-2; }
 
   /* Inline code only (not fenced) — immune to Streamdown's wrappers so it
