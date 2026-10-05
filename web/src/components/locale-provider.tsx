@@ -134,7 +134,7 @@ const zhCN: Record<MessageKey, string> = {
   "createBot.failed": "创建 Agent 失败",
   "createBot.missingId": "Agent 已创建，但接口没有返回 ID",
   "settings.tab.profile": "资料",
-  "settings.tab.customize": "自定义",
+  "settings.tab.customize": "个性化",
   "settings.tab.models": "模型",
   "settings.tab.context": "上下文",
   "settings.tab.knowledge": "知识库",

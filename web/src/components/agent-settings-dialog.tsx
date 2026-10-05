@@ -56,13 +56,13 @@ type TabIcon = React.ComponentType<{ className?: string }>;
 
 const AGENT_TABS: Array<{ id: AgentSettingsTab; label: string; icon: TabIcon }> = [
   { id: "profile", label: "Profile", icon: IdCardIcon },
-  { id: "customize", label: "Customize", icon: Wand2Icon },
   { id: "models", label: "Models", icon: BrainIcon },
-  { id: "context", label: "Context", icon: LayersIcon },
-  { id: "knowledge", label: "Knowledge", icon: BookOpenIcon },
+  { id: "customize", label: "Customize", icon: Wand2Icon },
   { id: "skills", label: "Skills", icon: SparklesIcon },
   { id: "mcp", label: "MCP", icon: ServerIcon },
   { id: "plugins", label: "Plugins", icon: Plug },
+  { id: "knowledge", label: "Knowledge", icon: BookOpenIcon },
+  { id: "context", label: "Context", icon: LayersIcon },
   { id: "channels", label: "Channels", icon: RadioIcon },
   { id: "scheduler", label: "Scheduler", icon: ClockIcon },
   { id: "usage", label: "Token Usage", icon: CoinsIcon },
