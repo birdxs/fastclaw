@@ -286,9 +286,11 @@ html.theme-transition *::after {
   .chat-md [data-streamdown="horizontal-rule"] { @apply my-3; }
   .chat-md [data-streamdown="blockquote"] { @apply my-2; }
   .chat-md [data-streamdown="list-item"] { @apply py-0; }
-  /* Lists, top-level and nested, indent 10px (Streamdown nests at 24px via
-     [li_&]:pl-6, prose at ~26px): the marker sits just inside the text. */
-  .chat-md :is([data-streamdown="unordered-list"], [data-streamdown="ordered-list"]) { @apply pl-2.5; }
+  /* Lists, top-level and nested, have no indent (Streamdown nests at 24px
+     via [li_&]:pl-6, prose at ~26px). Markers are list-inside, so they stay
+     visible: a top-level marker lines up with the paragraph, a nested one
+     with its parent item's marker. */
+  .chat-md :is([data-streamdown="unordered-list"], [data-streamdown="ordered-list"]) { @apply pl-0; }
   .chat-md > div { @apply space-y-2; }
 
   /* Inline code only (not fenced) — immune to Streamdown's wrappers so it
