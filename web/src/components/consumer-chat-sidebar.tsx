@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { useRouter, usePathname } from "next/navigation";
-import { Bot, Check, ChevronDown, ChevronsLeft, ChevronsRight, ImagePlus, Plus, Search, UsersRound } from "lucide-react";
+import { Bot, Check, ChevronDown, ImagePlus, Plus, Search, UsersRound } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -12,7 +12,6 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
-  useSidebar,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import {
@@ -36,6 +35,7 @@ import { BotAvatar } from "@/components/bot-avatar";
 import { TeamAvatarStack } from "@/components/team-avatar-stack";
 import { NavUser } from "@/components/nav-user";
 import { SidebarTitle } from "@/components/sidebar-title";
+import { ChatSearchDialog } from "@/components/chat-search-dialog";
 import { useLocale, type Locale } from "@/components/locale-provider";
 import { apiFetch, createAgent, updateConfig, getTeamInbox, type TeamInboxNotice, type MeResponse, type TeamEntry } from "@/lib/api";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
@@ -154,35 +154,32 @@ export function ConsumerChatSidebar({
     void refresh();
     return () => { cancelled = true; clearTimeout(timer); };
   }, [me?.user?.id, pathname]);
-  const { state: sidebarState, toggleSidebar } = useSidebar();
   const { locale, t, tr } = useLocale();
-  const [query, setQuery] = React.useState("");
+  const [searchOpen, setSearchOpen] = React.useState(false);
   const [visibleCount, setVisibleCount] = React.useState(AGENT_PAGE_SIZE);
   const [createOpen, setCreateOpen] = React.useState(false);
   const [createTeamOpen, setCreateTeamOpen] = React.useState(false);
 
-  const filtered = React.useMemo(() => {
-    const q = query.trim().toLocaleLowerCase();
-    if (!q) return agents;
-    return agents.filter((agent) =>
-      `${agent.name} ${agent.description || ""} ${agent.preview || ""}`.toLocaleLowerCase().includes(q),
-    );
-  }, [query, agents]);
+  // ⌘K / Ctrl+K opens the search dialog.
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const filtered = agents;
+  const filteredTeams = teams;
   const visibleAgents = React.useMemo(
-    () => filtered.slice(0, visibleCount),
-    [filtered, visibleCount],
+    () => agents.slice(0, visibleCount),
+    [agents, visibleCount],
   );
-  const hasMoreAgents = visibleAgents.length < filtered.length;
-  const filteredTeams = React.useMemo(() => {
-    const q = query.trim().toLocaleLowerCase();
-    if (!q) return teams;
-    return teams.filter((team) => {
-      const memberNames = team.agents
-        .map((id) => agents.find((agent) => agent.id === id)?.name || id)
-        .join(" ");
-      return `${team.name} ${memberNames}`.toLocaleLowerCase().includes(q);
-    });
-  }, [agents, query, teams]);
+  const hasMoreAgents = visibleAgents.length < agents.length;
+  const unreadAgentIds = React.useMemo(() => new Set(inbox.map((notice) => notice.agentId)), [inbox]);
 
   const openAgent = (agent: ConsumerAgentItem) => {
     const base = `/agents/${encodeURIComponent(agent.id)}/chat/`;
@@ -213,46 +210,27 @@ export function ConsumerChatSidebar({
         className="border-r border-black/8 bg-[#f7f7f7] dark:border-white/8 dark:bg-[#171717]"
       >
       {/* Same header box as the Console / Admin sidebars (SidebarHeader's
-          p-2 + SidebarTitle), with the search row below. */}
-      <SidebarHeader className="pb-5 group-data-[collapsible=icon]:pb-2">
+          p-2 + SidebarTitle); search and create sit right of the title. */}
+      <SidebarHeader className="pb-3 group-data-[collapsible=icon]:pb-2">
         <SidebarTitle
           title={tr("Chat", "对话")}
           className="group-data-[collapsible=icon]:justify-center"
         >
           <button
             type="button"
-            onClick={toggleSidebar}
-            className="group/sidebar-toggle relative ml-auto inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:ml-0 group-data-[collapsible=icon]:size-10 dark:hover:bg-white/8"
-            aria-label={sidebarState === "collapsed" ? t("sidebar.expandContacts") : t("sidebar.collapseContacts")}
-            title={sidebarState === "collapsed" ? t("sidebar.expandContacts") : t("sidebar.collapseContacts")}
+            onClick={() => setSearchOpen(true)}
+            className="ml-auto inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:ml-0 group-data-[collapsible=icon]:size-10 dark:hover:bg-white/8"
+            aria-label={t("sidebar.searchBots")}
+            title={`${tr("Search", "搜索")} (${/Mac|iPhone|iPad/.test(typeof navigator === "undefined" ? "" : navigator.platform) ? "⌘K" : "Ctrl+K"})`}
           >
-            {sidebarState === "collapsed" ? (
-              <ChevronsRight className="size-4" />
-            ) : (
-              <ChevronsLeft className="size-4" />
-            )}
+            <Search className="size-4" />
           </button>
-        </SidebarTitle>
-        <div className="flex items-center gap-1.5 group-data-[collapsible=icon]:hidden">
-          <div className="relative min-w-0 flex-1">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-[15px] -translate-y-1/2 text-muted-foreground" />
-            <input
-              value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setVisibleCount(AGENT_PAGE_SIZE);
-              }}
-              placeholder={t("sidebar.searchBots")}
-              aria-label={t("sidebar.searchBots")}
-              className="h-8 w-full rounded-md border border-black/7 bg-black/[0.035] pl-8 pr-2.5 text-sm outline-none transition focus:border-black/15 focus:bg-white focus:ring-2 focus:ring-black/5 dark:border-white/8 dark:bg-white/[0.055] dark:focus:border-white/15 dark:focus:bg-white/[0.08]"
-            />
-          </div>
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
                 <button
                   type="button"
-                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/8"
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:hidden dark:hover:bg-white/8"
                   aria-label={tr("Create", "新建")}
                   title={tr("Create", "新建")}
                 >
@@ -271,7 +249,7 @@ export function ConsumerChatSidebar({
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        </div>
+        </SidebarTitle>
       </SidebarHeader>
 
       <SidebarContent
@@ -407,7 +385,7 @@ export function ConsumerChatSidebar({
         {!loading && filtered.length === 0 && filteredTeams.length === 0 && (
           <div className="mx-2 mt-4 rounded-lg border border-dashed border-black/10 px-4 py-8 text-center group-data-[collapsible=icon]:hidden dark:border-white/10">
             <p className="text-sm font-medium">
-              {query ? t("sidebar.noMatches") : t("sidebar.noBots")}
+              {t("sidebar.noBots")}
             </p>
             <button
               type="button"
@@ -430,6 +408,15 @@ export function ConsumerChatSidebar({
       </SidebarFooter>
       <SidebarRail toggleOnClick={false} />
       </Sidebar>
+      <ChatSearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        agents={agents}
+        teams={teams}
+        unreadAgentIds={unreadAgentIds}
+        onPickAgent={openAgent}
+        onPickTeam={openTeam}
+      />
       <CreateBotDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
