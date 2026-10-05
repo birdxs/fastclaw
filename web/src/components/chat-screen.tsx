@@ -2548,11 +2548,13 @@ export function ChatScreen() {
     return anchorIndex >= 0
       && !messages.slice(anchorIndex + 1).some((message) => message.role === "user");
   })();
+  // A description means the agent is already set up, so it skips the
+  // "what am I for?" question. The description itself is not repeated.
   const botWelcome = agentDetail?.description?.trim()
     ? tr(
-        "Hey, I am {{name}}. {{description}} What should we start with?",
-        "Hey，我是{{name}}。{{description}} 想先从哪件事开始？",
-        { name: agentName || tr("your new Agent", "新来的 Agent"), description: agentDetail.description.trim() },
+        "Hey, I am {{name}}. What should we start with?",
+        "Hey，我是{{name}}。想先从哪件事开始？",
+        { name: agentName || tr("your new Agent", "新来的 Agent") },
       )
     : tr(
         "Hey, I am {{name}}. Did you create me to focus on one job, or to be a general assistant whenever you need one?",
