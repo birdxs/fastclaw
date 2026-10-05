@@ -254,9 +254,6 @@ export function SkillsManager({ target }: { target: SkillsTarget }) {
             >
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-2.5">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                    <Sparkles className="h-4 w-4 text-primary" />
-                  </div>
                   <div>
                     <p className="text-sm font-medium">{skill.name}</p>
                     <Badge variant="outline" className="mt-1 text-[10px]">
@@ -315,9 +312,6 @@ export function SkillsManager({ target }: { target: SkillsTarget }) {
               >
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-2.5">
-                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted">
-                      <Sparkles className="h-4 w-4 text-muted-foreground" />
-                    </div>
                     <div>
                       <p className="text-sm font-medium">{skill.name}</p>
                       <Badge variant="secondary" className="mt-1 text-[10px]">
@@ -671,9 +665,6 @@ function InstallSkillDialog({
                       key={r.id}
                       className="flex items-center gap-3 rounded-md border border-border bg-card p-3 hover:bg-muted/40 transition-colors"
                     >
-                      <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10 shrink-0">
-                        <Sparkles className="h-4 w-4 text-primary" />
-                      </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <p className="text-sm font-medium truncate">{r.skillId}</p>
