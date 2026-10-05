@@ -2795,9 +2795,11 @@ func (d *DBStore) FindSessionLocations(ctx context.Context, userID, sessionKey s
 	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(sessionKey)
 	rows, err := d.db.QueryContext(ctx,
 		fmt.Sprintf(`SELECT agent_id, session_key, project_id FROM sessions
-			WHERE user_id = %s AND (session_key = %s OR session_key LIKE %s ESCAPE '\')
-			ORDER BY updated_at DESC`, d.ph(1), d.ph(2), d.ph(3)),
-		userID, sessionKey, escaped+"-agent-%")
+			WHERE (user_id = %s AND (session_key = %s OR session_key LIKE %s ESCAPE '\'))
+			   OR (session_key = %s AND user_id <> %s AND agent_id IN (SELECT id FROM agents WHERE user_id = %s))
+			ORDER BY (user_id = %s) DESC, updated_at DESC`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4), d.ph(5), d.ph(6), d.ph(7)),
+		userID, sessionKey, escaped+"-agent-%", sessionKey, userID, userID, userID)
 	if err != nil {
 		return nil, err
 	}

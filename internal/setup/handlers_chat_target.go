@@ -30,8 +30,10 @@ func (s *Server) handleChatTarget(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, http.StatusOK, target)
 }
 
-// resolveChatTarget looks the id up among the caller's own sessions:
-//   - a session keyed by the id → that agent's chat (loose or project);
+// resolveChatTarget looks the id up among the caller's sessions:
+//   - a session keyed by the id → that agent's chat (loose or project),
+//     including another user's session on an agent the caller owns (an
+//     API end-user's chat, which the owner opens from the agent panel);
 //   - group member sessions keyed "<id>-agent-<agent>" whose project is one
 //     of the caller's groups → that group's topic;
 //   - a group's default topic (its configured sessionId, or team-<team>), or
