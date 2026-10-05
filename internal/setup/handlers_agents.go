@@ -1310,7 +1310,7 @@ func (s *Server) handleAgentWorkspaceReveal(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	projectID, chatID, ok := s.revealScope(r, id, r.URL.Query().Get("sessionId"), r.URL.Query().Get("projectId"))
+	projectID, chatID, ok := s.workspaceFolderScope(r, id, r.URL.Query().Get("sessionId"), r.URL.Query().Get("projectId"))
 	if !ok {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "session not found"})
 		return
@@ -1337,8 +1337,9 @@ func (s *Server) handleAgentWorkspaceReveal(w http.ResponseWriter, r *http.Reque
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "path": dir})
 }
 
-// revealScope resolves the (project, chat) folder to open, the same way
-// fileScopeForRequest scopes the file list and zip, so "open folder" shows
+// workspaceFolderScope resolves the (project, chat) folder a request's
+// sessionId / projectId refer to, the same way fileScopeForRequest scopes
+// the file list and zip, so "open folder" and version history act on
 // exactly the files the panel lists:
 //   - projectId alone: the project root (project landing page);
 //   - sessionId: that chat's folder — the caller's own session, or for the
@@ -1347,7 +1348,7 @@ func (s *Server) handleAgentWorkspaceReveal(w http.ResponseWriter, r *http.Reque
 //
 // A session that doesn't resolve reports !ok rather than widening to the
 // agent root.
-func (s *Server) revealScope(r *http.Request, agentID, rawSession, rawProject string) (projectID, chatID string, ok bool) {
+func (s *Server) workspaceFolderScope(r *http.Request, agentID, rawSession, rawProject string) (projectID, chatID string, ok bool) {
 	if rawSession == "" {
 		if rawProject != "" {
 			return rawProject, "", true

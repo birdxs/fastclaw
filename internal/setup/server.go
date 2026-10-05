@@ -312,6 +312,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
 	mux.HandleFunc("GET /api/agents/{id}/sessions/{sessionId}/history", auth(s.handleAgentSessionHistory))
 	mux.HandleFunc("POST /api/agents/{id}/sessions/{sessionId}/history/restore", auth(s.handleAgentSessionHistoryRestore))
+	mux.HandleFunc("GET /api/agents/{id}/workspace/history", auth(s.handleAgentFolderHistory))
+	mux.HandleFunc("POST /api/agents/{id}/workspace/history/restore", auth(s.handleAgentFolderHistoryRestore))
 	// Self-hosted-only: opens the workspace dir in the operator's
 	// native file browser (Finder/Explorer/xdg-open). Hosted
 	// deployments 403 inside the handler — chatters there don't

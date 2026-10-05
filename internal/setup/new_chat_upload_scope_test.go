@@ -103,9 +103,27 @@ func TestRevealScope(t *testing.T) {
 		{"unknown session doesn't widen to the root", "u_owner", "s-9-missing", "", "", "", false},
 	}
 	for _, c := range cases {
-		pid, chat, ok := s.revealScope(as(c.user), "agt_1", c.session, c.project)
+		pid, chat, ok := s.workspaceFolderScope(as(c.user), "agt_1", c.session, c.project)
 		if ok != c.wantOK || pid != c.wantProject || chat != c.wantChat {
 			t.Errorf("%s: got (%q, %q, %v), want (%q, %q, %v)", c.name, pid, chat, ok, c.wantProject, c.wantChat, c.wantOK)
+		}
+	}
+}
+
+func TestParseChatFolder(t *testing.T) {
+	for dir, want := range map[string][3]string{
+		"sessions/s-1-a":           {"", "s-1-a", "ok"},
+		"sessions/s-1-a/":          {"", "s-1-a", "ok"},
+		"projects/p_1/s-1-a":       {"p_1", "s-1-a", "ok"},
+		"sessions/..":              {"", "", ""},
+		"sessions/s-1-a/sub":       {"", "", ""},
+		"projects/p_1":             {"", "", ""},
+		"skills/foo":               {"", "", ""},
+		"projects/../sessions/s-1": {"", "", ""},
+	} {
+		pid, chat, ok := parseChatFolder(dir)
+		if pid != want[0] || chat != want[1] || ok != (want[2] == "ok") {
+			t.Errorf("%q: got (%q, %q, %v), want %v", dir, pid, chat, ok, want)
 		}
 	}
 }
