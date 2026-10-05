@@ -672,6 +672,9 @@ type TeamEntry struct {
 	SessionID     string   `json:"sessionId,omitempty"`
 	GroupBehavior string   `json:"groupBehavior,omitempty"`
 	CreatedAt     int64    `json:"createdAt,omitempty"`
+	// AvatarURL is the group's own picture: a small image data URL the web
+	// client downsizes before saving. Empty shows the members' avatars.
+	AvatarURL string `json:"avatarUrl,omitempty"`
 }
 
 type TeamConfig struct {
