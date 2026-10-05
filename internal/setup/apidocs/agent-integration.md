@@ -178,7 +178,11 @@ curl -sN "$FASTCLAW_BASE_URL/v1/chat/completions" \
   `"params": {"speaker": {"id": "user-456", "name": "Bob"}}`.
 - **Files**: `images` (image URLs or data URLs, shown to vision models) and
   `attachments` (`[{"url", "name"}]`, any file type) land in the agent's
-  workspace for this turn.
+  workspace for this turn. A message's `content` may also be an array of
+  parts in the OpenAI or Anthropic shape — `{"type": "text", "text"}`,
+  `{"type": "image_url", "image_url": {"url"}}`,
+  `{"type": "image", "source": {"type": "base64", "media_type", "data"}}` —
+  and its images are treated like `images`.
 - **`project_id`** (optional) files the conversation under one of the
   agent's projects so it shares that project's workspace.
 - Only the last `user` message is sent to the agent — FastClaw keeps the

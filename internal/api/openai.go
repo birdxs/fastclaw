@@ -123,8 +123,90 @@ func (r chatCompletionRequest) inlineImageURLs() []string {
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string         `json:"role"`
+	Content messageContent `json:"content"`
+}
+
+// messageContent is a chat message's content. Requests may send a plain
+// string or an array of parts, as OpenAI-compatible and Anthropic clients
+// do for images:
+//
+//	[{"type": "text", "text": "..."},
+//	 {"type": "image_url", "image_url": {"url": "https://… or data:…"}},
+//	 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "…"}}]
+//
+// Text parts are joined; images are collected so the last user message's
+// images are treated like the `images` field. Responses always write the
+// content as a plain string.
+type messageContent struct {
+	Text   string
+	Images []string
+}
+
+func (c messageContent) MarshalJSON() ([]byte, error) { return json.Marshal(c.Text) }
+
+func (c *messageContent) UnmarshalJSON(data []byte) error {
+	*c = messageContent{}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		return json.Unmarshal(data, &c.Text)
+	}
+	var parts []struct {
+		Type     string          `json:"type"`
+		Text     string          `json:"text"`
+		ImageURL json.RawMessage `json:"image_url"`
+		Source   *struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+			URL       string `json:"url"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(data, &parts); err != nil {
+		return fmt.Errorf("content must be a string or an array of parts: %w", err)
+	}
+	var texts []string
+	for _, p := range parts {
+		switch p.Type {
+		case "text", "input_text":
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		case "image_url", "input_image":
+			// image_url is {"url": "..."} (OpenAI) or a bare string.
+			var obj struct {
+				URL string `json:"url"`
+			}
+			var u string
+			if json.Unmarshal(p.ImageURL, &obj) == nil && obj.URL != "" {
+				u = obj.URL
+			} else {
+				_ = json.Unmarshal(p.ImageURL, &u)
+			}
+			if u != "" {
+				c.Images = append(c.Images, u)
+			}
+		case "image":
+			if p.Source == nil {
+				continue
+			}
+			switch {
+			case p.Source.Type == "base64" && p.Source.Data != "":
+				mt := p.Source.MediaType
+				if mt == "" {
+					mt = "image/png"
+				}
+				c.Images = append(c.Images, "data:"+mt+";base64,"+p.Source.Data)
+			case p.Source.URL != "":
+				c.Images = append(c.Images, p.Source.URL)
+			}
+		}
+	}
+	c.Text = strings.Join(texts, "\n\n")
+	return nil
 }
 
 // chatCompletionChunk is a single SSE chunk in streaming mode.
@@ -242,15 +324,19 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Extract the last user message
+	// Extract the last user message. Images in its content parts join
+	// the `images` field (workspace + vision).
 	var userText string
+	found := false
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		if req.Messages[i].Role == "user" {
-			userText = req.Messages[i].Content
+			userText = req.Messages[i].Content.Text
+			req.Images = append(req.Images, req.Messages[i].Content.Images...)
+			found = true
 			break
 		}
 	}
-	if userText == "" {
+	if !found || (userText == "" && len(req.allAttachments()) == 0) {
 		writeBadRequest(w, "no user message found")
 		return
 	}
@@ -407,7 +493,7 @@ func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string
 		Choices: []completionChoice{
 			{
 				Index:        0,
-				Message:      chatMessage{Role: "assistant", Content: reply},
+				Message:      chatMessage{Role: "assistant", Content: messageContent{Text: reply}},
 				FinishReason: "stop",
 			},
 		},

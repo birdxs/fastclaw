@@ -27,8 +27,9 @@ import (
 // recordingProvider answers every turn with a fixed reply and keeps the
 // system prompt text of the last call.
 type recordingProvider struct {
-	mu     sync.Mutex
-	system string
+	mu       sync.Mutex
+	system   string
+	lastUser string
 	// reply overrides "pong"; onChat runs during the model call (a test
 	// stands in for the agent's tools writing files).
 	reply  string
@@ -50,14 +51,22 @@ func (p *recordingProvider) answer() string {
 
 func (p *recordingProvider) record(messages []provider.Message) {
 	var b strings.Builder
+	lastUser := ""
 	for _, m := range messages {
 		if m.Role == "system" {
 			b.WriteString(m.Content)
 			b.WriteString("\n")
 		}
+		if m.Role == "user" {
+			lastUser = m.Content
+			for _, part := range m.ContentParts {
+				lastUser += part.Text + "|" + part.Type + "|"
+			}
+		}
 	}
 	p.mu.Lock()
 	p.system = b.String()
+	p.lastUser = lastUser
 	p.mu.Unlock()
 }
 
@@ -650,5 +659,73 @@ func TestStreamedChatReturnsFilesOnFinalChunk(t *testing.T) {
 	files, _ := final["files"].([]any)
 	if len(files) != 1 || files[0].(map[string]any)["path"] != "result.png" {
 		t.Fatalf("final chunk files = %v\n%s", final["files"], rec.Body.String())
+	}
+}
+
+func TestMessageContentParts(t *testing.T) {
+	var msgs []chatMessage
+	err := json.Unmarshal([]byte(`[
+		{"role": "user", "content": "plain"},
+		{"role": "user", "content": [
+			{"type": "text", "text": "make it blue"},
+			{"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+			{"type": "image_url", "image_url": "https://example.com/a.jpg"}
+		]},
+		{"role": "user", "content": [
+			{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "BBBB"}},
+			{"type": "text", "text": "what is this"}
+		]}
+	]`), &msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msgs[0].Content.Text != "plain" || len(msgs[0].Content.Images) != 0 {
+		t.Fatalf("string content: %+v", msgs[0].Content)
+	}
+	if msgs[1].Content.Text != "make it blue" ||
+		len(msgs[1].Content.Images) != 2 || msgs[1].Content.Images[1] != "https://example.com/a.jpg" {
+		t.Fatalf("openai parts: %+v", msgs[1].Content)
+	}
+	if msgs[2].Content.Text != "what is this" || msgs[2].Content.Images[0] != "data:image/jpeg;base64,BBBB" {
+		t.Fatalf("anthropic parts: %+v", msgs[2].Content)
+	}
+	out, _ := json.Marshal(chatMessage{Role: "assistant", Content: messageContent{Text: "hi"}})
+	if string(out) != `{"role":"assistant","content":"hi"}` {
+		t.Fatalf("marshal: %s", out)
+	}
+}
+
+// An OpenAI-style image part reaches the agent like the `images` field.
+func TestChatAcceptsImageContentParts(t *testing.T) {
+	h := newV1Harness(t)
+	id := h.createAgent(h.keyA, "Vision", nil)
+	code, out := h.do("POST", "/v1/chat/completions", h.keyA, map[string]any{
+		"agent_id": id,
+		"messages": []map[string]any{{"role": "user", "content": []map[string]any{
+			{"type": "text", "text": "describe"},
+			{"type": "image_url", "image_url": map[string]string{"url": "data:image/png;base64,iVBORw0KGgo="}},
+		}}},
+	}, "X-Fastclaw-Session-Key", "parts:1")
+	if code != http.StatusOK {
+		t.Fatalf("chat: %d %v", code, out)
+	}
+	if msg := out["choices"].([]any)[0].(map[string]any)["message"].(map[string]any); msg["content"] != "pong" {
+		t.Fatalf("reply content must stay a string: %v", msg["content"])
+	}
+	h.rt.prov.mu.Lock()
+	got := h.rt.prov.lastUser
+	h.rt.prov.mu.Unlock()
+	if !strings.Contains(got, "[Attached: /workspace/") || !strings.Contains(got, ".png]") || !strings.Contains(got, "describe") {
+		t.Fatalf("image part not attached to the turn: %q", got)
+	}
+	// Image-only messages are fine too.
+	code, out = h.do("POST", "/v1/chat/completions", h.keyA, map[string]any{
+		"agent_id": id,
+		"messages": []map[string]any{{"role": "user", "content": []map[string]any{
+			{"type": "image_url", "image_url": map[string]string{"url": "data:image/png;base64,iVBORw0KGgo="}},
+		}}},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("image-only message: %d %v", code, out)
 	}
 }

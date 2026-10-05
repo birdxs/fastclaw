@@ -53,6 +53,11 @@ agent ID will now get a 404 instead of a reply from some other agent.
   caller's namespace (an end-user only reads their own conversations).
   `"return_files": "inline"` adds small files as data URLs. Agents are told
   never to upload users' files to third-party hosts to produce a link.
+- **Multimodal message content:** `/v1/chat/completions` accepts a
+  message `content` given as an array of parts — OpenAI `text` /
+  `image_url` and Anthropic `image` (base64) — so OpenAI- or
+  Anthropic-shaped clients can send images unchanged; the last user
+  message's images are handled like the `images` field.
 - **On-demand agent loading:** accounts with more than 50 agents
   (`FASTCLAW_EAGER_AGENT_LIMIT`) load agents on first use and drop idle ones.
   Agents bound to IM channels or with enabled cron jobs are still loaded at
