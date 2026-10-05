@@ -34,6 +34,7 @@ type recordingProvider struct {
 	// stands in for the agent's tools writing files).
 	reply  string
 	onChat func()
+	usage  provider.Usage
 }
 
 func (p *recordingProvider) answer() string {
@@ -78,13 +79,13 @@ func (p *recordingProvider) lastSystem() string {
 
 func (p *recordingProvider) Chat(_ context.Context, messages []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.Response, error) {
 	p.record(messages)
-	return &provider.Response{Content: p.answer()}, nil
+	return &provider.Response{Content: p.answer(), Usage: p.usage}, nil
 }
 
 func (p *recordingProvider) ChatStream(_ context.Context, messages []provider.Message, _ []provider.Tool, _ string, _ int, _ float64) (*provider.StreamReader, error) {
 	p.record(messages)
 	ch := make(chan provider.StreamChunk, 1)
-	ch <- provider.StreamChunk{Content: p.answer(), Done: true}
+	ch <- provider.StreamChunk{Content: p.answer(), Done: true, Usage: p.usage}
 	close(ch)
 	return provider.NewStreamReader(ch), nil
 }
@@ -727,5 +728,75 @@ func TestChatAcceptsImageContentParts(t *testing.T) {
 	})
 	if code != http.StatusOK {
 		t.Fatalf("image-only message: %d %v", code, out)
+	}
+}
+
+// The response reports the turn's usage: every model call it took.
+func TestChatReportsTurnUsage(t *testing.T) {
+	h := newV1Harness(t)
+	id := h.createAgent(h.keyA, "Meter", nil)
+	h.rt.prov.mu.Lock()
+	h.rt.prov.usage = provider.Usage{InputTokens: 100, OutputTokens: 20, CacheReadTokens: 300, CacheCreationTokens: 5}
+	h.rt.prov.mu.Unlock()
+	body := map[string]any{"agent_id": id, "messages": []map[string]string{{"role": "user", "content": "hi"}}}
+
+	// Each model call reports the same usage; the response sums them.
+	check := func(u map[string]any, calls float64) {
+		t.Helper()
+		want := map[string]float64{
+			"prompt_tokens": 405 * calls, "completion_tokens": 20 * calls, "total_tokens": 425 * calls,
+			"input_tokens": 100 * calls, "cache_read_tokens": 300 * calls, "cache_creation_tokens": 5 * calls,
+			"model_calls": calls,
+		}
+		for k, v := range want {
+			if u[k] != v {
+				t.Fatalf("usage[%s] = %v, want %v (%v)", k, u[k], v, u)
+			}
+		}
+		if d := u["prompt_tokens_details"].(map[string]any); d["cached_tokens"] != 300*calls {
+			t.Fatalf("cached_tokens = %v", d)
+		}
+	}
+	code, out := h.do("POST", "/v1/chat/completions", h.keyA, body)
+	if code != http.StatusOK {
+		t.Fatalf("chat: %d %v", code, out)
+	}
+	check(out["usage"].(map[string]any), 1)
+
+	body["stream"] = true
+	blob, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(blob))
+	req.Header.Set("Authorization", "Bearer "+h.keyA)
+	rec := httptest.NewRecorder()
+	h.mux.ServeHTTP(rec, req)
+	var final map[string]any
+	for _, line := range strings.Split(rec.Body.String(), "\n") {
+		if strings.HasPrefix(line, "data: {") && strings.Contains(line, `"finish_reason":"stop"`) {
+			_ = json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &final)
+		}
+	}
+	u, _ := final["usage"].(map[string]any)
+	if u == nil {
+		t.Fatalf("final chunk has no usage:\n%s", rec.Body.String())
+	}
+	// The streaming path decides on tool use with one call, then
+	// re-issues the answer as a stream: two billed model calls.
+	check(u, 2)
+}
+
+func TestChatRefusedOnBillingHold(t *testing.T) {
+	h := newV1Harness(t)
+	id := h.createAgent(h.keyA, "Held", nil)
+	if err := h.st.SetBillingHold(context.Background(), h.appA, true, "balance 0"); err != nil {
+		t.Fatal(err)
+	}
+	code, out := h.do("POST", "/v1/chat/completions", h.keyA, map[string]any{
+		"agent_id": id, "messages": []map[string]string{{"role": "user", "content": "hi"}},
+	}, "X-Fastclaw-End-User", "alice")
+	if code != http.StatusPaymentRequired || errCode(out) != "payment_required" {
+		t.Fatalf("held account: %d %v", code, out)
+	}
+	if strings.Contains(fmt.Sprint(out), "balance 0") {
+		t.Fatal("the billing system's note must not reach API callers")
 	}
 }

@@ -194,6 +194,14 @@ non-streaming returns an OpenAI `chat.completion` (`choices[0].message.content`)
 The request's `model` field doesn't change the agent's model — the agent's
 configuration decides it.
 
+`usage` (non-streaming: top level; streaming: on the final chunk) sums every
+model call the agent made for this turn, tool loops included:
+`prompt_tokens` / `completion_tokens` / `total_tokens` as in OpenAI
+(`prompt_tokens` includes cached input, also in
+`prompt_tokens_details.cached_tokens`), plus `input_tokens` (uncached),
+`cache_read_tokens`, `cache_creation_tokens` and `model_calls`. Use it to
+attribute cost to your users per turn.
+
 API conversations are never trusted with the FastClaw host: the agent's
 tools (shell, scripts) run in FastClaw's sandbox. If the FastClaw operator
 hasn't configured one, the agent can still answer but can't run commands.
@@ -251,6 +259,7 @@ Every `/v1` error is `{"error": {"type", "code", "message"}}`. Branch on
 | 403 | `forbidden` | The key may not do this (e.g. an agent key creating agents). |
 | 403 | `agent_quota_exceeded` | The account reached its agent quota. |
 | 404 | `agent_not_found` | No such agent for this key. |
+| 402 | `payment_required` | The FastClaw account is on billing hold (its balance ran out). Tell your user the service is paused; retrying won't help until it's topped up. |
 | 404 | `project_not_found` | Unknown `project_id`. |
 | 429 | `rate_limited` | Slow down and retry with backoff. |
 | 503 | `not_configured` | That feature isn't enabled on this FastClaw. |

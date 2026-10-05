@@ -446,6 +446,14 @@ func (s *Server) Run(ctx context.Context) error {
 	// Users — flat resource paths. Top-level CRUD is admin-only;
 	// nested {id}/apikeys + {id}/agents accept admin-or-self
 	// (gated in-handler via requireUserOrAdmin).
+	// Billing hooks for an external billing system (see
+	// handlers_billing_hooks.go); platform-admin only, plus the public
+	// login-link redemption.
+	mux.HandleFunc("GET /api/admin/usage/events", admin(s.handleUsageEvents))
+	mux.HandleFunc("GET /api/admin/users/{id}/billing-hold", admin(s.handleGetBillingHold))
+	mux.HandleFunc("PUT /api/admin/users/{id}/billing-hold", admin(s.handleSetBillingHold))
+	mux.HandleFunc("POST /api/admin/users/{id}/login-link", admin(s.handleCreateLoginLink))
+	mux.HandleFunc("GET /auth/login-link", s.handleRedeemLoginLink)
 	mux.HandleFunc("GET /api/users", admin(s.handleListUsers))
 	mux.HandleFunc("POST /api/users", admin(s.handleCreateUser))
 	mux.HandleFunc("PUT /api/users/{id}", admin(s.handleUpdateUser))

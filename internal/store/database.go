@@ -184,7 +184,165 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateDropApps(ctx); err != nil {
 		return fmt.Errorf("migrate drop apps: %w", err)
 	}
+	if err := d.migrateBillingHooks(ctx); err != nil {
+		return fmt.Errorf("migrate billing hooks: %w", err)
+	}
 	return nil
+}
+
+// migrateBillingHooks adds what an external billing system (e.g. a hosted
+// FastClaw Cloud) needs, without FastClaw itself knowing about money:
+//   - users.billing_hold / billing_hold_reason: a hold blocks the
+//     account's model calls until lifted;
+//   - a stable, increasing id on token_usage_log for incremental export
+//     (Postgres gets a BIGSERIAL column; SQLite uses its implicit rowid);
+//   - login_tokens: single-use tokens that sign a user into the console.
+func (d *DBStore) migrateBillingHooks(ctx context.Context) error {
+	for _, col := range []struct{ name, ddl string }{
+		{"billing_hold", `ALTER TABLE users ADD COLUMN billing_hold BOOLEAN NOT NULL DEFAULT FALSE`},
+		{"billing_hold_reason", `ALTER TABLE users ADD COLUMN billing_hold_reason TEXT NOT NULL DEFAULT ''`},
+	} {
+		has, err := d.tableHasColumn(ctx, "users", col.name)
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := d.db.ExecContext(ctx, col.ddl); err != nil {
+				return fmt.Errorf("add users.%s: %w", col.name, err)
+			}
+		}
+	}
+	if d.dialect == "postgres" {
+		has, err := d.tableHasColumn(ctx, "token_usage_log", "id")
+		if err != nil {
+			return err
+		}
+		if !has {
+			if _, err := d.db.ExecContext(ctx, `ALTER TABLE token_usage_log ADD COLUMN id BIGSERIAL`); err != nil {
+				return fmt.Errorf("add token_usage_log.id: %w", err)
+			}
+		}
+		if _, err := d.db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_token_usage_log_id ON token_usage_log (id)`); err != nil {
+			return fmt.Errorf("index token_usage_log.id: %w", err)
+		}
+	}
+	if _, err := d.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS login_tokens (
+		token_hash TEXT PRIMARY KEY,
+		user_id TEXT NOT NULL,
+		expires_at TIMESTAMP NOT NULL,
+		created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+	)`); err != nil {
+		return fmt.Errorf("create login_tokens: %w", err)
+	}
+	return nil
+}
+
+// --- Billing hooks ---
+
+func (d *DBStore) GetBillingHold(ctx context.Context, userID string) (bool, string, error) {
+	var hold bool
+	var reason string
+	err := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT billing_hold, billing_hold_reason FROM users WHERE id = %s`, d.ph(1)), userID).
+		Scan(&hold, &reason)
+	if err != nil {
+		return false, "", scanErr(err)
+	}
+	return hold, reason, nil
+}
+
+func (d *DBStore) SetBillingHold(ctx context.Context, userID string, hold bool, reason string) error {
+	if !hold {
+		reason = ""
+	}
+	res, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE users SET billing_hold = %s, billing_hold_reason = %s WHERE id = %s`, d.ph(1), d.ph(2), d.ph(3)),
+		hold, reason, userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (d *DBStore) ListUsageEvents(ctx context.Context, afterID int64, limit int) ([]UsageEvent, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	// Rows are only exported once they are a few seconds old, so a row
+	// whose id was assigned earlier but committed later can't be skipped
+	// by a reader that already moved past it. The cutoff uses the
+	// database clock — created_at is written with CURRENT_TIMESTAMP.
+	idCol, settled := "t.id", "CURRENT_TIMESTAMP - INTERVAL '5 seconds'"
+	if d.dialect != "postgres" {
+		idCol, settled = "t.rowid", "datetime('now', '-5 seconds')"
+	}
+	// account_id is who pays: the row's user, or — for end-user
+	// (app_user) and IM-chatter (channel_user) rows — the account that
+	// owns them, up to two levels (a channel user under an app_user).
+	q := fmt.Sprintf(`
+		SELECT %[1]s, t.user_id,
+			CASE
+				WHEN u.role IN ('app_user', 'channel_user') AND u2.role IN ('app_user', 'channel_user') THEN COALESCE(u2.owner_user_id, '')
+				WHEN u.role IN ('app_user', 'channel_user') THEN COALESCE(u.owner_user_id, '')
+				ELSE t.user_id
+			END,
+			COALESCE(CASE WHEN u.role = 'app_user' THEN u.external_id END, ''),
+			t.agent_id, t.session_key, t.provider, t.model,
+			t.input_tokens, t.output_tokens, t.cache_read_tokens, t.cache_create_tokens,
+			t.duration_ms, t.channel, t.chatter_user_id, t.created_at
+		FROM token_usage_log t
+		LEFT JOIN users u ON u.id = t.user_id
+		LEFT JOIN users u2 ON u2.id = u.owner_user_id
+		WHERE %[1]s > %[2]s AND t.created_at <= %[3]s
+		ORDER BY %[1]s
+		LIMIT %[4]s`, idCol, d.ph(1), settled, d.ph(2))
+	rows, err := d.db.QueryContext(ctx, q, afterID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageEvent
+	for rows.Next() {
+		var e UsageEvent
+		if err := rows.Scan(&e.ID, &e.UserID, &e.AccountID, &e.EndUser, &e.AgentID, &e.SessionKey,
+			&e.Provider, &e.Model, &e.InputTokens, &e.OutputTokens, &e.CacheReadTokens, &e.CacheCreationTokens,
+			&e.DurationMs, &e.Channel, &e.ChatterUserID, &e.CreatedAt); err != nil {
+			return nil, err
+		}
+		if e.AccountID == "" {
+			e.AccountID = e.UserID
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (d *DBStore) CreateLoginToken(ctx context.Context, tokenHash, userID string, expiresAt time.Time) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`INSERT INTO login_tokens (token_hash, user_id, expires_at) VALUES (%s, %s, %s)`, d.ph(1), d.ph(2), d.ph(3)),
+		tokenHash, userID, expiresAt.UTC())
+	return err
+}
+
+func (d *DBStore) ConsumeLoginToken(ctx context.Context, tokenHash string) (string, error) {
+	// DELETE … RETURNING makes the token single-use even under races.
+	var userID string
+	var expiresAt time.Time
+	err := d.db.QueryRowContext(ctx,
+		fmt.Sprintf(`DELETE FROM login_tokens WHERE token_hash = %s RETURNING user_id, expires_at`, d.ph(1)), tokenHash).
+		Scan(&userID, &expiresAt)
+	if err != nil {
+		return "", scanErr(err)
+	}
+	if time.Now().UTC().After(expiresAt.UTC()) {
+		return "", ErrNotFound
+	}
+	// Opportunistically drop other expired tokens.
+	_, _ = d.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM login_tokens WHERE expires_at < %s`, d.ph(1)), time.Now().UTC())
+	return userID, nil
 }
 
 // migrateDropApps removes the short-lived "apps" tenant layer that only

@@ -737,6 +737,16 @@ func (a *Agent) SetQuotaStore(qs usage.QuotaStore) { a.quotaStore = qs }
 // owner has exceeded their billing quota. Returns "" when the request
 // should proceed (no quota, unlimited, or still under limit).
 func (a *Agent) checkQuota(ctx context.Context) string {
+	// Billing hold: an external billing system (e.g. a hosted FastClaw
+	// Cloud) can hold the account that pays for this agent — its real
+	// owner — when its balance runs out. Every channel stops here.
+	if a.dataStore != nil {
+		// The hold's reason is the billing system's note; chatters only
+		// get the generic message.
+		if hold, _, err := a.dataStore.GetBillingHold(ctx, a.trustOwnerID()); err == nil && hold {
+			return "Sorry, this service is paused because the account's balance is used up. Please contact your service provider."
+		}
+	}
 	if a.quotaStore == nil || a.meter == nil {
 		return ""
 	}
@@ -759,16 +769,18 @@ func (a *Agent) checkQuota(ctx context.Context) string {
 // durationMs is the wall-clock time of the LLM call; pass 0 when not
 // measured (the daily bucket doesn't use it, only the log table).
 func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.Usage, durationMs int64) {
-	if a.meter == nil {
-		return
-	}
-	prov, mdl := provider.SplitProviderModel(a.model)
 	t := usage.Tokens{
 		Input:         u.InputTokens,
 		Output:        u.OutputTokens,
 		CacheRead:     u.CacheReadTokens,
 		CacheCreation: u.CacheCreationTokens,
 	}
+	// The API reports a turn's usage in its response.
+	usage.CollectorFrom(ctx).Add(t)
+	if a.meter == nil {
+		return
+	}
+	prov, mdl := provider.SplitProviderModel(a.model)
 	if err := a.meter.RecordTokens(ctx, a.ownerUserID, a.agentID, sessionKey, prov, mdl, t); err != nil {
 		slog.Warn("meter record failed", "agent", a.name, "error", err)
 	}

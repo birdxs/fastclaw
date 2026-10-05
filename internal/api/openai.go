@@ -12,6 +12,7 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 )
 
 // chatCompletionRequest mirrors the OpenAI chat completion request.
@@ -216,9 +217,16 @@ type chatCompletionChunk struct {
 	Created int64         `json:"created"`
 	Model   string        `json:"model"`
 	Choices []chunkChoice `json:"choices"`
-	// Files (FastClaw extension) rides on the final chunk: files the agent
-	// produced this turn.
-	Files []turnFile `json:"files,omitempty"`
+	// Usage and Files (FastClaw extension) ride on the final chunk: the
+	// turn's model usage and the files the agent produced.
+	Usage *completionUsage `json:"usage,omitempty"`
+	Files []turnFile       `json:"files,omitempty"`
+}
+
+// chunkExtras is what only the final chunk carries.
+type chunkExtras struct {
+	Usage *completionUsage
+	Files []turnFile
 }
 
 type chunkChoice struct {
@@ -250,10 +258,38 @@ type completionChoice struct {
 	FinishReason string      `json:"finish_reason"`
 }
 
+// completionUsage is the turn's model usage: every model call the agent
+// made to answer, tool loops included. prompt_tokens follows OpenAI and
+// counts cached input too; the FastClaw fields split input into uncached
+// / cache read / cache write — what per-token prices differ on.
 type completionUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                  `json:"prompt_tokens"`
+	CompletionTokens    int                  `json:"completion_tokens"`
+	TotalTokens         int                  `json:"total_tokens"`
+	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	InputTokens         int                  `json:"input_tokens"`
+	CacheReadTokens     int                  `json:"cache_read_tokens"`
+	CacheCreationTokens int                  `json:"cache_creation_tokens"`
+	ModelCalls          int                  `json:"model_calls"`
+}
+
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+func usageFromCollector(c *usage.Collector) completionUsage {
+	t, calls := c.Totals()
+	prompt := t.Input + t.CacheRead + t.CacheCreation
+	return completionUsage{
+		PromptTokens:        prompt,
+		CompletionTokens:    t.Output,
+		TotalTokens:         prompt + t.Output,
+		PromptTokensDetails: &promptTokensDetails{CachedTokens: t.CacheRead},
+		InputTokens:         t.Input,
+		CacheReadTokens:     t.CacheRead,
+		CacheCreationTokens: t.CacheCreation,
+		ModelCalls:          calls,
+	}
 }
 
 // HandleChatCompletions handles POST /v1/chat/completions.
@@ -285,6 +321,15 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		writeUnauth(w, "unauthorized")
 		return
+	}
+	// An account on billing hold (its balance ran out in an external
+	// billing system) can't start turns; say so in a machine-readable way.
+	if s.store != nil {
+		if hold, _, err := s.store.GetBillingHold(r.Context(), ident.AccountID()); err == nil && hold {
+			writeAPIError(w, http.StatusPaymentRequired, "billing_error", codePaymentRequired,
+				"this account is on billing hold; top up its balance to continue")
+			return
+		}
 	}
 
 	// Body field beats header — same precedence as `user`. Lets app
@@ -406,21 +451,24 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	now := time.Now().Unix()
 
+	// Sum every model call of this turn for the response's usage.
+	collector := &usage.Collector{}
+	r = r.WithContext(usage.WithCollector(r.Context(), collector))
 	inline := req.ReturnFiles == "inline"
 	files := func(reply string) []turnFile {
 		return s.turnFiles(r.Context(), r, ag.Name(), projectID, sessionKey, wsBefore, reply, attachmentPaths, inline)
 	}
 	isStream := req.Stream != nil && *req.Stream
 	if isStream {
-		s.streamResponseFromAgent(w, r, ag, msg, chatID, model, now, files)
+		s.streamResponseFromAgent(w, r, ag, msg, chatID, model, now, files, collector)
 	} else {
 		// Get reply from agent
 		reply := ag.HandleMessage(r.Context(), msg)
-		s.fullResponse(w, reply, chatID, model, now, files(reply))
+		s.fullResponse(w, reply, chatID, model, now, files(reply), usageFromCollector(collector))
 	}
 }
 
-func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request, ag *agent.Agent, msg bus.InboundMessage, chatID, model string, created int64, files func(reply string) []turnFile) {
+func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request, ag *agent.Agent, msg bus.InboundMessage, chatID, model string, created int64, files func(reply string) []turnFile, collector *usage.Collector) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -455,14 +503,15 @@ func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request,
 
 	// Send finish chunk
 	done := "stop"
-	s.writeSSEChunk(w, chatID, model, created, "", "", &done, files(reply.String()))
+	u := usageFromCollector(collector)
+	s.writeSSEChunk(w, chatID, model, created, "", "", &done, &chunkExtras{Usage: &u, Files: files(reply.String())})
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if ok {
 		flusher.Flush()
 	}
 }
 
-func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created int64, role, content string, finishReason *string, files []turnFile) {
+func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created int64, role, content string, finishReason *string, extras *chunkExtras) {
 	chunk := chatCompletionChunk{
 		ID:      id,
 		Object:  "chat.completion.chunk",
@@ -478,13 +527,16 @@ func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created 
 				FinishReason: finishReason,
 			},
 		},
-		Files: files,
+	}
+	if extras != nil {
+		chunk.Usage = extras.Usage
+		chunk.Files = extras.Files
 	}
 	data, _ := json.Marshal(chunk)
 	fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
-func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string, created int64, files []turnFile) {
+func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string, created int64, files []turnFile, u completionUsage) {
 	resp := chatCompletionResponse{
 		ID:      chatID,
 		Object:  "chat.completion",
@@ -497,11 +549,7 @@ func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string
 				FinishReason: "stop",
 			},
 		},
-		Usage: completionUsage{
-			PromptTokens:     0,
-			CompletionTokens: 0,
-			TotalTokens:      0,
-		},
+		Usage: u,
 		Files: files,
 	}
 	writeJSON(w, http.StatusOK, resp)

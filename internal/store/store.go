@@ -85,6 +85,23 @@ type Store interface {
 	// whose chat_id is chatID — the caller-chosen conversation id (e.g.
 	// the /v1 X-Fastclaw-Session-Key), which also names its workspace.
 	HasChatSession(ctx context.Context, userID, agentID, chatID string) (bool, error)
+
+	// Billing hooks — generic primitives an external billing system (e.g.
+	// a hosted FastClaw Cloud) builds on; FastClaw has no notion of money.
+	//
+	// GetBillingHold / SetBillingHold read and set an account's hold. A
+	// held account's model calls are refused until the hold is lifted.
+	GetBillingHold(ctx context.Context, userID string) (hold bool, reason string, err error)
+	SetBillingHold(ctx context.Context, userID string, hold bool, reason string) error
+	// ListUsageEvents returns token_usage_log rows with an id above
+	// afterID, oldest first (≤ limit). Rows become visible a few seconds
+	// after they are written, so incremental readers never skip one.
+	ListUsageEvents(ctx context.Context, afterID int64, limit int) ([]UsageEvent, error)
+	// CreateLoginToken / ConsumeLoginToken back single-use console
+	// sign-in links. Consume deletes the token and returns its user;
+	// ErrNotFound when unknown or expired.
+	CreateLoginToken(ctx context.Context, tokenHash, userID string, expiresAt time.Time) error
+	ConsumeLoginToken(ctx context.Context, tokenHash string) (string, error)
 	SaveSession(ctx context.Context, userID, agentID, sessionKey string, session *SessionRecord) error
 	ListSessions(ctx context.Context, userID, agentID string) ([]SessionMeta, error)
 	// ListSessionOwnerPairs returns every distinct (user_id, agent_id)
@@ -404,6 +421,28 @@ type AgentRecord struct {
 	IsPublic  bool                   `json:"isPublic"`
 	CreatedAt time.Time              `json:"createdAt"`
 	UpdatedAt time.Time              `json:"updatedAt"`
+}
+
+// UsageEvent is one model call from token_usage_log, for billing export.
+// AccountID is the account that pays: UserID itself, or the account that
+// owns UserID when it is an end-user (app_user) or IM chatter.
+type UsageEvent struct {
+	ID                  int64     `json:"id"`
+	AccountID           string    `json:"account_id"`
+	UserID              string    `json:"user_id"`
+	EndUser             string    `json:"end_user,omitempty"`
+	AgentID             string    `json:"agent_id"`
+	SessionKey          string    `json:"session_key"`
+	Provider            string    `json:"provider"`
+	Model               string    `json:"model"`
+	InputTokens         int64     `json:"input_tokens"`
+	OutputTokens        int64     `json:"output_tokens"`
+	CacheReadTokens     int64     `json:"cache_read_tokens"`
+	CacheCreationTokens int64     `json:"cache_creation_tokens"`
+	DurationMs          int64     `json:"duration_ms"`
+	Channel             string    `json:"channel"`
+	ChatterUserID       string    `json:"chatter_user_id,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
 }
 
 // KnowledgeDoc is one raw owner-uploaded knowledge source file

@@ -21,6 +21,7 @@ const (
 	codeQuotaNotFound      = "quota_not_found"
 	codeAgentQuotaExceeded = "agent_quota_exceeded"
 	codeNotConfigured      = "not_configured"
+	codePaymentRequired    = "payment_required"
 	codeInternal           = "internal_error"
 )
 

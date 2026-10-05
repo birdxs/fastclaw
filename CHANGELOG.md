@@ -14,6 +14,26 @@ answered with the default (or an arbitrary) agent. Requests that don't name
 an agent still use the default agent. Scripts that passed a stale or wrong
 agent ID will now get a 404 instead of a reply from some other agent.
 
+### Added — billing hooks for hosted deployments
+
+FastClaw stays free of prices and payments; these generic primitives let an
+external billing system (e.g. a hosted FastClaw Cloud) charge for usage. See
+[docs/billing-hooks.md](docs/billing-hooks.md).
+
+- **Per-turn usage in `/v1/chat/completions`:** `usage` now reports real
+  token counts — every model call of the turn, tool loops included — with
+  cache read / write split out and `model_calls`. Streaming responses carry
+  it on the final chunk. Previously it was always zero.
+- **Usage export:** `GET /api/admin/usage/events?after=<id>` returns model
+  calls after a cursor, each with the paying `account_id` (end-users and IM
+  chatters roll up to their account).
+- **Billing hold:** `PUT /api/admin/users/{id}/billing-hold` pauses an
+  account. Its agents refuse new turns on every channel, and `/v1` chat
+  returns `402` with `error.code = "payment_required"`.
+- **Login links:** `POST /api/admin/users/{id}/login-link` mints a
+  single-use, short-lived URL that signs a browser into the console as that
+  account.
+
 ### Added — runtime API for integrating apps
 
 - **Agent management on `/v1`:** `POST/GET/PATCH/DELETE /v1/agents[/{id}]`
