@@ -383,7 +383,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   }
 
   return (
-    <Sidebar collapsible="icon" {...props}>
+    <Sidebar collapsible="offcanvas" {...props}>
       <SidebarHeader>
         <SidebarTitle
           title={isAdminRoute(pathname) ? tr("Admin", "管理后台") : tr("Console", "控制台")}
