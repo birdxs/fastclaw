@@ -2790,6 +2790,31 @@ func (d *DBStore) GetSession(ctx context.Context, userID, agentID, sessionKey st
 }
 
 // LookupSessionOwner returns the user_id that owns the given session row.
+func (d *DBStore) FindSessionLocations(ctx context.Context, userID, sessionKey string) ([]SessionLocation, error) {
+	// LIKE wildcards in the key are escaped so "a_b" can't match "axb".
+	escaped := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(sessionKey)
+	rows, err := d.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT agent_id, session_key, project_id FROM sessions
+			WHERE user_id = %s AND (session_key = %s OR session_key LIKE %s ESCAPE '\')
+			ORDER BY updated_at DESC`, d.ph(1), d.ph(2), d.ph(3)),
+		userID, sessionKey, escaped+"-agent-%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionLocation
+	for rows.Next() {
+		var loc SessionLocation
+		var project sql.NullString
+		if err := rows.Scan(&loc.AgentID, &loc.SessionKey, &project); err != nil {
+			return nil, err
+		}
+		loc.ProjectID = project.String
+		out = append(out, loc)
+	}
+	return out, rows.Err()
+}
+
 func (d *DBStore) LookupSessionOwner(ctx context.Context, agentID, sessionKey string) (string, error) {
 	var uid string
 	err := d.db.QueryRowContext(ctx,

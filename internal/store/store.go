@@ -81,6 +81,11 @@ type Store interface {
 	// LookupSessionOwner returns the user_id that owns the given session.
 	// Used to resolve the correct user_id for cross-user session reads.
 	LookupSessionOwner(ctx context.Context, agentID, sessionKey string) (string, error)
+	// FindSessionLocations finds where a URL session id lives for userID:
+	// sessions whose key is sessionKey, plus group-chat member sessions
+	// keyed "<sessionKey>-agent-<agentID>". Backs /chat/<sessionId>, whose
+	// URL no longer names the agent or group.
+	FindSessionLocations(ctx context.Context, userID, sessionKey string) ([]SessionLocation, error)
 	// HasChatSession reports whether userID has a session with agentID
 	// whose chat_id is chatID — the caller-chosen conversation id (e.g.
 	// the /v1 X-Fastclaw-Session-Key), which also names its workspace.
@@ -485,6 +490,13 @@ type SessionRecord struct {
 	ProjectID string           `json:"projectId,omitempty"`
 	Messages  []SessionMessage `json:"messages"`
 	UpdatedAt time.Time        `json:"updatedAt"`
+}
+
+// SessionLocation is one session row a URL session id resolves to.
+type SessionLocation struct {
+	AgentID    string
+	SessionKey string
+	ProjectID  string
 }
 
 // SessionMessage is a single message in a session.
