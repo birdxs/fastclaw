@@ -11,8 +11,8 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { createProject, deleteChatSession, fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, getSessionHistory, listAgentFiles, listProjects, renameChatSession, restoreSessionHistory, revealAgentWorkspace, sendChatStream, steerChat, updateAgent, updateProject, uploadAgentFiles, getSkills, type AgentDetail, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type MeResponse, type ProjectEntry, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile, type WorkspaceHistoryEntry } from "@/lib/api";
-import { ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronDown, ChevronRight, ChevronUp, CircleAlert, CircleCheck, CirclePause, Clock, Code2, Copy, Download, Eye, ExternalLink, File, FileCode, FileText, Film, Folder, FolderOpen, FolderPlus, FolderSearch, Globe2, Image as ImageIcon, Link2, ListChecks, LoaderCircle, LockKeyhole, MoreHorizontal, Music, PanelLeftClose, PanelLeftOpen, PanelRight, Paperclip, Pencil, Plus, Puzzle, Radio, RefreshCw, RotateCcw, Settings, Share2, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { createProject, deleteChatSession, fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, getSessionHistory, listAgentFiles, listProjects, renameChatSession, restoreSessionHistory, revealAgentWorkspace, sendChatStream, steerChat, updateAgent, updateProject, uploadAgentFiles, getSkills, type AgentDetail, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type ProjectEntry, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile, type WorkspaceHistoryEntry } from "@/lib/api";
+import { ArrowLeft, ArrowUp, BookOpen, Brain, Check, ChevronDown, ChevronRight, ChevronUp, ChevronsRight, CircleAlert, CircleCheck, CirclePause, Clock, Code2, Copy, Download, Eye, ExternalLink, File, FileCode, FileText, Film, Folder, FolderOpen, FolderPlus, FolderSearch, Globe2, Image as ImageIcon, Link2, ListChecks, LoaderCircle, LockKeyhole, MoreHorizontal, Music, PanelLeftClose, PanelLeftOpen, PanelRight, Paperclip, Pencil, Plus, Puzzle, Radio, RefreshCw, RotateCcw, Settings, Share2, ShieldCheck, SlidersHorizontal, Sparkles, Square, SquarePen, Terminal, Trash2, Wrench, X } from "lucide-react";
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import type { AgentSettingsTab } from "@/components/agent-settings-dialog";
@@ -107,7 +107,7 @@ function renderContentWithDataImages(
 
 import { usePageHeader } from "@/components/sidebar";
 import { useSidebarOptional } from "@/components/ui/sidebar";
-import { ChannelIcon, channelLabel, hasChannelIcon } from "@/components/channel-icon";
+import { ChannelIcon, channelLabel } from "@/components/channel-icon";
 import { BotAvatar } from "@/components/bot-avatar";
 import { useLocale, type Locale, type MessageKey } from "@/components/locale-provider";
 
@@ -693,11 +693,6 @@ export function ChatScreen() {
   const selectedAgent = useAgentIdFromURL();
   const [agentName, setAgentName] = useState<string>("");
   const [agentDetail, setAgentDetail] = useState<AgentDetail | null>(null);
-  // Signed-in user, for the avatar beside their own bubbles.
-  const [me, setMe] = useState<MeResponse | null>(null);
-  useEffect(() => {
-    getMe().then(setMe).catch(() => {});
-  }, []);
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
   const [sessionId, setSessionId] = useState<string>(
     () => routeSessionId || generateSessionId(),
@@ -740,8 +735,6 @@ export function ChatScreen() {
   const [filesSheetOpen, setFilesSheetOpen] = useState(false);
   const [botPanelOpen, setBotPanelOpen] = useState(false);
   const [workspaceReturnsToBotPanel, setWorkspaceReturnsToBotPanel] = useState(false);
-  // File picked in the Agent panel's Files tab; the workspace opens on it.
-  const [workspaceInitialFile, setWorkspaceInitialFile] = useState<ProducedFile | null>(null);
   const [knowledgePreview, setKnowledgePreview] = useState<KnowledgeSource | null>(null);
   // The compact workspace is only a file navigator, so it can coexist with
   // the platform sidebar. Collapse that sidebar only while a file/app preview
@@ -773,8 +766,7 @@ export function ChatScreen() {
     setBotPanelOpen(false);
     setFilesSheetOpen(true);
   }, []);
-  const openWorkspaceFromBotPanel = useCallback((file?: ProducedFile) => {
-    setWorkspaceInitialFile(file ?? null);
+  const openWorkspaceFromBotPanel = useCallback(() => {
     setWorkspaceReturnsToBotPanel(true);
     setBotPanelOpen(false);
     setFilesSheetOpen(true);
@@ -1440,7 +1432,7 @@ export function ChatScreen() {
   // settings, while the monitor action opens the live workspace.
   const headerSlot = useMemo(
     () => (
-      <div className="flex h-full min-w-0 flex-1 items-center gap-3 pl-1 pr-4 md:pr-5">
+      <div className="flex h-full min-w-0 flex-1 items-center gap-3 px-4 md:px-5">
         <button
           type="button"
           onClick={openBotSettings}
@@ -1448,6 +1440,11 @@ export function ChatScreen() {
           title={tr("Open settings for {{agent}}", "打开 {{agent}} 的设置", { agent: agentName || selectedAgent })}
           aria-label={tr("Open settings for {{agent}}", "打开 {{agent}} 的设置", { agent: agentName || selectedAgent })}
         >
+          <BotAvatar
+            agentId={selectedAgent}
+            avatarUrl={agentDetail?.avatarUrl}
+            size={28}
+          />
           <span className="truncate text-sm font-semibold text-foreground">
             {agentName || selectedAgent}
           </span>
@@ -1487,6 +1484,7 @@ export function ChatScreen() {
     [
       agentName,
       selectedAgent,
+      agentDetail?.avatarUrl,
       agentDetail?.isPublic,
       agentDetail?.role,
       isActAsView,
@@ -2752,10 +2750,8 @@ export function ChatScreen() {
                 // behavior). Expand into one bubble per chunk so the
                 // marker never surfaces as literal text. Attach files /
                 // metadata only to the last chunk to match the IM
-                // dispatcher's "attach to last chunk" rule. Not limited to
-                // role "agent": group-chat mirrors show other agents' turns
-                // on the user side, and those carry the marker too.
-                if (msg.content.includes(SPLIT_MARKER)) {
+                // dispatcher's "attach to last chunk" rule.
+                if (msg.role === "agent" && msg.content.includes(SPLIT_MARKER)) {
                   const parts = splitOnMarker(msg.content);
                   parts.forEach((part, idx) => {
                     const isLast = idx === parts.length - 1;
@@ -2789,56 +2785,39 @@ export function ChatScreen() {
                 return (
                 <div
                   key={msg.id}
-                  className={`flex items-start gap-2.5 ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                 >
-                  {/* Messenger-style avatars on desktop; phones keep the
-                      width for the bubble. Mirrored group turns carry their
-                      own sender, otherwise the right side is the viewer. */}
-                  {msg.role === "user" && msg.sender?.id?.startsWith("agt_") ? (
-                    <BotAvatar
-                      agentId={msg.sender.id}
-                      avatarUrl={msg.sender.avatarUrl}
-                      size={36}
-                      className="order-2 mt-6 hidden shrink-0 md:block"
-                    />
-                  ) : msg.role === "user" ? (
-                    <ChatBubbleAvatar
-                      name={msg.sender?.name || me?.user?.displayName?.trim() || me?.user?.username || ""}
-                      src={msg.sender ? msg.sender.avatarUrl : me?.user?.avatarUrl}
-                      className={`order-2 ${msg.sender ? "mt-6" : ""}`}
-                    />
-                  ) : (
-                    <BotAvatar
-                      agentId={selectedAgent}
-                      avatarUrl={agentDetail?.avatarUrl}
-                      size={36}
-                      className="hidden shrink-0 md:block"
-                    />
-                  )}
                   <div
-                    className={`group relative min-w-0 ${
-                      // Like a messenger, each side keeps a gutter toward the
-                      // other on desktop so short bubbles read as turns. Phones
-                      // give assistant content the full lane, since a gutter
-                      // there would wrap tables and code too early. User
-                      // bubbles stay hugged to the right.
-                      msg.role === "user" ? "max-w-[80%] order-1" : "max-w-full md:max-w-[80%]"
+                    className={`group relative ${
+                      // Assistant content (tables, long markdown) uses the full
+                      // lane — capped only by the lane's max-w-2xl — so it stops
+                      // wrapping early and leaving a big empty gutter on narrow
+                      // panels. User bubbles stay hugged to the right.
+                      msg.role === "user" ? "max-w-[80%] order-1" : "max-w-full"
                     }`}
                   >
                     {msg.role === "user" && msg.sender && (
-                      <div className="mb-1 flex h-5 items-center justify-end gap-2 text-xs text-muted-foreground">
+                      <div className="mb-1 flex items-center justify-end gap-2 text-xs text-muted-foreground">
                         <span className="font-medium text-foreground/80">{msg.sender.name}</span>
-                        {/* Phones have no avatar column, so keep the inline mark there. */}
-                        <span className="md:hidden">
-                          <ChatBubbleAvatar name={msg.sender.name} src={msg.sender.avatarUrl} size="small" />
-                        </span>
+                        {msg.sender.avatarUrl ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img
+                            src={msg.sender.avatarUrl}
+                            alt={msg.sender.name}
+                            className="h-5 w-5 rounded-full object-cover ring-1 ring-border"
+                          />
+                        ) : (
+                          <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary/20 text-[10px] font-semibold uppercase text-foreground">
+                            {msg.sender.name.slice(0, 1)}
+                          </span>
+                        )}
                       </div>
                     )}
                     <div
                       className={`rounded-2xl px-4 py-2.5 break-words ${
                         msg.role === "user"
-                          ? "user-chat-bubble rounded-br-md md:rounded-br-2xl md:rounded-tr-md border border-[#ded5e2] bg-[#eee9f0] text-[#29252a] dark:border-[#4b404e] dark:bg-[#342d36] dark:text-[#f8f5f9]"
-                          : "bg-[#f1f1f1] text-[#202020] rounded-bl-md md:rounded-bl-2xl md:rounded-tl-md dark:bg-white/[0.09] dark:text-foreground"
+                          ? "user-chat-bubble rounded-br-md border border-[#ded5e2] bg-[#eee9f0] text-[#29252a] dark:border-[#4b404e] dark:bg-[#342d36] dark:text-[#f8f5f9]"
+                          : "bg-[#f1f1f1] text-[#202020] rounded-bl-md dark:bg-white/[0.09] dark:text-foreground"
                       }`}
                     >
                       {(() => {
@@ -3070,11 +3049,9 @@ export function ChatScreen() {
         {/* Full-width conversation composer, matching the compact Bot layout. */}
         <div
           aria-hidden={isConversationLoading}
-          className={isConversationLoading ? "hidden" : "shrink-0 px-4 pb-5 pt-2"}
+          className={isConversationLoading ? "hidden" : "shrink-0 px-3 pb-5 pt-2 sm:px-5"}
         >
-          {/* Same lane as the message list (px-4 + max-w-5xl) so the
-              composer's edges line up with the bubbles above it. */}
-          <div className="relative mx-auto w-full max-w-5xl">
+          <div className="relative mx-auto w-full">
             {isReadOnlyChannel && (
               // The web compose path can't deliver into upstream IM
               // platforms (no reverse channel adapter, no outbound
@@ -3245,22 +3222,20 @@ export function ChatScreen() {
                   >
                     <Square className="size-3 fill-current" />
                   </Button>
-                ) : (
-                  // Always present so the composer reads as sendable; it
-                  // stays dimmed until there's something to send.
+                ) : input.trim() || attachments.length > 0 ? (
                   <Button
                     onMouseDown={(event) => {
                       event.preventDefault();
                       handleSend();
                     }}
-                    disabled={!canSendComposer || !(input.trim() || attachments.length > 0)}
+                    disabled={!canSendComposer}
                     size="icon"
-                    className="size-8 shrink-0 rounded-full bg-[#111] text-white hover:bg-black disabled:bg-black/15 disabled:text-white disabled:opacity-100 dark:bg-white dark:text-black dark:hover:bg-white/90 dark:disabled:bg-white/20 dark:disabled:text-black/60"
+                    className="size-8 shrink-0 rounded-full bg-[#111] text-white hover:bg-black disabled:bg-[#111] disabled:text-white/70 dark:bg-white dark:text-black dark:hover:bg-white/90"
                     aria-label={t("composer.send")}
                   >
                     <ArrowUp className="size-[17px] stroke-[2.25]" />
                   </Button>
-                )}
+                ) : null}
               </div>
             </div>
           </div>
@@ -3308,9 +3283,6 @@ export function ChatScreen() {
           onOpenSettingsTab={openBotSettingsTab}
           onOpenWorkspace={openWorkspaceFromBotPanel}
           workspaceAvailable={Boolean(routeSessionId || urlProjectId)}
-          // Same scope as the WorkspacePanel below.
-          filesSessionId={routeSessionId ? sessionId : ""}
-          filesProjectId={!routeSessionId && urlProjectId ? urlProjectId : undefined}
           onSelectProject={(projectId) => {
             router.push(`/agents/${selectedAgent}/project/${encodeURIComponent(projectId)}/`);
           }}
@@ -3348,7 +3320,6 @@ export function ChatScreen() {
           // routeSessionId is set and we pass the real sessionId.
           sessionId={routeSessionId ? sessionId : ""}
           projectId={!routeSessionId && urlProjectId ? urlProjectId : undefined}
-          initialPreview={workspaceInitialFile}
           knowledgePreview={knowledgePreview}
           onClearKnowledgePreview={() => setKnowledgePreview(null)}
           onPreviewStateChange={handleWorkspacePreviewChange}
@@ -3357,7 +3328,6 @@ export function ChatScreen() {
               ? () => {
                   setFilesSheetOpen(false);
                   setKnowledgePreview(null);
-                  setWorkspaceInitialFile(null);
                   setWorkspaceReturnsToBotPanel(false);
                   setBotPanelOpen(true);
                 }
@@ -3366,7 +3336,6 @@ export function ChatScreen() {
           onClose={() => {
             setFilesSheetOpen(false);
             setKnowledgePreview(null);
-            setWorkspaceInitialFile(null);
             setWorkspaceReturnsToBotPanel(false);
           }}
         />
@@ -3582,27 +3551,6 @@ const BOT_QUICK_ACTIONS: Array<{
   { id: "settings", labelKey: "sidebar.moreSettings", icon: Settings, action: "settings" },
 ];
 
-const BOT_PANEL_ICON_BUTTON =
-  "flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/8";
-
-const BOT_PANEL_CARD_BG = (active: boolean) =>
-  active
-    ? "bg-black/[0.065] dark:bg-white/[0.11]"
-    : "hover:bg-black/[0.04] dark:hover:bg-white/[0.07]";
-
-// Card timestamp: clock time today, otherwise a short date.
-function formatTopicCardTime(ms?: number): string {
-  if (!ms) return "";
-  const date = new Date(ms);
-  const now = new Date();
-  if (date.toDateString() === now.toDateString()) {
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
-  }
-  return date.toLocaleDateString([], date.getFullYear() === now.getFullYear()
-    ? { month: "numeric", day: "numeric" }
-    : { year: "numeric", month: "numeric", day: "numeric" });
-}
-
 function BotControlPanel({
   agentId,
   projects,
@@ -3615,8 +3563,6 @@ function BotControlPanel({
   onOpenSettingsTab,
   onOpenWorkspace,
   workspaceAvailable,
-  filesSessionId,
-  filesProjectId,
   onSelectProject,
   onProjectsChanged,
   onSelectTopic,
@@ -3633,11 +3579,8 @@ function BotControlPanel({
   agentRole?: "owner" | "viewer";
   onOpenSettings: () => void;
   onOpenSettingsTab: (tab: AgentSettingsTab, userOnly?: boolean) => void;
-  onOpenWorkspace: (file?: ProducedFile) => void;
+  onOpenWorkspace: () => void;
   workspaceAvailable: boolean;
-  // Files tab scope — one of them is set once the conversation exists.
-  filesSessionId: string;
-  filesProjectId?: string;
   onSelectProject: (projectId: string) => void;
   onProjectsChanged: () => void;
   onSelectTopic: (sessionId: string) => void;
@@ -3646,10 +3589,7 @@ function BotControlPanel({
   onClose: () => void;
 }) {
   const { t, tr } = useLocale();
-  const [panelTab, setPanelTab] = useState<"chats" | "projects" | "files" | "agent">(
-    () => (activeProjectId ? "projects" : "chats"),
-  );
-  const [scopeFiles, setScopeFiles] = useState<{ key: string; files: WorkspaceFile[] } | null>(null);
+  const [showAllProjects, setShowAllProjects] = useState(false);
   const [visibleTopicCount, setVisibleTopicCount] = useState(10);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(
     () => new Set(expandedProjectId ? [expandedProjectId] : []),
@@ -3756,29 +3696,7 @@ function BotControlPanel({
     });
   }, [expandedProjectId]);
 
-  // The Files tab lists the current conversation's (or project landing's)
-  // workspace, fetched each time the tab is shown or the scope changes.
-  // Results are keyed by scope; a stale key reads as loading.
-  const filesScopeKey = filesProjectId ? `p:${filesProjectId}` : filesSessionId ? `s:${filesSessionId}` : "";
-  useEffect(() => {
-    if (panelTab !== "files" || !filesScopeKey) return;
-    let cancelled = false;
-    (filesProjectId
-      ? listAgentFiles(agentId, undefined, filesProjectId)
-      : listAgentFiles(agentId, filesSessionId))
-      .catch(() => [] as WorkspaceFile[])
-      .then((list) => {
-        if (!cancelled) {
-          setScopeFiles({ key: filesScopeKey, files: list.filter((f) => !isSystemFile(f.path)) });
-        }
-      });
-    return () => {
-      cancelled = true;
-      setScopeFiles(null);
-    };
-  }, [panelTab, agentId, filesScopeKey, filesSessionId, filesProjectId]);
-  const visibleScopeFiles = scopeFiles?.key === filesScopeKey ? scopeFiles.files : null;
-
+  const visibleProjects = showAllProjects ? projects : projects.slice(0, 5);
   const sortedTopics = useMemo(
     () => [...topics].sort((a, b) => (b.updatedAt || b.createdAt || 0) - (a.updatedAt || a.createdAt || 0)),
     [topics],
@@ -3856,266 +3774,25 @@ function BotControlPanel({
           role="separator"
           title={tr("Drag to resize · Double-click to reset", "拖动调整宽度 · 双击恢复默认宽度")}
         />
-        <div className="flex h-14 shrink-0 items-center gap-0.5 pl-5 pr-3">
-          <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-foreground">
-            {t("workspace.title")}
+        <div className="flex h-14 shrink-0 items-center justify-between gap-3 px-5">
+          <h2 className="min-w-0 truncate text-sm font-semibold text-foreground">
+            {t("common.agent")}
           </h2>
-          {panelTab === "chats" && (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    onClick={onNewTopic}
-                    className={BOT_PANEL_ICON_BUTTON}
-                    aria-label={tr("New chat", "新建对话")}
-                  >
-                    <SquarePen className="size-[18px]" />
-                  </button>
-                }
-              />
-              <TooltipContent side="bottom">
-                <span>{tr("New chat", "新建对话")}</span>
-                <kbd data-slot="kbd" className="bg-background/15 px-1.5 py-0.5 text-[10px]">⌘N</kbd>
-              </TooltipContent>
-            </Tooltip>
-          )}
-          {panelTab === "files" && workspaceAvailable && (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    onClick={() => onOpenWorkspace()}
-                    className={BOT_PANEL_ICON_BUTTON}
-                    aria-label={t("workspace.open")}
-                  >
-                    <PanelRight className="size-[18px]" />
-                  </button>
-                }
-              />
-              <TooltipContent side="bottom">{t("workspace.open")}</TooltipContent>
-            </Tooltip>
-          )}
-          {panelTab === "projects" && (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    onClick={() => setCreateProjectOpen(true)}
-                    className={BOT_PANEL_ICON_BUTTON}
-                    aria-label={tr("New project", "新建项目")}
-                  >
-                    <FolderPlus className="size-[18px]" />
-                  </button>
-                }
-              />
-              <TooltipContent side="bottom">{tr("New project", "新建项目")}</TooltipContent>
-            </Tooltip>
-          )}
           <button
             type="button"
             onClick={onClose}
-            className={BOT_PANEL_ICON_BUTTON}
-            aria-label={tr("Close Agent panel", "关闭 Agent 侧栏")}
-            title={tr("Close", "关闭")}
+            className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/8"
+            aria-label={tr("Collapse Agent panel", "收起 Agent 侧栏")}
+            title={tr("Collapse", "收起")}
           >
-            <X className="size-[18px]" />
+            <ChevronsRight className="size-[18px]" />
           </button>
         </div>
 
-        <div className="shrink-0 px-4 pt-1">
-          <div
-            role="tablist"
-            aria-label={t("common.agent")}
-            className="grid grid-cols-4 rounded-[10px] bg-black/[0.045] p-[3px] dark:bg-white/[0.06]"
-          >
-            {([
-              ["chats", tr("Chats", "话题")],
-              ["projects", tr("Projects", "项目")],
-              ["files", tr("Files", "文件")],
-              ["agent", tr("Settings", "设置")],
-            ] as const).map(([id, label]) => {
-              const selected = panelTab === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  role="tab"
-                  aria-selected={selected}
-                  onClick={() => setPanelTab(id)}
-                  className={`h-7 min-w-0 truncate rounded-[7px] px-2 text-[13px] transition-[background-color,color,box-shadow] focus-visible:ring-2 focus-visible:ring-ring ${
-                    selected
-                      ? "bg-background font-medium text-foreground shadow-[0_1px_2px_rgba(0,0,0,0.06),0_1px_6px_-1px_rgba(0,0,0,0.08)] dark:bg-white/[0.12] dark:shadow-none"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-8 pt-3">
-          {panelTab === "chats" && (
-            looseTopics.length === 0 ? (
-              <p className="px-1 py-6 text-center text-sm leading-5 text-muted-foreground/75">
-                {tr("Recent chats appear here after you send a message.", "发送消息后，最近话题会显示在这里。")}
-              </p>
-            ) : (
-              <div className="space-y-1">
-                {visibleRecentTopics.map((topic) => (
-                  <BotTopicCard
-                    key={topic.id}
-                    topic={topic}
-                    agentId={agentId}
-                    active={topic.id === activeTopicId}
-                    onSelect={() => onSelectTopic(topic.id)}
-                    onRename={() => setEditTopic(topic)}
-                    onDelete={() => setDeleteTopic(topic)}
-                  />
-                ))}
-                {hiddenTopicCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setVisibleTopicCount((current) =>
-                        Math.min(current + 10, looseTopics.length),
-                      );
-                    }}
-                    className="flex h-9 w-full items-center justify-center gap-1.5 rounded-xl text-[13px] font-medium text-muted-foreground transition hover:bg-black/[0.04] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/[0.07]"
-                  >
-                    <ChevronDown className="size-4 shrink-0" />
-                    <span>{tr("Load more", "加载更多")}</span>
-                    <span className="text-xs tabular-nums text-muted-foreground/70">{hiddenTopicCount}</span>
-                  </button>
-                )}
-              </div>
-            )
-          )}
-
-          {panelTab === "projects" && (
-            projects.length === 0 ? (
-              <div className="flex flex-col items-center gap-3 px-1 py-6 text-center">
-                <p className="text-sm leading-5 text-muted-foreground/75">{tr("No projects yet", "还没有项目")}</p>
-                <button
-                  type="button"
-                  onClick={() => setCreateProjectOpen(true)}
-                  className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-black/[0.04] px-3.5 text-sm font-medium text-foreground transition hover:bg-black/[0.07] focus-visible:ring-2 focus-visible:ring-ring dark:bg-white/[0.06] dark:hover:bg-white/[0.1]"
-                >
-                  <FolderPlus className="size-4" />
-                  {tr("New project", "新建项目")}
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {projects.map((project) => {
-                  const active = project.id === activeProjectId;
-                  const open = expandedProjects.has(project.id);
-                  const projectTopics = topicsByProject.get(project.id) || [];
-                  return (
-                    <div key={project.id}>
-                      <div className={`group relative rounded-xl transition-colors ${BOT_PANEL_CARD_BG(active)}`}>
-                        <button
-                          type="button"
-                          onClick={() => handleProjectClick(project.id, active)}
-                          className="flex w-full min-w-0 flex-col gap-0.5 rounded-xl px-3 py-2.5 pr-10 text-left focus-visible:ring-2 focus-visible:ring-ring"
-                          aria-current={active ? "page" : undefined}
-                          aria-expanded={open}
-                          title={project.name}
-                        >
-                          <span className="flex min-w-0 items-center gap-2">
-                            {open ? (
-                              <FolderOpen className="size-4 shrink-0 text-foreground/80" />
-                            ) : (
-                              <Folder className="size-4 shrink-0 text-foreground/80" />
-                            )}
-                            <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{project.name}</span>
-                          </span>
-                          <span className="truncate text-xs text-muted-foreground">
-                            {[
-                              tr("{{count}} chats", "{{count}} 个话题", { count: projectTopics.length }),
-                              project.description?.trim(),
-                            ].filter(Boolean).join("  ·  ")}
-                          </span>
-                        </button>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger
-                            render={
-                              <button
-                                type="button"
-                                onClick={(event) => event.stopPropagation()}
-                                className={`absolute right-2 top-2 flex size-7 items-center justify-center rounded-lg text-muted-foreground transition-opacity hover:bg-background/70 hover:text-foreground aria-expanded:opacity-100 ${
-                                  active ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-                                }`}
-                                aria-label={tr("More actions for {{name}}", "{{name}} 的更多操作", { name: project.name })}
-                              >
-                                <MoreHorizontal className="size-4" />
-                              </button>
-                            }
-                          />
-                          <DropdownMenuContent align="end" className="w-40 rounded-xl">
-                            <DropdownMenuItem onClick={() => onSelectProject(project.id)}>
-                              <Plus className="size-4 text-muted-foreground" />
-                              {tr("New chat in project", "新建项目话题")}
-                            </DropdownMenuItem>
-                            <DropdownMenuItem onClick={() => setEditProject(project)}>
-                              <Pencil className="size-4 text-muted-foreground" />
-                              {tr("Edit project", "编辑项目")}
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
-                      </div>
-                      {open && projectTopics.length > 0 && (
-                        <div className="mb-1 ml-4 mt-1 space-y-0.5 border-l border-border/70 pl-2">
-                          {projectTopics.map((topic) => (
-                            <BotTopicCard
-                              key={topic.id}
-                              topic={topic}
-                              agentId={agentId}
-                              active={topic.id === activeTopicId}
-                              compact
-                              onSelect={() => onSelectTopic(topic.id)}
-                              onRename={() => setEditTopic(topic)}
-                              onDelete={() => setDeleteTopic(topic)}
-                            />
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )
-          )}
-
-          {panelTab === "files" && (
-            !workspaceAvailable ? (
-              <p className="px-1 py-6 text-center text-sm leading-5 text-muted-foreground/75">
-                {t("workspace.unavailable")}
-              </p>
-            ) : visibleScopeFiles === null ? (
-              <div className="flex justify-center py-6">
-                <LoaderCircle className="size-4 animate-spin text-muted-foreground" />
-              </div>
-            ) : visibleScopeFiles.length === 0 ? (
-              <p className="px-1 py-6 text-center text-sm leading-5 text-muted-foreground/75">
-                {tr("Files the agent creates in this chat appear here.", "Agent 在本话题中生成的文件会显示在这里。")}
-              </p>
-            ) : (
-              <FileTreeView
-                files={visibleScopeFiles}
-                rootPrefix={filesProjectId ? `projects/${filesProjectId}/` : `sessions/${filesSessionId}/`}
-                onSelect={(file) => onOpenWorkspace(file)}
-              />
-            )
-          )}
-
-          {panelTab === "agent" && (
-            <div className="overflow-hidden rounded-xl bg-black/[0.03] dark:bg-white/[0.05]">
-              {BOT_QUICK_ACTIONS.map((action, index) => {
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-1">
+          <section aria-label={t("common.agent")} className="mb-5">
+            <div className="grid grid-cols-3 gap-1 rounded-2xl border border-border/70 bg-muted/25 p-1">
+              {BOT_QUICK_ACTIONS.map((action) => {
                 const Icon = action.icon;
                 const label = t(action.labelKey);
                 const disabled =
@@ -4134,19 +3811,246 @@ function BotControlPanel({
                       else if (action.tab) onOpenSettingsTab(action.tab, action.userOnly);
                     }}
                     disabled={disabled}
-                    className={`flex h-11 w-full min-w-0 items-center gap-3 px-3.5 text-left text-foreground transition-colors hover:bg-black/[0.04] focus-visible:bg-black/[0.04] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.06] ${
-                      index > 0 ? "border-t border-black/[0.05] dark:border-white/[0.06]" : ""
-                    }`}
+                    className="group flex min-h-[68px] min-w-0 flex-col items-center justify-center gap-1.5 rounded-xl px-1.5 py-2 text-muted-foreground transition-[background-color,color,box-shadow,transform] hover:-translate-y-px hover:bg-background hover:text-foreground hover:shadow-sm focus-visible:bg-background focus-visible:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background active:translate-y-0 disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:translate-y-0 disabled:hover:bg-transparent disabled:hover:text-muted-foreground disabled:hover:shadow-none dark:hover:bg-white/[0.06] dark:hover:shadow-none dark:disabled:hover:bg-transparent"
+                    aria-label={label}
                     title={title}
                   >
-                    <Icon className="size-4 shrink-0 stroke-[1.8] text-muted-foreground" />
-                    <span className="min-w-0 flex-1 truncate text-sm">{label}</span>
-                    <ChevronRight className="size-4 shrink-0 text-muted-foreground/70" />
+                    <Icon className="size-[18px] stroke-[1.7] transition-transform group-hover:scale-105" />
+                    <span className="max-w-full truncate text-[12px] font-medium leading-4">
+                      {label}
+                    </span>
                   </button>
                 );
               })}
             </div>
-          )}
+          </section>
+
+          <section>
+            <div className="mb-1 flex h-7 items-center justify-between px-1">
+              <h3 className="text-sm font-semibold text-muted-foreground">{tr("Projects", "项目")}</h3>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      onClick={() => setCreateProjectOpen(true)}
+                      className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/8"
+                      aria-label={tr("New project", "新建项目")}
+                    >
+                      <FolderPlus className="size-4" />
+                    </button>
+                  }
+                />
+                <TooltipContent side="left">{tr("New project", "新建项目")}</TooltipContent>
+              </Tooltip>
+            </div>
+            {projects.length === 0 ? (
+              <p className="px-2 py-1.5 text-sm leading-5 text-muted-foreground/75">{tr("No projects yet", "还没有项目")}</p>
+            ) : (
+              <div>
+                {visibleProjects.map((project) => {
+                  const active = project.id === activeProjectId;
+                  const open = expandedProjects.has(project.id);
+                  const projectTopics = topicsByProject.get(project.id) || [];
+                  return (
+                    <div key={project.id}>
+                      <div
+                        className={`group relative -ml-2 w-[calc(100%+0.5rem)] rounded-xl transition-colors ${
+                          active
+                            ? "bg-black/[0.07] dark:bg-white/[0.11]"
+                            : "hover:bg-black/[0.04] dark:hover:bg-white/[0.07]"
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => handleProjectClick(project.id, active)}
+                          className="flex h-10 w-full min-w-0 items-center gap-2.5 rounded-xl pl-[1.125rem] pr-[4.5rem] text-left focus-visible:ring-2 focus-visible:ring-ring"
+                          aria-current={active ? "page" : undefined}
+                          aria-expanded={open}
+                          title={project.name}
+                        >
+                          {open ? (
+                            <FolderOpen className="size-[17px] shrink-0 text-foreground/85" />
+                          ) : (
+                            <Folder className="size-[17px] shrink-0 text-foreground/85" />
+                          )}
+                          <span className="min-w-0 flex-1 truncate text-[15px] font-medium">
+                            {project.name}
+                          </span>
+                        </button>
+                        <div className={`absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-0.5 transition-opacity ${
+                          active ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                        }`}>
+                          <DropdownMenu>
+                            <DropdownMenuTrigger
+                              render={
+                                <button
+                                  type="button"
+                                  onClick={(event) => event.stopPropagation()}
+                                  className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-background/70 hover:text-foreground"
+                                  aria-label={tr("More actions for {{name}}", "{{name}} 的更多操作", { name: project.name })}
+                                >
+                                  <MoreHorizontal className="size-4" />
+                                </button>
+                              }
+                            />
+                            <DropdownMenuContent align="end" className="w-40 rounded-xl">
+                              <DropdownMenuItem onClick={() => onSelectProject(project.id)}>
+                                <Plus className="size-4 text-muted-foreground" />
+                                {tr("New chat in project", "新建项目话题")}
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onClick={() => setEditProject(project)}>
+                                <Pencil className="size-4 text-muted-foreground" />
+                                {tr("Edit project", "编辑项目")}
+                              </DropdownMenuItem>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                          <button
+                            type="button"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setEditProject(project);
+                            }}
+                            className="flex size-7 items-center justify-center rounded-md text-muted-foreground hover:bg-background/70 hover:text-foreground"
+                            aria-label={tr("Edit {{name}}", "编辑 {{name}}", { name: project.name })}
+                            title={tr("Edit project", "编辑项目")}
+                          >
+                            <Pencil className="size-4" />
+                          </button>
+                        </div>
+                      </div>
+                      {open && projectTopics.length > 0 && (
+                        <div className="-ml-2 mt-1 w-[calc(100%+0.5rem)] space-y-1 pb-1">
+                          {projectTopics.map((topic) => (
+                            <BotTopicNavigationRow
+                              key={topic.id}
+                              topic={topic}
+                              agentId={agentId}
+                              active={topic.id === activeTopicId}
+                              nested
+                              onSelect={() => onSelectTopic(topic.id)}
+                              onRename={() => setEditTopic(topic)}
+                              onDelete={() => setDeleteTopic(topic)}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {projects.length > 5 && (
+              <button
+                type="button"
+                onClick={() => setShowAllProjects((value) => !value)}
+                className="mt-1 rounded-lg px-1 py-1 text-sm font-medium text-muted-foreground transition hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                {showAllProjects ? tr("Show less", "收起") : tr("Show all", "展开显示")}
+              </button>
+            )}
+          </section>
+
+          <section className="mt-5">
+            <div className="mb-1 flex h-7 items-center justify-between px-1">
+              <h3 className="text-sm font-semibold text-muted-foreground">{tr("Recent", "最近")}</h3>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <button
+                      type="button"
+                      onClick={onNewTopic}
+                      className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/8"
+                      aria-label={tr("New chat", "新建对话")}
+                    >
+                      <SquarePen className="size-4" />
+                    </button>
+                  }
+                />
+                <TooltipContent side="left">
+                  <span>{tr("New chat", "新建对话")}</span>
+                  <kbd data-slot="kbd" className="bg-background/15 px-1.5 py-0.5 text-[10px]">⌘N</kbd>
+                </TooltipContent>
+              </Tooltip>
+            </div>
+            {visibleRecentTopics.length === 0 ? (
+              <p className="px-2 py-1.5 text-sm leading-5 text-muted-foreground/75">{tr("Recent chats appear here after you send a message.", "发送消息后，最近话题会显示在这里。")}</p>
+            ) : (
+              <div>
+                {visibleRecentTopics.map((topic) => {
+                  const active = topic.id === activeTopicId;
+                  const topicTitle = topic.title?.trim() || topic.preview?.trim() || tr("Untitled chat", "未命名话题");
+                  return (
+                    <div
+                      key={topic.id}
+                      className={`group relative -ml-2 w-[calc(100%+0.5rem)] rounded-md transition-colors ${
+                        active
+                          ? "bg-black/[0.07] font-medium text-foreground dark:bg-white/[0.11]"
+                          : "hover:bg-black/[0.04] dark:hover:bg-white/[0.07]"
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => onSelectTopic(topic.id)}
+                        className="flex w-full min-w-0 items-center gap-2.5 rounded-md py-1.5 pl-3 pr-9 text-left text-[15px] leading-5 focus-visible:ring-2 focus-visible:ring-ring"
+                        aria-current={active ? "page" : undefined}
+                      >
+                        <ChatSessionLeadingVisual topic={topic} />
+                        <span className="min-w-0 flex-1 truncate">{topicTitle}</span>
+                        <TopicRunStatus agentId={agentId} sessionId={topic.id} fallback={topic.status} />
+                      </button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger
+                          render={
+                            <button
+                              type="button"
+                              onClick={(event) => event.stopPropagation()}
+                              className={`absolute right-1 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-opacity hover:bg-background/60 hover:text-foreground aria-expanded:opacity-100 ${
+                                active ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                              }`}
+                              aria-label={tr("More actions for {{name}}", "{{name}} 的更多操作", { name: topicTitle })}
+                            >
+                              <MoreHorizontal className="size-4" />
+                            </button>
+                          }
+                        />
+                        <DropdownMenuContent align="end" className="w-36 rounded-xl">
+                          <DropdownMenuItem onClick={() => setEditTopic(topic)}>
+                            <Pencil className="size-4 text-muted-foreground" />
+                            {tr("Rename", "重命名")}
+                          </DropdownMenuItem>
+                          <DropdownMenuItem
+                            onClick={() => setDeleteTopic(topic)}
+                            className="text-destructive focus:text-destructive"
+                          >
+                            <Trash2 className="size-4 text-destructive" />
+                            {tr("Delete", "删除")}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  );
+                })}
+                {hiddenTopicCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setVisibleTopicCount((current) =>
+                        Math.min(current + 10, looseTopics.length),
+                      );
+                    }}
+                    className="mt-1 flex h-9 w-full items-center gap-2.5 rounded-lg px-3 text-left text-sm font-medium text-muted-foreground transition hover:bg-black/[0.04] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/[0.07]"
+                  >
+                    <ChevronDown className="size-4 shrink-0" />
+                    <span>{tr("Load more", "加载更多")}</span>
+                    <span className="ml-auto text-xs tabular-nums text-muted-foreground/70">
+                      {hiddenTopicCount}
+                    </span>
+                  </button>
+                )}
+              </div>
+            )}
+          </section>
         </div>
       </aside>
       {createProjectOpen && (
@@ -4214,43 +4118,6 @@ function TopicRunStatus({ agentId, sessionId, fallback }: { agentId: string; ses
   );
 }
 
-// ChatBubbleAvatar is the person side of a chat row: their photo, or an
-// initial on a tinted square. "small" is the inline mark used in the
-// sender line on phones; the default is the desktop avatar column.
-function ChatBubbleAvatar({
-  name,
-  src,
-  size = "default",
-  className = "",
-}: {
-  name: string;
-  src?: string;
-  size?: "default" | "small";
-  className?: string;
-}) {
-  const box = size === "small"
-    ? "size-5 rounded-full text-[10px]"
-    : "hidden size-9 shrink-0 rounded-[10px] text-sm md:flex";
-  if (src) {
-    return (
-      // eslint-disable-next-line @next/next/no-img-element
-      <img
-        src={src}
-        alt={name}
-        className={`${box} object-cover ring-1 ring-border ${size === "small" ? "inline-block" : ""} ${className}`}
-      />
-    );
-  }
-  return (
-    <span
-      aria-hidden="true"
-      className={`${box} ${size === "small" ? "flex" : ""} items-center justify-center bg-[#e4dce8] font-semibold uppercase text-[#5b4c60] dark:bg-[#3d3340] dark:text-[#e6dbe9] ${className}`}
-    >
-      {name.trim().slice(0, 1) || "?"}
-    </span>
-  );
-}
-
 function ChatSessionLeadingVisual({ topic }: { topic: ChatSession }) {
   const isWeb = !topic.channel || topic.channel === "web";
   if (isWeb && topic.thumbnailUrl) {
@@ -4264,28 +4131,18 @@ function ChatSessionLeadingVisual({ topic }: { topic: ChatSession }) {
     );
   }
   if (isWeb) return null;
-  // Non-web chats lead with their source: the IM brand mark, or a code
-  // glyph for API / unknown channels, so the origin reads at a glance.
   return (
-    <span
-      className="flex size-5 shrink-0 items-center justify-center text-muted-foreground"
-      title={channelLabel(topic.channel)}
-      aria-label={channelLabel(topic.channel)}
-    >
-      {hasChannelIcon(topic.channel) ? (
-        <ChannelIcon channel={topic.channel} className="size-4 shrink-0" />
-      ) : (
-        <Code2 className="size-4 shrink-0 stroke-[1.8]" />
-      )}
+    <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
+      <ChannelIcon channel={topic.channel} className="size-4 shrink-0" />
     </span>
   );
 }
 
-function BotTopicCard({
+function BotTopicNavigationRow({
   topic,
   agentId,
   active,
-  compact = false,
+  nested = false,
   onSelect,
   onRename,
   onDelete,
@@ -4293,44 +4150,32 @@ function BotTopicCard({
   topic: ChatSession;
   agentId: string;
   active: boolean;
-  compact?: boolean;
+  nested?: boolean;
   onSelect: () => void;
   onRename: () => void;
   onDelete: () => void;
 }) {
   const { tr } = useLocale();
   const topicTitle = topic.title?.trim() || topic.preview?.trim() || tr("Untitled chat", "未命名话题");
-  const preview = topic.preview?.trim();
-  const time = formatTopicCardTime(topic.updatedAt || topic.createdAt);
-  // The channel shows as the leading icon; the second line is only for
-  // a preview that adds to the title.
-  const meta = preview && preview !== topicTitle ? preview : "";
   return (
-    <div className={`group relative rounded-xl transition-colors ${BOT_PANEL_CARD_BG(active)}`}>
+    <div
+      className={`group relative rounded-md transition-colors ${
+        active
+          ? "bg-black/[0.07] font-medium text-foreground dark:bg-white/[0.11]"
+          : "hover:bg-black/[0.04] dark:hover:bg-white/[0.07]"
+      }`}
+    >
       <button
         type="button"
         onClick={onSelect}
-        className={`flex w-full min-w-0 flex-col text-left focus-visible:ring-2 focus-visible:ring-ring ${
-          compact ? "rounded-xl px-2.5 py-1.5" : "gap-0.5 rounded-xl px-3 py-2.5"
+        className={`flex w-full min-w-0 items-center gap-2.5 rounded-md py-1.5 pr-8 text-left leading-5 focus-visible:ring-2 focus-visible:ring-ring ${
+          nested ? "pl-[2.75rem] text-[15px]" : "pl-2 text-[15px]"
         }`}
         aria-current={active ? "page" : undefined}
-        title={topicTitle}
       >
-        <span className="flex min-w-0 items-center gap-2">
-          <ChatSessionLeadingVisual topic={topic} />
-          <span className={`min-w-0 flex-1 truncate text-sm leading-5 text-foreground ${active ? "font-medium" : ""}`}>
-            {topicTitle}
-          </span>
-          <TopicRunStatus agentId={agentId} sessionId={topic.id} fallback={topic.status} />
-          {time && (
-            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground/80 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
-              {time}
-            </span>
-          )}
-        </span>
-        {!compact && meta && (
-          <span className="truncate text-xs leading-4 text-muted-foreground">{meta}</span>
-        )}
+        <ChatSessionLeadingVisual topic={topic} />
+        <span className="min-w-0 flex-1 truncate">{topicTitle}</span>
+        <TopicRunStatus agentId={agentId} sessionId={topic.id} fallback={topic.status} />
       </button>
       <DropdownMenu>
         <DropdownMenuTrigger
@@ -4338,8 +4183,8 @@ function BotTopicCard({
             <button
               type="button"
               onClick={(event) => event.stopPropagation()}
-              className={`absolute flex size-7 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-opacity hover:bg-background/70 hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 aria-expanded:opacity-100 ${
-                compact ? "right-1 top-1/2 -translate-y-1/2" : "right-1.5 top-1.5"
+              className={`absolute right-1 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground transition-opacity hover:bg-background/60 hover:text-foreground aria-expanded:opacity-100 ${
+                active ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
               }`}
               aria-label={tr("More actions for {{name}}", "{{name}} 的更多操作", { name: topicTitle })}
             >
@@ -5268,7 +5113,6 @@ function WorkspacePanel({
   agentId,
   sessionId,
   projectId,
-  initialPreview,
   knowledgePreview,
   onClearKnowledgePreview,
   onPreviewStateChange,
@@ -5278,8 +5122,6 @@ function WorkspacePanel({
   agentId: string;
   sessionId: string;
   projectId?: string;
-  // File to open in the viewer on mount (picked in the Agent panel).
-  initialPreview?: ProducedFile | null;
   knowledgePreview?: KnowledgeSource | null;
   onClearKnowledgePreview?: () => void;
   onPreviewStateChange?: (active: boolean) => void;
@@ -5289,7 +5131,7 @@ function WorkspacePanel({
   const { locale, t, tr } = useLocale();
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
   const [loading, setLoading] = useState(false);
-  const [previewing, setPreviewing] = useState<ProducedFile | null>(initialPreview ?? null);
+  const [previewing, setPreviewing] = useState<ProducedFile | null>(null);
   // Live dev-server preview for this chat scope (from start_app_preview).
   const [appPreview, setAppPreview] = useState<ScopePreview>({ status: "none" });
   // Live build/dev log tail, shown in the preview pane while the app is
@@ -5470,12 +5312,7 @@ function WorkspacePanel({
   // Switching conversations swaps the file tree to the new scope — clear the
   // selected file too, so the viewer never shows a file from the previous
   // conversation (the tree refetches but `previewing` would otherwise linger).
-  // The mount run is skipped so `initialPreview` survives.
-  const previewScopeRef = useRef(`${agentId}|${sessionId}|${projectId ?? ""}`);
   useEffect(() => {
-    const scope = `${agentId}|${sessionId}|${projectId ?? ""}`;
-    if (previewScopeRef.current === scope) return;
-    previewScopeRef.current = scope;
     setPreviewing(null);
   }, [agentId, sessionId, projectId]);
 
