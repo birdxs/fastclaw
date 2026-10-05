@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -974,6 +975,36 @@ func (s *Server) workspaceSessionScope(ctx context.Context, agentID, urlToken st
 	return chatID
 }
 
+// newWebSessionKey matches the session ids the web client mints for a new
+// chat (`s-<unix ms>-<base36>`).
+var newWebSessionKey = regexp.MustCompile(`^s-[0-9]+-[a-z0-9]+$`)
+
+// newChatUploadScope places an upload for a chat that doesn't exist yet,
+// mirroring what the chat request will create: a new web session's chat id
+// is its session key (Agent.recoverWebTriple), and a new chat started in a
+// project lives in that project. Only for unclaimed web session keys — a
+// key some session of this agent already uses (any user's) gets no scope —
+// and only for the caller's own projects.
+func (s *Server) newChatUploadScope(r *http.Request, agentID, sessionKey, projectID string) (sessionID, projectOut string) {
+	if s.dataStore == nil || !newWebSessionKey.MatchString(sessionKey) {
+		return "", ""
+	}
+	if _, err := s.dataStore.LookupSessionOwner(r.Context(), agentID, sessionKey); !errors.Is(err, store.ErrNotFound) {
+		return "", ""
+	}
+	if projectID != "" {
+		ident, ok := auth.FromContext(r.Context())
+		if !ok || ident.EffectiveUserID() == "" {
+			return "", ""
+		}
+		if p, err := s.dataStore.GetProject(r.Context(), ident.EffectiveUserID(), agentID, projectID); err != nil || p == nil {
+			return "", ""
+		}
+		return "", projectID
+	}
+	return sessionKey, ""
+}
+
 // foreignSessionChatID resolves a session_key to its chat_id under the
 // session's own user. Only for callers already verified to own the agent.
 func (s *Server) foreignSessionChatID(ctx context.Context, agentID, sessionKey string) string {
@@ -1460,6 +1491,11 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 	sessionKey := r.URL.Query().Get("sessionId")
 	sessionID := s.workspaceSessionScope(r.Context(), id, sessionKey)
 	projectID := s.resolveSessionProject(r.Context(), r, id, sessionKey)
+	if sessionID == "" && projectID == "" {
+		// The first message of a new chat uploads before the chat request
+		// creates the session; land the files where that chat will look.
+		sessionID, projectID = s.newChatUploadScope(r, id, sessionKey, r.URL.Query().Get("projectId"))
+	}
 	if projectID != "" {
 		// Project sessions don't use the per-chat subdir — clear it so
 		// the workspace store routes to projects/<pid>/.
