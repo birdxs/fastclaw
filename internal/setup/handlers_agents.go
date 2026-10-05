@@ -1310,21 +1310,10 @@ func (s *Server) handleAgentWorkspaceReveal(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	rawSession := r.URL.Query().Get("sessionId")
-	rawProject := r.URL.Query().Get("projectId")
-
-	// Resolve to the same (project, chatID) the chat-side panel is
-	// scoped to. Empty rawSession + non-empty projectId means project
-	// landing — reveal the project root. Empty both means agent root
-	// (admin browser); we still allow it because requireAgentReadable
-	// has already gated access.
-	chatID := ""
-	projectID := rawProject
-	if rawSession != "" {
-		chatID = s.workspaceSessionScope(r.Context(), id, rawSession)
-		if pid := s.resolveSessionProject(r.Context(), r, id, rawSession); pid != "" {
-			projectID = pid
-		}
+	projectID, chatID, ok := s.revealScope(r, id, r.URL.Query().Get("sessionId"), r.URL.Query().Get("projectId"))
+	if !ok {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
 	}
 
 	dir, ok := scoper.LocalScopeDir(id, projectID, chatID)
@@ -1346,6 +1335,38 @@ func (s *Server) handleAgentWorkspaceReveal(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "path": dir})
+}
+
+// revealScope resolves the (project, chat) folder to open, the same way
+// fileScopeForRequest scopes the file list and zip, so "open folder" shows
+// exactly the files the panel lists:
+//   - projectId alone: the project root (project landing page);
+//   - sessionId: that chat's folder — the caller's own session, or for the
+//     agent's owner any session of the agent (e.g. an API end-user's);
+//   - neither: the agent root, for the owner only.
+//
+// A session that doesn't resolve reports !ok rather than widening to the
+// agent root.
+func (s *Server) revealScope(r *http.Request, agentID, rawSession, rawProject string) (projectID, chatID string, ok bool) {
+	if rawSession == "" {
+		if rawProject != "" {
+			return rawProject, "", true
+		}
+		return "", "", s.callerOwnsAgent(r, agentID)
+	}
+	if chatID = s.workspaceSessionScope(r.Context(), agentID, rawSession); chatID != "" {
+		return s.resolveSessionProject(r.Context(), r, agentID, rawSession), chatID, true
+	}
+	if !s.callerOwnsAgent(r, agentID) || s.dataStore == nil {
+		return "", "", false
+	}
+	if chatID = s.foreignSessionChatID(r.Context(), agentID, rawSession); chatID == "" {
+		return "", "", false
+	}
+	if owner, err := s.dataStore.LookupSessionOwner(r.Context(), agentID, rawSession); err == nil {
+		projectID, _ = s.dataStore.LookupSessionProject(r.Context(), owner, agentID, rawSession)
+	}
+	return projectID, chatID, true
 }
 
 // openInFileBrowser shells out to the platform-appropriate "open"

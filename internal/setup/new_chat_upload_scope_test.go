@@ -55,3 +55,57 @@ func TestNewChatUploadScope(t *testing.T) {
 		}
 	}
 }
+
+// "Open folder" opens exactly the folder the panel lists: the session's
+// own folder (also for the owner looking at an API end-user's session),
+// never the agent root as a fallback, and the agent root only for the
+// owner.
+func TestRevealScope(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.NewDBStore("sqlite", "file:"+filepath.Join(t.TempDir(), "s.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	if err := st.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SaveAgent(ctx, &store.AgentRecord{ID: "agt_1", UserID: "u_owner", Name: "a", IsPublic: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, sess := range []struct{ user, key, chat, project string }{
+		{"u_owner", "s-1-own", "s-1-own", ""},
+		{"u_owner", "s-2-proj", "s-2-proj", "p_1"},
+		{"u_enduser", "snapok:edit-image:abc", "edit-image-abc", ""},
+	} {
+		if err := st.SaveSession(ctx, sess.user, "agt_1", sess.key, &store.SessionRecord{Channel: "web", ChatID: sess.chat, ProjectID: sess.project}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := &Server{dataStore: st}
+	as := func(uid string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		return r.WithContext(auth.WithIdentity(r.Context(), auth.Identity{UserID: uid, Role: users.RoleUser, AuthMethod: "session"}))
+	}
+
+	cases := []struct {
+		name, user, session, project string
+		wantProject, wantChat        string
+		wantOK                       bool
+	}{
+		{"own loose session", "u_owner", "s-1-own", "", "", "s-1-own", true},
+		{"own project session", "u_owner", "s-2-proj", "", "p_1", "s-2-proj", true},
+		{"owner opens an end-user's session", "u_owner", "snapok:edit-image:abc", "", "", "edit-image-abc", true},
+		{"project landing", "u_owner", "", "p_1", "p_1", "", true},
+		{"agent root for the owner", "u_owner", "", "", "", "", true},
+		{"agent root for a viewer", "u_viewer", "", "", "", "", false},
+		{"viewer can't open someone else's session", "u_viewer", "snapok:edit-image:abc", "", "", "", false},
+		{"unknown session doesn't widen to the root", "u_owner", "s-9-missing", "", "", "", false},
+	}
+	for _, c := range cases {
+		pid, chat, ok := s.revealScope(as(c.user), "agt_1", c.session, c.project)
+		if ok != c.wantOK || pid != c.wantProject || chat != c.wantChat {
+			t.Errorf("%s: got (%q, %q, %v), want (%q, %q, %v)", c.name, pid, chat, ok, c.wantProject, c.wantChat, c.wantOK)
+		}
+	}
+}
