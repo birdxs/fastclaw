@@ -4,6 +4,7 @@ import { cn } from "@/lib/utils";
 
 // SidebarTitle names the area a sidebar belongs to (Chat / Console /
 // Admin). The FastClaw logo and the account live in the AppRail beside it.
+// Sized like the right-hand panel titles (Workspace) so both edges match.
 export function SidebarTitle({
   title,
   className,
@@ -15,7 +16,7 @@ export function SidebarTitle({
 }) {
   return (
     <div className={cn("flex h-14 items-center gap-2 px-2", className)}>
-      <h2 className="truncate text-[20px] font-bold tracking-[-0.02em] text-foreground group-data-[collapsible=icon]:hidden">
+      <h2 className="truncate text-[15px] font-semibold text-foreground group-data-[collapsible=icon]:hidden">
         {title}
       </h2>
       {children}
