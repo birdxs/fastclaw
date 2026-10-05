@@ -5369,10 +5369,14 @@ function WorkspacePanel({
         // the viewport. A container-relative cap auto-shrinks the panel when the
         // sidebar expands (the container narrows, 70% narrows with it), so the
         // chat always keeps ≥30% and the page never scrolls horizontally. min()
-        // still bounds it to FILES_PANEL_MAX on very wide screens. overflow-
-        // hidden is the belt-and-suspenders against inner content overflow.
-        style={{ width, maxWidth: `min(${FILES_PANEL_MAX}px, 70%)` }}
-        className={`relative z-30 hidden md:flex shrink-0 flex-col overflow-hidden border-l border-border bg-background -mt-14 h-screen ${
+        // still bounds it to FILES_PANEL_MAX on very wide screens. The panel
+        // still shrinks (down to FILES_PANEL_MIN): at xl the chat column keeps
+        // a 520px minimum, and 70% + 520px is wider than the container once
+        // the sidebar is open, which used to push the panel off-screen.
+        // overflow-hidden is the belt-and-suspenders against inner content
+        // overflow.
+        style={{ width, maxWidth: `min(${FILES_PANEL_MAX}px, 70%)`, minWidth: FILES_PANEL_MIN }}
+        className={`relative z-30 hidden md:flex flex-col overflow-hidden border-l border-border bg-background -mt-14 h-screen ${
           resizing ? "" : "transition-[width] duration-200 ease-out motion-reduce:transition-none"
         }`}
       >
