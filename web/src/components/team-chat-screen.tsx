@@ -34,6 +34,13 @@ import {
   type TeamEntry,
 } from "@/lib/api";
 
+// A group topic id, shaped like a private chat's (s-<ms>-<rand>) with a g-
+// prefix. The server ties the topic to its group through the member
+// sessions, so the id doesn't need to carry the team id.
+function newTeamTopicId() {
+  return `g-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function parseTeamRoute(pathname: string) {
   const route = pathname.match(/^\/teams\/([^/]+)\/chat\/([^/]+)/);
   if (route) {
@@ -214,7 +221,7 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
 
   const replaceDeletedTopic = React.useCallback((available: TeamTopic[]) => {
     const nextId = available.find((topic) => topic.sessionId !== sessionId)?.sessionId
-      || `team-${teamId}-topic-${crypto.randomUUID()}`;
+      || newTeamTopicId();
     // Group contacts and old bookmarks may still point at the deleted default
     // topic. Replace that URL so Back cannot lead straight into the tombstone.
     window.history.replaceState(null, "", `/teams/${encodeURIComponent(teamId)}/chat/${encodeURIComponent(nextId)}/`);
@@ -353,7 +360,7 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
       generationRef.current++;
       const next = await getTeamTopics(teamId);
       setTopics(next.topics);
-      if (topicEdit.remove && topicEdit.topic.sessionId === sessionId) openTopic(next.topics[0]?.sessionId || `team-${teamId}-topic-${crypto.randomUUID()}`);
+      if (topicEdit.remove && topicEdit.topic.sessionId === sessionId) openTopic(next.topics[0]?.sessionId || newTeamTopicId());
       setTopicEdit(null);
     } catch (e) { setActionError(e instanceof Error ? e.message : String(e)); }
     finally { setTopicSaving(false); }
@@ -603,7 +610,7 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
                 <h3 className="text-sm font-medium text-muted-foreground">{tr("Sessions", "会话")}</h3>
                 <Button variant="ghost" size="icon" className="size-8 text-muted-foreground"
                   aria-label={tr("New session", "新会话")} title={tr("New session", "新会话")}
-                  onClick={() => openTopic(`team-${teamId}-topic-${crypto.randomUUID()}`)}>
+                  onClick={() => openTopic(newTeamTopicId())}>
                   <Plus className="size-4" />
                 </Button>
               </div>

@@ -135,9 +135,12 @@ func (s *Server) teamRequest(r *http.Request, req *teamChatRequest) ([]resolvedT
 			req.SessionID = "team-" + req.TeamID
 		}
 	}
-	// Existing shared links remain valid. New topics carry the group namespace;
-	// client-supplied member session IDs are never trusted.
-	if req.SessionID != team.SessionID && req.SessionID != "team-"+req.TeamID && !strings.HasPrefix(req.SessionID, "team-"+req.TeamID+"-topic-") {
+	// New topics use a short id shaped like private chats' (g-<ms>-<rand>);
+	// the group is tied to its member sessions by project_id, not by the id.
+	// Older ids (team-<team>[-topic-<uuid>]) stay valid. Anything else is
+	// refused: client-supplied member session IDs are never trusted.
+	if req.SessionID != team.SessionID && req.SessionID != "team-"+req.TeamID &&
+		!strings.HasPrefix(req.SessionID, "team-"+req.TeamID+"-topic-") && !teamTopicID.MatchString(req.SessionID) {
 		return nil, fmt.Errorf("topic does not belong to this group")
 	}
 	req.Name = team.Name
@@ -467,6 +470,10 @@ func (s *Server) handleTeamChatStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+// teamTopicID matches a group topic id the web client mints:
+// g-<unix ms>-<base36>, like a private chat's s-<unix ms>-<base36>.
+var teamTopicID = regexp.MustCompile(`^g-[0-9]+-[a-z0-9]+$`)
 
 var teamFence = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})")
 
