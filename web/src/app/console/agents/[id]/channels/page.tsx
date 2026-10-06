@@ -42,6 +42,7 @@ import {
   connectAgentSlack,
   connectAgentLINE,
   connectAgentFeishu,
+  connectAgentWeCom,
   startAgentWeChatLogin,
   pollAgentWeChatLoginStatus,
   disconnectAgentChannel,
@@ -95,6 +96,12 @@ const CATALOG: { type: string; label: string; description: string; available: bo
     description: "Connect a Feishu custom-app bot via webhook (App ID + App Secret).",
     available: true,
   },
+  {
+    type: "wecom",
+    label: "WeCom",
+    description: "Connect a WeCom smart bot over a long connection — no public URL needed.",
+    available: true,
+  },
 ];
 
 export default function AgentChannelsPage() {
@@ -112,6 +119,7 @@ export default function AgentChannelsPage() {
   const [lineOpen, setLineOpen] = useState(false);
   const [wechatOpen, setWechatOpen] = useState(false);
   const [feishuOpen, setFeishuOpen] = useState(false);
+  const [wecomOpen, setWecomOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentChannel | null>(null);
 
   const refresh = useCallback(() => {
@@ -202,6 +210,7 @@ export default function AgentChannelsPage() {
                   else if (entry.type === "line") setLineOpen(true);
                   else if (entry.type === "wechat") setWechatOpen(true);
                   else if (entry.type === "feishu") setFeishuOpen(true);
+                  else if (entry.type === "wecom") setWecomOpen(true);
                 }}
               />
             );
@@ -247,6 +256,13 @@ export default function AgentChannelsPage() {
       <ConnectFeishuDialog
         open={feishuOpen}
         onOpenChange={setFeishuOpen}
+        agentId={agentId}
+        onConnected={refresh}
+      />
+
+      <ConnectWeComDialog
+        open={wecomOpen}
+        onOpenChange={setWecomOpen}
         agentId={agentId}
         onConnected={refresh}
       />
@@ -300,6 +316,7 @@ function CatalogCard({
       line: "通过 Webhook 连接 LINE Messaging API 渠道。",
       wechat: "使用微信手机客户端扫码，将消息转发给此 Agent。",
       feishu: "通过长连接或 Webhook 连接飞书自建应用机器人。",
+      wecom: "通过长连接接入企业微信智能机器人，无需公网 URL。",
     } as Record<string, string>)[type] || description;
   return (
     <div className="rounded-lg border border-border bg-card p-4 flex flex-col gap-3">
@@ -404,6 +421,7 @@ function ChannelIcon({ type }: { type: string }) {
     line: "/channels/line.png",
     feishu: "/channels/feishu.png",
     wechat: "/channels/wechat.svg",
+    wecom: "/channels/wecom.svg",
   };
   if (asset[type]) {
     // WeChat's artwork is non-square (50×40) — object-contain letterboxes
@@ -782,6 +800,134 @@ function ConnectSlackDialog({
                 onClick={submit}
                 disabled={submitting || !botToken.trim() || !appToken.trim()}
               >
+                {submitting ? tr("Connecting…", "正在连接…") : tr("Connect", "连接")}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// WeCom smart-bot connect dialog. Bot ID + Secret from the WeCom admin
+// console (智能机器人 → API 模式 → 长连接); the server verifies them by
+// completing one subscribe handshake before saving.
+function ConnectWeComDialog({
+  open,
+  onOpenChange,
+  agentId,
+  onConnected,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  agentId: string;
+  onConnected: () => void;
+}) {
+  const { tr } = useLocale();
+  const [botId, setBotId] = useState("");
+  const [secret, setSecret] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setBotId("");
+      setSecret("");
+      setError("");
+      setSubmitting(false);
+      setConnected(false);
+    }
+  }, [open]);
+
+  const submit = async () => {
+    if (!botId.trim() || !secret.trim() || !agentId) return;
+    setSubmitting(true);
+    setError("");
+    const res = await connectAgentWeCom(agentId, botId.trim(), secret.trim());
+    setSubmitting(false);
+    if (res.error || !res.ok) {
+      setError(res.error || tr("Failed to connect", "连接失败"));
+      return;
+    }
+    setConnected(true);
+    onConnected();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <img src="/channels/wecom.svg" alt="WeCom" className="h-5 w-5 object-contain" />
+            {tr("Connect WeCom bot", "连接企业微信机器人")}
+          </DialogTitle>
+          <DialogDescription>
+            {tr("In the", "在")}{" "}
+            <a
+              href="https://work.weixin.qq.com/wework_admin/frame"
+              target="_blank"
+              rel="noreferrer"
+              className="underline"
+            >
+              {tr("WeCom admin console", "企业微信管理后台")}
+            </a>
+            {tr(
+              ", create a smart bot, choose API mode with a long connection, then copy its Bot ID and Secret. No public URL is needed.",
+              "中创建智能机器人，选择 API 模式并使用长连接，然后复制 Bot ID 和 Secret。无需配置公网 URL。",
+            )}
+          </DialogDescription>
+        </DialogHeader>
+
+        {connected ? (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              <span className="text-sm font-medium">{tr("Connected", "已连接")}</span>
+            </div>
+            <p className="text-sm">
+              {tr(
+                "The bot is live. Message it directly in WeCom, or add it to a group and @mention it to test.",
+                "机器人已上线。可在企业微信中直接私聊它，或将其加入群聊后 @ 它进行测试。",
+              )}
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3 py-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="wecom-bot-id">Bot ID</Label>
+              <Input
+                id="wecom-bot-id"
+                value={botId}
+                onChange={(e) => setBotId(e.target.value)}
+                className="font-mono text-sm"
+                autoFocus
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="wecom-secret">Secret</Label>
+              <Input
+                id="wecom-secret"
+                type="password"
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                className="font-mono text-sm"
+              />
+            </div>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+        )}
+
+        <DialogFooter>
+          {connected ? (
+            <Button onClick={() => onOpenChange(false)}>{tr("Done", "完成")}</Button>
+          ) : (
+            <>
+              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
+                {tr("Cancel", "取消")}
+              </Button>
+              <Button onClick={submit} disabled={submitting || !botId.trim() || !secret.trim()}>
                 {submitting ? tr("Connecting…", "正在连接…") : tr("Connect", "连接")}
               </Button>
             </>

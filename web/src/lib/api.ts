@@ -2137,6 +2137,19 @@ export async function connectAgentFeishu(
   return res.json();
 }
 
+export async function connectAgentWeCom(
+  agentId: string,
+  botId: string,
+  secret: string,
+): Promise<{ ok: boolean; botId?: string; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/wecom`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ botId, secret }),
+  });
+  return res.json();
+}
+
 export async function disconnectAgentChannel(
   agentId: string,
   type: string,

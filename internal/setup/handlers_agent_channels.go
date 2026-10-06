@@ -1319,3 +1319,67 @@ func (s *Server) deleteChannelRecord(ctx context.Context, channelType, accountID
 			"type", channelType, "account", accountID, "error", err)
 	}
 }
+
+// --- WeCom (企业微信 smart bot) ---
+
+type connectWeComRequest struct {
+	BotID  string `json:"botId"`
+	Secret string `json:"secret"`
+}
+
+// handleConnectAgentWeCom connects a WeCom smart bot over its WebSocket
+// long connection. The credentials are checked by completing one
+// subscribe handshake, which is only safe before the adapter runs (a
+// subscribe kicks the live connection) — hence the uniqueness check
+// first. Storage: credKey = accountID = Bot ID, BotToken = Secret.
+func (s *Server) handleConnectAgentWeCom(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	uid, aid, ok := s.resolveChannelBindingScope(w, r, id)
+	if !ok {
+		return
+	}
+
+	var req connectWeComRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+	botID := strings.TrimSpace(req.BotID)
+	secret := strings.TrimSpace(req.Secret)
+	if botID == "" || secret == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "botId and secret required"})
+		return
+	}
+	if err := s.assertChannelCredentialUniqueOpt(r, "wecom", botID, "", uid, aid, true); err != nil {
+		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := channels.WeComValidateCredentials(r.Context(), botID, secret); err != nil {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
+		return
+	}
+
+	cc := config.ChannelConfig{
+		Enabled:  true,
+		Accounts: map[string]config.AccountConfig{botID: {BotToken: secret}},
+	}
+	if err := s.saveChannelRecord(r.Context(), uid, aid, "wecom", botID, true, cc); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	if err := s.appendBinding(r, "", "", config.Binding{
+		AgentID: id,
+		Match:   config.Match{Channel: "wecom", AccountID: botID},
+	}); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	s.invalidateOwner(uid, aid)
+	if ch, err := s.dataStore.LookupChannel(r.Context(), "wecom", botID); err == nil && ch != nil {
+		s.hotRegisterChannelRecord(*ch)
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "botId": botID})
+}

@@ -55,6 +55,8 @@ func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr
 		return registerWeChatChannels(rec, cc, mb, chanMgr, st, hot)
 	case "feishu":
 		return registerFeishuChannels(cc, mb, chanMgr, hot)
+	case "wecom":
+		return registerWeComChannels(cc, mb, chanMgr, hot)
 	}
 	return nil
 }
@@ -77,6 +79,8 @@ func registerChannelFromRecord(rec store.ChannelRecord, mb *bus.MessageBus, chan
 		return registerWeChatChannels(cfgRec, cc, mb, chanMgr, st, hot)
 	case "feishu":
 		return registerFeishuChannels(cc, mb, chanMgr, hot)
+	case "wecom":
+		return registerWeComChannels(cc, mb, chanMgr, hot)
 	}
 	return nil
 }
@@ -279,6 +283,24 @@ func registerFeishuChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chan
 		} else {
 			register(chanMgr, lk, hot)
 		}
+	}
+	return nil
+}
+
+func registerWeComChannels(chCfg config.ChannelConfig, mb *bus.MessageBus, chanMgr *channels.Manager, hot bool) error {
+	// One row per bot, keyed by Bot ID; AccountConfig.BotToken is the
+	// bot Secret. The long connection is exclusive per bot (a second
+	// subscribe kicks the first), so it always takes the lease.
+	for botID, acct := range chCfg.Accounts {
+		secret := acct.BotToken
+		if secret == "" {
+			secret = chCfg.BotToken
+		}
+		wc, err := channels.NewWeCom(botID, secret, mb)
+		if err != nil {
+			return err
+		}
+		registerSingleton(chanMgr, wc, hot)
 	}
 	return nil
 }

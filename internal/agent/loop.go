@@ -1670,7 +1670,7 @@ func renderChannelHints(msg bus.InboundMessage, splitEnabled bool) string {
 // React renderer understands the same marker; API responses do not.
 func isIMChannel(channel string) bool {
 	switch channel {
-	case "wechat", "telegram", "discord", "slack", "line", "feishu":
+	case "wechat", "telegram", "discord", "slack", "line", "feishu", "wecom":
 		return true
 	}
 	return false
