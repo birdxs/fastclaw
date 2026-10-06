@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,6 +28,17 @@ type fakeWeCom struct {
 	conns  chan *websocket.Conn
 	frames chan wecomFrame
 	secret string
+	wmu    sync.Mutex // gorilla allows one concurrent writer per conn
+}
+
+// push writes a server-originated frame (callback / event) to conn.
+func (f *fakeWeCom) push(conn *websocket.Conn, v any) {
+	f.t.Helper()
+	f.wmu.Lock()
+	defer f.wmu.Unlock()
+	if err := conn.WriteJSON(v); err != nil {
+		f.t.Fatal(err)
+	}
 }
 
 func newFakeWeCom(t *testing.T, secret string) *fakeWeCom {
@@ -38,12 +50,10 @@ func newFakeWeCom(t *testing.T, secret string) *fakeWeCom {
 			return
 		}
 		f.conns <- c
-		var wmu = make(chan struct{}, 1)
-		wmu <- struct{}{}
 		write := func(v any) {
-			<-wmu
+			f.wmu.Lock()
 			_ = c.WriteJSON(v)
-			wmu <- struct{}{}
+			f.wmu.Unlock()
 		}
 		for {
 			var fr wecomFrame
@@ -115,7 +125,7 @@ func TestWeComEndToEnd(t *testing.T) {
 	conn := <-fake.conns
 
 	// Group message: leading @mention stripped, bot id stamped into Mentions.
-	_ = conn.WriteJSON(map[string]any{
+	fake.push(conn, map[string]any{
 		"cmd":     "aibot_msg_callback",
 		"headers": map[string]string{"req_id": "cb-1"},
 		"body": map[string]any{
@@ -135,12 +145,24 @@ func TestWeComEndToEnd(t *testing.T) {
 		t.Fatalf("inbound = %+v", in)
 	}
 
-	// First bubble answers the callback's req_id; the second is pushed.
+	// Typing opens a "thinking" stream on the callback's req_id; later
+	// ticks don't open another one.
+	if err := wc.SendTyping("grp"); err != nil {
+		t.Fatal(err)
+	}
+	thinking := fake.next("aibot_respond_msg")
+	think := streamOf(t, thinking)
+	if thinking.Headers.ReqID != "cb-1" || think.Content != wecomThinking || think.Finish || think.ID == "" {
+		t.Fatalf("thinking = %s %s", thinking.Headers.ReqID, thinking.Body)
+	}
+	_ = wc.SendTyping("grp")
+
+	// First bubble finishes that same stream; the second is pushed.
 	if err := wc.SendMessage(bus.OutboundMessage{ChatID: "grp", Text: "one" + SplitMessageMarker + "two", AllowSplit: true}); err != nil {
 		t.Fatal(err)
 	}
 	reply := fake.next("aibot_respond_msg")
-	if reply.Headers.ReqID != "cb-1" || !strings.Contains(string(reply.Body), `"content":"one"`) || !strings.Contains(string(reply.Body), `"finish":true`) {
+	if st := streamOf(t, reply); reply.Headers.ReqID != "cb-1" || st.ID != think.ID || st.Content != "one" || !st.Finish {
 		t.Fatalf("reply = %s %s", reply.Headers.ReqID, reply.Body)
 	}
 	push := fake.next("aibot_send_msg")
@@ -167,7 +189,7 @@ func TestWeComEndToEnd(t *testing.T) {
 	}
 
 	// Superseded: the adapter must not reconnect and kick the new client.
-	_ = conn.WriteJSON(map[string]any{
+	fake.push(conn, map[string]any{
 		"cmd":     "aibot_event_callback",
 		"headers": map[string]string{"req_id": "ev-1"},
 		"body":    map[string]any{"msgtype": "event", "event": map[string]string{"eventtype": "disconnected_event"}},
@@ -182,6 +204,91 @@ func TestWeComEndToEnd(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("Start did not return after cancel")
+	}
+}
+
+type wecomStreamBody struct {
+	ID      string `json:"id"`
+	Finish  bool   `json:"finish"`
+	Content string `json:"content"`
+}
+
+func streamOf(t *testing.T, f wecomFrame) wecomStreamBody {
+	t.Helper()
+	var b struct {
+		Stream wecomStreamBody `json:"stream"`
+	}
+	if err := json.Unmarshal(f.Body, &b); err != nil {
+		t.Fatalf("stream body %s: %v", f.Body, err)
+	}
+	return b.Stream
+}
+
+func sendCallback(fake *fakeWeCom, conn *websocket.Conn, reqID, msgID, user, text string) {
+	fake.push(conn, map[string]any{
+		"cmd":     "aibot_msg_callback",
+		"headers": map[string]string{"req_id": reqID},
+		"body": map[string]any{
+			"msgid": msgID, "aibotid": "bot1", "chattype": "single",
+			"from": map[string]string{"userid": user}, "msgtype": "text",
+			"text": map[string]string{"content": text},
+		},
+	})
+}
+
+// A thinking stream nobody answers must still be closed with visible
+// content: when a newer message takes the reply slot, and when typing
+// stops without a reply.
+func TestWeComThinkingStreamClosedWithoutReply(t *testing.T) {
+	fake := newFakeWeCom(t, "s3cret")
+	mb := bus.New()
+	wc, _ := NewWeCom("bot1", "s3cret", mb)
+	wc.wsURL = fake.url()
+	wc.typingIdle, wc.streamWatch = 300*time.Millisecond, 50*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = wc.Start(ctx) }()
+	fake.next("aibot_subscribe")
+	conn := <-fake.conns
+
+	inbound := func() {
+		t.Helper()
+		select {
+		case <-mb.Inbound:
+		case <-time.After(3 * time.Second):
+			t.Fatal("no inbound message")
+		}
+	}
+
+	sendCallback(fake, conn, "cb-a", "m-a", "bob", "first")
+	inbound()
+	_ = wc.SendTyping("bob")
+	first := streamOf(t, fake.next("aibot_respond_msg"))
+
+	// A second message in the same chat supersedes the first: its
+	// thinking stream is closed right away.
+	sendCallback(fake, conn, "cb-b", "m-b", "bob", "second")
+	inbound()
+	closed := fake.next("aibot_respond_msg")
+	if st := streamOf(t, closed); closed.Headers.ReqID != "cb-a" || st.ID != first.ID || !st.Finish || st.Content != wecomCloseNoReply {
+		t.Fatalf("superseded close = %s %s", closed.Headers.ReqID, closed.Body)
+	}
+
+	// The turn for the second message ends with no reply: once typing
+	// goes idle the watchdog closes its stream.
+	_ = wc.SendTyping("bob")
+	second := streamOf(t, fake.next("aibot_respond_msg"))
+	idle := fake.next("aibot_respond_msg")
+	if st := streamOf(t, idle); idle.Headers.ReqID != "cb-b" || st.ID != second.ID || !st.Finish || st.Content != wecomCloseNoReply {
+		t.Fatalf("idle close = %s %s", idle.Headers.ReqID, idle.Body)
+	}
+
+	// The slot is gone, so a late reply is pushed instead of answering.
+	if err := wc.SendMessage(bus.OutboundMessage{ChatID: "bob", Text: "late"}); err != nil {
+		t.Fatal(err)
+	}
+	if push := fake.next("aibot_send_msg"); !strings.Contains(string(push.Body), `"content":"late"`) {
+		t.Fatalf("late push = %s", push.Body)
 	}
 }
 

@@ -56,6 +56,18 @@ const (
 	wecomMaxUploadChunks  = 100
 	wecomMaxDownloadBytes = 50 << 20
 	wecomReplyTTL         = time.Hour
+
+	// "Thinking" stream: the official plugin's placeholder renders as
+	// WeCom's native thinking state. A stream must be finished with
+	// visible content (whitespace is ignored) or it spins until WeCom
+	// gives up on the message (~6 minutes).
+	wecomThinking       = "<think></think>"
+	wecomStreamMaxAge   = 5*time.Minute + 30*time.Second // close before WeCom's 6-minute cutoff
+	wecomTypingIdle     = 20 * time.Second               // typing ticks every 5s while a turn runs
+	wecomStreamWatch    = 5 * time.Second
+	wecomCloseNoReply   = "✅" // turn ended without a reply
+	wecomCloseLongTurn  = "⏳" // still working; the result is pushed later
+	wecomCloseMediaOnly = "📎" // reply was attachments only
 )
 
 var (
@@ -112,9 +124,16 @@ type wecomMessage struct {
 	} `json:"event"`
 }
 
+// wecomPendingReply is the newest unanswered inbound of a chat. Its
+// req_id carries exactly one reply stream: opened as "thinking" by
+// SendTyping, finished by the reply (or by watchStream as a fallback).
 type wecomPendingReply struct {
-	reqID string
-	at    time.Time
+	reqID      string
+	at         time.Time
+	streamID   string // set once the thinking stream is open
+	streamAt   time.Time
+	lastTyping time.Time
+	noStream   bool // opening the stream failed; don't retry every tick
 }
 
 // WeCom implements Channel for a WeCom smart bot (智能机器人, API mode).
@@ -134,9 +153,13 @@ type WeCom struct {
 	acks  map[string]chan wecomFrame
 
 	replyMu sync.Mutex
-	replies map[string]wecomPendingReply // chatID → newest unanswered inbound
+	replies map[string]*wecomPendingReply // chatID → newest unanswered inbound
 
 	missedPongs atomic.Int32
+
+	// Thinking-stream timings (wecomStreamMaxAge etc.); fields so tests
+	// can shrink them per adapter.
+	streamMaxAge, typingIdle, streamWatch time.Duration
 }
 
 // NewWeCom builds the adapter. botID doubles as the accountID.
@@ -152,7 +175,11 @@ func NewWeCom(botID, secret string, mb *bus.MessageBus) (*WeCom, error) {
 		bus:       mb,
 		http:      &http.Client{Timeout: 60 * time.Second},
 		acks:      map[string]chan wecomFrame{},
-		replies:   map[string]wecomPendingReply{},
+		replies:   map[string]*wecomPendingReply{},
+
+		streamMaxAge: wecomStreamMaxAge,
+		typingIdle:   wecomTypingIdle,
+		streamWatch:  wecomStreamWatch,
 	}, nil
 }
 
@@ -164,8 +191,70 @@ func (w *WeCom) AccountID() string { return w.accountID }
 // the gateway's mention routing matches on it.
 func (w *WeCom) BotUsername() string { return w.botID }
 
-// SendTyping is a no-op: the smart bot has no typing indicator.
-func (w *WeCom) SendTyping(string) error { return nil }
+// SendTyping shows WeCom's native "thinking" state: the first call of a
+// turn opens a stream on the pending inbound with the thinking
+// placeholder; the reply later finishes that same stream. The gateway
+// calls this every 5s while a turn runs, so later calls only refresh
+// lastTyping, which watchStream uses to detect a turn that ended
+// without a reply.
+func (w *WeCom) SendTyping(chatID string) error {
+	w.replyMu.Lock()
+	p := w.replies[chatID]
+	if p == nil {
+		w.replyMu.Unlock()
+		return nil
+	}
+	now := time.Now()
+	p.lastTyping = now
+	if p.streamID != "" || p.noStream || now.Sub(p.at) > w.streamMaxAge {
+		w.replyMu.Unlock()
+		return nil
+	}
+	p.streamID, p.streamAt = wecomReqID("stream"), now
+	reqID, streamID := p.reqID, p.streamID
+	w.replyMu.Unlock()
+
+	if err := w.respondStream(reqID, streamID, wecomThinking, false); err != nil {
+		w.replyMu.Lock()
+		p.streamID, p.noStream = "", true
+		w.replyMu.Unlock()
+		return err
+	}
+	go w.watchStream(chatID, p)
+	return nil
+}
+
+// watchStream closes a thinking stream nobody finished: the turn ended
+// without a reply (typing stopped), or it's about to outlive WeCom's
+// 6-minute window — then the real reply is pushed when it arrives.
+func (w *WeCom) watchStream(chatID string, p *wecomPendingReply) {
+	t := time.NewTicker(w.streamWatch)
+	defer t.Stop()
+	for range t.C {
+		w.replyMu.Lock()
+		if w.replies[chatID] != p {
+			w.replyMu.Unlock()
+			return // answered, or superseded (rememberReply closed it)
+		}
+		var mark string
+		switch now := time.Now(); {
+		case now.Sub(p.streamAt) > w.streamMaxAge:
+			mark = wecomCloseLongTurn
+		case now.Sub(p.lastTyping) > w.typingIdle:
+			mark = wecomCloseNoReply
+		}
+		if mark == "" {
+			w.replyMu.Unlock()
+			continue
+		}
+		delete(w.replies, chatID)
+		w.replyMu.Unlock()
+		if err := w.respondStream(p.reqID, p.streamID, mark, true); err != nil {
+			slog.Debug("wecom: closing thinking stream failed", "account", w.accountID, "error", err)
+		}
+		return
+	}
+}
 
 // Start keeps the long connection up until ctx is cancelled.
 func (w *WeCom) Start(ctx context.Context) error {
@@ -472,26 +561,48 @@ func (w *WeCom) rememberReply(chatID, reqID string) {
 	}
 	now := time.Now()
 	w.replyMu.Lock()
-	defer w.replyMu.Unlock()
 	for k, p := range w.replies {
 		if now.Sub(p.at) > wecomReplyTTL {
 			delete(w.replies, k)
 		}
 	}
-	w.replies[chatID] = wecomPendingReply{reqID: reqID, at: now}
+	prev := w.replies[chatID]
+	w.replies[chatID] = &wecomPendingReply{reqID: reqID, at: now}
+	w.replyMu.Unlock()
+	// A newer message takes over the reply slot; an open thinking stream
+	// on the older one would otherwise spin until WeCom times it out.
+	if prev != nil && prev.streamID != "" {
+		go func() {
+			if err := w.respondStream(prev.reqID, prev.streamID, wecomCloseNoReply, true); err != nil {
+				slog.Debug("wecom: closing superseded stream failed", "account", w.accountID, "error", err)
+			}
+		}()
+	}
 }
 
-// takeReply claims the newest unanswered inbound req_id for chatID. Each
-// req_id carries exactly one reply; later bubbles go out as pushes.
-func (w *WeCom) takeReply(chatID string) string {
+// takeReply claims the newest unanswered inbound of chatID. Each req_id
+// carries exactly one reply; later bubbles go out as pushes.
+func (w *WeCom) takeReply(chatID string) *wecomPendingReply {
 	w.replyMu.Lock()
 	defer w.replyMu.Unlock()
-	p, ok := w.replies[chatID]
+	p := w.replies[chatID]
 	delete(w.replies, chatID)
-	if !ok || time.Since(p.at) > wecomReplyTTL {
-		return ""
+	if p == nil || time.Since(p.at) > wecomReplyTTL {
+		return nil
 	}
-	return p.reqID
+	return p
+}
+
+// finishReply sends content as the final frame of p's reply stream —
+// the open thinking stream if there is one, else a fresh one.
+func (w *WeCom) finishReply(p *wecomPendingReply, content string) error {
+	w.replyMu.Lock()
+	streamID := p.streamID
+	w.replyMu.Unlock()
+	if streamID == "" {
+		streamID = wecomReqID("stream")
+	}
+	return w.respondStream(p.reqID, streamID, content, true)
 }
 
 // Send pushes a markdown message to a chat (user id for DMs, chatid for groups).
@@ -518,12 +629,21 @@ func (w *WeCom) SendMessage(msg bus.OutboundMessage) error {
 	}
 
 	var firstErr error
+	if len(bubbles) == 0 {
+		// Attachments only: still close the thinking stream with a
+		// visible mark so it doesn't spin; the files are pushed below.
+		if p := w.takeReply(msg.ChatID); p != nil && len(msg.MediaItems) > 0 {
+			if err := w.finishReply(p, wecomCloseMediaOnly); err != nil {
+				slog.Debug("wecom: closing thinking stream failed", "account", w.accountID, "error", err)
+			}
+		}
+	}
 	for i, bubble := range bubbles {
 		parts := wecomSplitContent(FlattenMarkdownTables(bubble))
 		for j, part := range parts {
 			if i == 0 && j == 0 {
-				if reqID := w.takeReply(msg.ChatID); reqID != "" {
-					err := w.respond(reqID, part)
+				if p := w.takeReply(msg.ChatID); p != nil {
+					err := w.finishReply(p, part)
 					if err == nil {
 						continue
 					}
@@ -549,10 +669,12 @@ func (w *WeCom) SendMessage(msg bus.OutboundMessage) error {
 	return firstErr
 }
 
-func (w *WeCom) respond(reqID, content string) error {
+// respondStream sends one frame of a stream reply on an inbound req_id.
+// Frames of one stream share streamID; finish=true closes it.
+func (w *WeCom) respondStream(reqID, streamID, content string, finish bool) error {
 	body := map[string]any{
 		"msgtype": "stream",
-		"stream":  map[string]any{"id": wecomReqID("stream"), "finish": true, "content": content},
+		"stream":  map[string]any{"id": streamID, "finish": finish, "content": content},
 	}
 	_, err := w.request("aibot_respond_msg", reqID, body)
 	return err
