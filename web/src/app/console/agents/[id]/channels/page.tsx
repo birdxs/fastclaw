@@ -421,7 +421,7 @@ function ChannelIcon({ type }: { type: string }) {
     line: "/channels/line.png",
     feishu: "/channels/feishu.png",
     wechat: "/channels/wechat.svg",
-    wecom: "/channels/wecom.svg",
+    wecom: "/channels/wecom.png",
   };
   if (asset[type]) {
     // WeChat's artwork is non-square (50×40) — object-contain letterboxes
@@ -860,7 +860,7 @@ function ConnectWeComDialog({
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <img src="/channels/wecom.svg" alt="WeCom" className="h-5 w-5 object-contain" />
+            <img src="/channels/wecom.png" alt="WeCom" className="h-5 w-5 object-contain" />
             {tr("Connect WeCom bot", "连接企业微信机器人")}
           </DialogTitle>
           <DialogDescription>

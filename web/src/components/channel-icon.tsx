@@ -8,7 +8,7 @@ const ASSETS: Record<string, string> = {
   line: "/channels/line.png",
   feishu: "/channels/feishu.png",
   wechat: "/channels/wechat.svg",
-  wecom: "/channels/wecom.svg",
+  wecom: "/channels/wecom.png",
 };
 
 // ChannelIcon renders the per-channel brand mark next to a chat title.
