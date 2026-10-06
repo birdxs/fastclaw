@@ -369,7 +369,7 @@ export function ConsumerChatSidebar({
 
       <SidebarContent
         aria-busy={loading}
-        className="px-1.5 pb-3 group-data-[collapsible=icon]:overflow-x-hidden! group-data-[collapsible=icon]:overflow-y-auto! group-data-[collapsible=icon]:px-2"
+        className="px-3 pb-3 group-data-[collapsible=icon]:overflow-x-hidden! group-data-[collapsible=icon]:overflow-y-auto! group-data-[collapsible=icon]:px-2"
       >
         <SidebarMenu className="gap-1 group-data-[collapsible=icon]:gap-2">
           {loading && filtered.length === 0 && (
