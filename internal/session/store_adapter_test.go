@@ -113,3 +113,17 @@ func TestLatestMessagePreviewFallsBackToImageUserTurn(t *testing.T) {
 		t.Fatalf("latest message timestamp = %d, want %d", gotAt, when.UnixMilli())
 	}
 }
+
+func TestFirstAssistantPreviewListsAgentInitiatedSessions(t *testing.T) {
+	source := []store.SessionMessage{
+		{Role: "assistant", Origin: "goal_context", Content: "internal"},
+		{Role: "assistant", Content: "来自群聊「家」的私信：\n\n你好"},
+		{Role: "assistant", Content: "later"},
+	}
+	if got := firstAssistantPreview(source); got != "来自群聊「家」的私信： 你好" {
+		t.Fatalf("firstAssistantPreview() = %q", got)
+	}
+	if got := firstAssistantPreview(nil); got != "" {
+		t.Fatalf("firstAssistantPreview(nil) = %q", got)
+	}
+}

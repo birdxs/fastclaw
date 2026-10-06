@@ -732,6 +732,7 @@ func (m *Manager) ListWebSessions() []WebSession {
 		// Read the first user message as the conversation preview, while also
 		// tracking the latest user-visible message for contact-list summaries.
 		preview := ""
+		assistantPreview := ""
 		thumb := ""
 		lastMessage := ""
 		var lastMessageAt int64
@@ -796,9 +797,17 @@ func (m *Manager) ListWebSessions() []WebSession {
 				preview = messagePreview
 				thumb = img
 			}
+			if msg.Role == "assistant" && assistantPreview == "" {
+				assistantPreview = messagePreview
+			}
 		}
 		fh.Close()
 
+		if preview == "" {
+			// Agent-initiated sessions (a group chat's private message)
+			// have no user turn; list them by their first reply.
+			preview = assistantPreview
+		}
 		if preview == "" {
 			continue // skip empty sessions
 		}
