@@ -58,7 +58,56 @@ func TestConsoleAgentPagesUsePlaceholder(t *testing.T) {
 		"/console/agents/agt_9/":                 "agent root",
 		"/console/agents/agt_9/skills/":          "agent skills",
 		"/console/agents/agt_9/skills/index.txt": "rsc",
-		"/agents/agt_9/chat/sess_1/":             "session",
+		"/agents/agt_9/chat/sess_1/?actAs=u_1":   "session", // audit links keep the long form
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK || rec.Body.String() != want {
+			t.Errorf("%s → %d %q, want %q", path, rec.Code, rec.Body.String(), want)
+		}
+	}
+}
+
+// Conversations live at /chat/<sessionId>; the old per-agent and per-group
+// URLs redirect there, and the static export's chat/_ placeholder serves
+// any session id.
+func TestChatSessionRoutes(t *testing.T) {
+	h := spaHandler{fs: fstest.MapFS{
+		"index.html":                       {Data: []byte("root")},
+		"chat/index.html":                  {Data: []byte("legacy chat")},
+		"chat/_/index.html":                {Data: []byte("session")},
+		"chat/_/index.txt":                 {Data: []byte("rsc")},
+		"agents/default/chat/_/index.html": {Data: []byte("agent session")},
+	}}
+	for path, want := range map[string]string{
+		"/agents/agt_1/chat/s-1-abc/":     "/chat/s-1-abc/",
+		"/agents/agt_1/chat/s-1-abc":      "/chat/s-1-abc/",
+		"/teams/tm-1/chat/g-1-abc/":       "/chat/g-1-abc/",
+		"/agents/agt_1/chat/s-1-abc/?x=1": "/chat/s-1-abc/?x=1",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusFound || rec.Header().Get("Location") != want {
+			t.Errorf("%s → %d %q, want redirect to %q", path, rec.Code, rec.Header().Get("Location"), want)
+		}
+	}
+	// New chats, audit links and RSC payloads keep their URLs.
+	for _, path := range []string{
+		"/agents/agt_1/chat/",
+		"/agents/agt_1/chat/s-1-abc/?actAs=u_x",
+		"/agents/agt_1/chat/s-1-abc/index.txt",
+		"/agents/agt_1/chat/_/",
+	} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code == http.StatusFound {
+			t.Errorf("%s must not redirect (got %q)", path, rec.Header().Get("Location"))
+		}
+	}
+	for path, want := range map[string]string{
+		"/chat/s-1-abc/":          "session",
+		"/chat/g-1-abc/index.txt": "rsc",
+		"/chat/":                  "legacy chat",
 	} {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))

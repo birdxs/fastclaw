@@ -62,10 +62,19 @@ type managerOpts struct {
 	// derived here. Nil makes check_agent report tool status as
 	// unverified instead of guessing.
 	toolAvailability func(ctx context.Context, agentID string) (map[string]bool, error)
+	// agentResolver finds (loading on demand) another agent of the same
+	// account for message_agent. Nil leaves the tool unregistered.
+	agentResolver AgentResolver
 	// onAgentChanged is invoked after in-chat provisioning mutates an
 	// agent, so a running gateway can reload rather than require a
 	// restart.
 	onAgentChanged func()
+}
+
+// WithAgentResolver supplies the lookup behind message_agent: an agent of
+// the same account by id or display name, loaded if it was evicted.
+func WithAgentResolver(fn AgentResolver) ManagerOption {
+	return func(o *managerOpts) { o.agentResolver = fn }
 }
 
 // WithToolAvailability supplies the capability probe behind check_agent.
@@ -334,6 +343,9 @@ func (m *Manager) buildAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider
 			ToolAvailability: m.opts.toolAvailability,
 			OnChanged:        m.opts.onAgentChanged,
 		})
+		// Agent-to-agent private messages (message_agent), scoped to the
+		// same owner account as provisioning.
+		ag.registerMessageAgent(m.opts.agentResolver, ownerID)
 		// install_skill / search_skills were written but never registered —
 		// the tools existed as dead code, which is why provisioning had to
 		// shell out to the CLI in the first place.

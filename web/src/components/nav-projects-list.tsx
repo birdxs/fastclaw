@@ -66,6 +66,7 @@ import {
 } from "@/components/nav-projects";
 import { ChatRowActions } from "@/components/chat-row-actions";
 import { useLocale } from "@/components/locale-provider";
+import { chatHref, rememberChatTarget } from "@/lib/chat-route";
 
 // NavProjectsList is the "Projects" section of the agent sidebar. Each
 // project expands inline to show its child chats; clicking "+ New chat"
@@ -147,7 +148,7 @@ export function NavProjectsList({
   //                     project's chats while reading any of them.
   const projectPathMatch = pathname.match(/\/agents\/[^/]+\/project\/([^/]+)\/?$/);
   const urlProjectId = projectPathMatch ? projectPathMatch[1] : null;
-  const sessionPathMatch = pathname.match(/\/agents\/[^/]+\/chat\/([^/]+)\/?$/);
+  const sessionPathMatch = pathname.match(/^\/(?:agents\/[^/]+\/)?chat\/([^/]+)\/?$/);
   const urlSessionId = sessionPathMatch ? sessionPathMatch[1] : null;
   const activeProjectId = React.useMemo(() => {
     if (urlProjectId) return urlProjectId;
@@ -288,10 +289,11 @@ export function NavProjectsList({
                 onNewChat={() => startNewChat(p.id)}
                 sessions={projectSessions}
                 activeSessionKey={activeSessionKey}
-                onOpenSession={(sid) =>
-                  navigateOnce(`${chatBase}${encodeURIComponent(sid)}/`)
-                }
-                isOnChatRoute={pathname.startsWith(chatBase)}
+                onOpenSession={(sid) => {
+                  rememberChatTarget(sid, { kind: "agent", agentId });
+                  navigateOnce(chatHref(sid));
+                }}
+                isOnChatRoute={pathname.startsWith(chatBase) || !!urlSessionId}
                 allSessions={sessions}
                 agentId={agentId}
                 onMoved={() => {

@@ -3,6 +3,7 @@
 import * as React from "react";
 import { LoaderCircle } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
+import { chatHref, rememberChatTarget } from "@/lib/chat-route";
 import { useLocale } from "@/components/locale-provider";
 import { getConfig } from "@/lib/api";
 
@@ -21,11 +22,13 @@ export function LegacyTeamChatRedirect() {
       .then((config) => {
         if (cancelled) return;
         const sessionId = config.teams?.[teamId]?.sessionId || `team-${teamId}`;
-        router.replace(`/teams/${encodeURIComponent(teamId)}/chat/${encodeURIComponent(sessionId)}/`);
+        rememberChatTarget(sessionId, { kind: "team", teamId });
+        router.replace(chatHref(sessionId));
       })
       .catch(() => {
         if (!cancelled) {
-          router.replace(`/teams/${encodeURIComponent(teamId)}/chat/${encodeURIComponent(`team-${teamId}`)}/`);
+          rememberChatTarget(`team-${teamId}`, { kind: "team", teamId });
+          router.replace(chatHref(`team-${teamId}`));
         }
       });
 

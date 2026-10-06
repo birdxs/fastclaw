@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import { chatHref, newAgentChat } from "@/lib/chat-route";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -79,7 +80,7 @@ export function ChatRowActions({
         typeof window !== "undefined" &&
         window.location.pathname.replace(/\/$/, "").endsWith("/chat/" + session.id)
       ) {
-        router.replace(`/agents/${encodeURIComponent(agentId)}/chat/`);
+        router.replace(chatHref(newAgentChat(agentId)));
       }
       onChanged();
     }

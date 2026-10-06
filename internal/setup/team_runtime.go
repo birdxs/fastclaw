@@ -5,15 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
+	"github.com/fastclaw-ai/fastclaw/internal/channels"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -28,20 +31,38 @@ type teamRunMessage struct {
 	Timestamp   int64               `json:"timestamp"`
 	AgentID     string              `json:"agentId,omitempty"`
 	GroupTurnID string              `json:"groupTurnId"`
+	// Deliveries are envelopes of the private messages this member sent
+	// alongside the message: the group shows "sent privately to …" but
+	// never the body, which reaches only the sender and recipient (the
+	// recipient's privateInbox, or the human's direct chat).
+	Deliveries []teamDelivery `json:"deliveries,omitempty"`
+}
+
+type teamDelivery struct {
+	ID            string `json:"id"`
+	RecipientID   string `json:"recipientId"`
+	RecipientName string `json:"recipientName"`
+	Intent        string `json:"intent,omitempty"`
+	// Session is set for human-addressed deliveries: the direct chat the
+	// body landed in, so the receipt can link there.
+	Session string `json:"session,omitempty"`
 }
 type teamRunSnapshot struct {
-	CompleteHistory bool             `json:"completeHistory"`
-	Phase           string           `json:"phase,omitempty"`
-	PhaseDetail     *teamPhase       `json:"phaseDetail,omitempty"`
-	Rounds          int              `json:"rounds,omitempty"`
-	Limited         bool             `json:"limited,omitempty"`
-	SessionID       string           `json:"sessionId"`
-	TurnID          string           `json:"turnId"`
-	Status          string           `json:"status"`
-	Title           string           `json:"title"`
-	UpdatedAt       int64            `json:"updatedAt"`
-	ActiveAgents    []string         `json:"activeAgents"`
-	Messages        []teamRunMessage `json:"messages"`
+	CompleteHistory bool       `json:"completeHistory"`
+	Phase           string     `json:"phase,omitempty"`
+	PhaseDetail     *teamPhase `json:"phaseDetail,omitempty"`
+	Rounds          int        `json:"rounds,omitempty"`
+	Limited         bool       `json:"limited,omitempty"`
+	SessionID       string     `json:"sessionId"`
+	TurnID          string     `json:"turnId"`
+	Status          string     `json:"status"`
+	Title           string     `json:"title"`
+	// Preview is the latest message ("Name: text"), set only on topic
+	// listings so the chat list can show it without the transcript.
+	Preview      string           `json:"preview,omitempty"`
+	UpdatedAt    int64            `json:"updatedAt"`
+	ActiveAgents []string         `json:"activeAgents"`
+	Messages     []teamRunMessage `json:"messages"`
 }
 type teamRun struct {
 	finished bool // completion checkpoint is committed before a new turn may start
@@ -67,6 +88,71 @@ func (run *teamRun) read() teamRunSnapshot {
 	result.ActiveAgents = append([]string{}, result.ActiveAgents...)
 	return result
 }
+
+// attachDeliveries records a member's private messages as a receipt on
+// the last message it produced this turn — or on an empty receipt-only
+// message when the reply was entirely private.
+func (run *teamRun) attachDeliveries(out teamOutcome, members []resolvedTeamMember, humanName string) {
+	if len(out.private) == 0 {
+		return
+	}
+	deliveries := make([]teamDelivery, 0, len(out.private))
+	for _, p := range out.private {
+		name := humanName
+		if p.Recipient != "human" {
+			for _, m := range members {
+				if m.AgentID == p.Recipient {
+					name = m.Name
+				}
+			}
+		}
+		deliveries = append(deliveries, teamDelivery{ID: p.ID, RecipientID: p.Recipient, RecipientName: name, Intent: p.Intent, Session: p.Session})
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if len(out.messages) > 0 {
+		last := out.messages[len(out.messages)-1].ID
+		for i := range run.snapshot.Messages {
+			if run.snapshot.Messages[i].ID == last {
+				run.snapshot.Messages[i].Deliveries = append(run.snapshot.Messages[i].Deliveries, deliveries...)
+				return
+			}
+		}
+	}
+	run.snapshot.Messages = append(run.snapshot.Messages, teamRunMessage{
+		ID:          fmt.Sprintf("%s-%s-private-%d", run.snapshot.TurnID, out.member.AgentID, len(run.snapshot.Messages)),
+		Role:        "agent",
+		AgentID:     out.member.AgentID,
+		Timestamp:   time.Now().UnixMilli(),
+		GroupTurnID: run.snapshot.TurnID,
+		Deliveries:  deliveries,
+	})
+}
+
+// latestDirectSession is the agent's direct chat in the sense of the
+// sidebar: its most recently active plain web session (no project, not a
+// group-member or inbox session). With none yet, a new session id.
+func latestDirectSession(handle AgentHandle) string {
+	best, bestAt := "", int64(-1)
+	for _, entry := range handle.WebChatSessions() {
+		id := entry.ChatID
+		if id == "" {
+			id = entry.ID
+		}
+		if entry.ProjectID != "" || (entry.Channel != "" && entry.Channel != "web") ||
+			strings.HasPrefix(id, "team-") || strings.HasPrefix(id, "group-inbox-") {
+			continue
+		}
+		if at := entry.UpdatedAt; at > bestAt {
+			best, bestAt = id, at
+		}
+	}
+	if best != "" {
+		return best
+	}
+	return fmt.Sprintf("s-%d-%s", time.Now().UnixMilli(), strconv.FormatInt(rand.Int63n(36*36*36*36*36*36), 36))
+}
+
 func (run *teamRun) event(member string, env agent.EventEnvelope) {
 	run.mu.Lock()
 	defer run.mu.Unlock()
@@ -373,7 +459,11 @@ func (s *Server) handleTeamTopics(w http.ResponseWriter, r *http.Request) {
 			id := strings.TrimSuffix(memberSession, "-agent-"+m.AgentID)
 			if old, ok := topics[id]; !ok || entry.UpdatedAt > old.UpdatedAt {
 				title := legacyTeamTopicTitle(entry.Title, entry.Preview)
-				topics[id] = teamRunSnapshot{SessionID: id, Title: title, Status: "idle", UpdatedAt: entry.UpdatedAt, ActiveAgents: []string{}}
+				preview := entry.LastMessage
+				if preview == "" {
+					preview = entry.Preview
+				}
+				topics[id] = teamRunSnapshot{SessionID: id, Title: title, Preview: compactTeamPreview(preview), Status: "idle", UpdatedAt: entry.UpdatedAt, ActiveAgents: []string{}}
 			}
 		}
 	}
@@ -395,6 +485,7 @@ func (s *Server) handleTeamTopics(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			snapshot := record.Snapshot
+			snapshot.Preview = teamMessagesPreview(snapshot.Messages, members)
 			snapshot.Messages = nil
 			if snapshot.Status == "running" || len(snapshot.ActiveAgents) > 0 {
 				snapshot.Status = "stopped"
@@ -407,6 +498,7 @@ func (s *Server) handleTeamTopics(w http.ResponseWriter, r *http.Request) {
 	for k, run := range s.teamRuns {
 		if k.User == s.effectiveUserID(r) && k.Team == req.TeamID {
 			snapshot := run.read()
+			snapshot.Preview = teamMessagesPreview(snapshot.Messages, members)
 			snapshot.Messages = nil
 			topics[k.Session] = snapshot
 		}
@@ -418,6 +510,37 @@ func (s *Server) handleTeamTopics(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].UpdatedAt > result[j].UpdatedAt })
 	jsonResponse(w, 200, map[string]any{"topics": result})
+}
+
+// teamMessagesPreview summarizes a topic's latest visible message for the
+// chat list: agent turns are prefixed with the member's name.
+func teamMessagesPreview(messages []teamRunMessage, members []resolvedTeamMember) string {
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		text := compactTeamPreview(m.Content)
+		if text == "" || (m.Role != "agent" && m.Role != "user") {
+			continue
+		}
+		if m.Role == "agent" {
+			for _, member := range members {
+				if member.AgentID == m.AgentID && member.Name != "" {
+					return member.Name + ": " + text
+				}
+			}
+		}
+		return text
+	}
+	return ""
+}
+
+// compactTeamPreview flattens a message into one short line, folding
+// multi-bubble split markers into spaces.
+func compactTeamPreview(text string) string {
+	text = strings.Join(strings.Fields(strings.ReplaceAll(text, channels.SplitMessageMarker, " ")), " ")
+	if runes := []rune(text); len(runes) > 100 {
+		return string(runes[:100]) + "..."
+	}
+	return text
 }
 
 // Backwards-compatible SSE transport; disconnecting only drops this observer.

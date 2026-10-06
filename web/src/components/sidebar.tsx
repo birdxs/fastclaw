@@ -41,6 +41,7 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
   const isActAsView = !!searchParams?.get("actAs");
   const pathname = usePathname() || "";
   const isConversationRoute =
+    /^\/chat\/[^/]+\/?$/.test(pathname) ||
     /^\/agents\/[^/]+\/(chat|project|team)(?:\/|$)/.test(pathname) ||
     /^\/teams\/[^/]+\/chat\/[^/]+(?:\/|$)/.test(pathname);
 
@@ -62,7 +63,7 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
         <div className="flex min-h-svh flex-col">
           <header
             className={`sticky top-0 z-20 flex items-center bg-background/90 backdrop-blur ${
-              isConversationRoute ? "h-14" : "h-12 gap-2 px-3"
+              isConversationRoute ? "h-14" : "h-14 gap-2 px-3"
             }`}
           >
             {headerNode}
@@ -86,7 +87,6 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
         style={
           {
             "--sidebar-offset": APP_RAIL_WIDTH,
-            ...(isConversationRoute ? { "--sidebar-width-icon": "64px" } : {}),
           } as React.CSSProperties
         }
       >
@@ -97,11 +97,11 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
             className={`sticky top-0 z-20 flex items-center bg-background/90 backdrop-blur ${
               isConversationRoute
                 ? "h-14"
-                : "h-12 gap-2 px-3"
+                : "h-14 gap-2 px-3"
             }`}
           >
             <SidebarTrigger
-              className={isConversationRoute ? "ml-2 shrink-0 md:hidden" : "-ml-1"}
+              className={isConversationRoute ? "ml-3 shrink-0 text-muted-foreground" : "-ml-1"}
             />
             {headerNode}
           </header>

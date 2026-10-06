@@ -58,8 +58,17 @@ install: build
 test:
 	go test ./...
 
-dev: build-web
-	air
+# dev runs the Go gateway under air (Go-only rebuilds) and the web UI under
+# `next dev` on WEB_PORT. The gateway proxies page requests to it, so keep
+# using http://localhost:18953 and web edits hot-reload. The embedded export
+# is only built once so the binary compiles; `make build-web` refreshes it.
+WEB_PORT ?= 18954
+dev:
+	@test -f internal/setup/web/index.html || $(MAKE) build-web
+	@cd web && pnpm install --frozen-lockfile --silent
+	@trap 'kill 0' EXIT INT TERM; \
+	(cd web && pnpm exec next dev --hostname 127.0.0.1 --port $(WEB_PORT)) & \
+	FASTCLAW_DEV_SKIP_WEB=1 FASTCLAW_DEV_WEB_URL=http://127.0.0.1:$(WEB_PORT) air
 
 clean:
 	rm -rf bin/ dist/ tmp/

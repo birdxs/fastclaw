@@ -12,6 +12,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
+  useSidebarOptional,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +38,7 @@ import { NavUser } from "@/components/nav-user";
 import { SidebarTitle } from "@/components/sidebar-title";
 import { ChatSearchDialog } from "@/components/chat-search-dialog";
 import { useLocale, type Locale } from "@/components/locale-provider";
+import { agentChatHref, chatHref, rememberChatTarget } from "@/lib/chat-route";
 import { apiFetch, createAgent, updateConfig, getTeamInbox, type TeamInboxNotice, type MeResponse, type TeamEntry } from "@/lib/api";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
 
@@ -53,6 +55,9 @@ export interface ConsumerAgentItem {
 export interface ConsumerTeamItem extends TeamEntry {
   id: string;
   name: string;
+  // Latest message in the group's most recent session.
+  preview?: string;
+  updatedAt?: number;
 }
 
 const AGENT_PAGE_SIZE = 20;
@@ -112,6 +117,11 @@ function relativeSessionTime(updatedAt: number | undefined, locale: Locale) {
   return date.toLocaleDateString(locale, { month: "short", day: "numeric" });
 }
 
+// Chat list rows: a small avatar on the name line, preview full width
+// underneath, flush with the avatar.
+const SIDEBAR_ROW_CLASS =
+  "h-auto rounded-lg px-2.5 py-2 data-active:font-normal hover:bg-black/[0.05] dark:hover:bg-white/[0.07]";
+
 export function ConsumerChatSidebar({
   activeAgentId,
   activeTeamId,
@@ -141,7 +151,7 @@ export function ConsumerChatSidebar({
         if (cancelled) return;
         const unread = (messages || []).filter((notice) => {
           const key = `fastclaw:group-inbox-read:${uid}:${notice.agentId}:${notice.sessionId}`;
-          if (pathname === `/agents/${encodeURIComponent(notice.agentId)}/chat/${encodeURIComponent(notice.sessionId)}/`) {
+          if (pathname === chatHref(notice.sessionId) || pathname === `/agents/${encodeURIComponent(notice.agentId)}/chat/${encodeURIComponent(notice.sessionId)}/`) {
             localStorage.setItem(key, String(Math.max(Number(localStorage.getItem(key) || 0), notice.timestamp)));
             return false;
           }
@@ -174,18 +184,27 @@ export function ConsumerChatSidebar({
 
   const filtered = agents;
   const filteredTeams = teams;
-  const visibleAgents = React.useMemo(
-    () => agents.slice(0, visibleCount),
-    [agents, visibleCount],
+  const entries = React.useMemo(
+    () => [
+      ...filteredTeams.map((team) => ({ kind: "team" as const, id: `team-${team.id}`, updatedAt: team.updatedAt || 0, team })),
+      ...agents.map((agent) => ({ kind: "agent" as const, id: agent.id, updatedAt: agent.updatedAt || 0, agent })),
+    ].sort((a, b) => b.updatedAt - a.updatedAt),
+    [agents, filteredTeams],
   );
-  const hasMoreAgents = visibleAgents.length < agents.length;
+  const visibleEntries = React.useMemo(
+    () => entries.slice(0, visibleCount),
+    [entries, visibleCount],
+  );
+  const hasMoreAgents = visibleEntries.length < entries.length;
   const unreadAgentIds = React.useMemo(() => new Set(inbox.map((notice) => notice.agentId)), [inbox]);
 
+  // On phones the list is a sheet over the chat; close it on selection.
+  const sidebar = useSidebarOptional();
   const openAgent = (agent: ConsumerAgentItem) => {
-    const base = `/agents/${encodeURIComponent(agent.id)}/chat/`;
+    sidebar?.setOpenMobile(false);
     const latestPrivate = inbox.filter((notice) => notice.agentId === agent.id).sort((a, b) => b.timestamp - a.timestamp)[0];
-    const sessionId = latestPrivate?.sessionId || agent.sessionId;
-    const target = sessionId ? `${base}${encodeURIComponent(sessionId)}/` : base;
+    // No conversation yet: open a new session right away, like a group.
+    const target = agentChatHref(agent.id, latestPrivate?.sessionId || agent.sessionId);
     // This row came from the caller's authenticated agent list, so the access
     // gate can safely keep the current shell visible during the route swap.
     rememberAgentAccess(agent.id);
@@ -198,20 +217,116 @@ export function ConsumerChatSidebar({
   };
 
   const openTeam = (team: ConsumerTeamItem) => {
+    sidebar?.setOpenMobile(false);
     const sessionId = team.sessionId || `team-${team.id}`;
     rememberAgentAccess(team.agents);
-    window.history.pushState(null, "", `/teams/${encodeURIComponent(team.id)}/chat/${encodeURIComponent(sessionId)}/`);
+    rememberChatTarget(sessionId, { kind: "team", teamId: team.id });
+    window.history.pushState(null, "", chatHref(sessionId));
+  };
+
+  // Groups and Agents share one list, newest activity first — a group
+  // isn't pinned above private chats.
+  const renderTeamRow = (team: ConsumerTeamItem) => {
+        const members = team.agents
+          .map((id) => agents.find((agent) => agent.id === id))
+          .filter((agent): agent is ConsumerAgentItem => !!agent);
+        const memberLabel = members.map((member) => member.name).join("、");
+        return (
+          <SidebarMenuItem key={`team-${team.id}`}>
+            <SidebarMenuButton
+              isActive={activeTeamId === team.id}
+              onClick={() => openTeam(team)}
+              tooltip={team.name}
+              className={SIDEBAR_ROW_CLASS + " data-active:bg-[#e9e3ec] dark:data-active:bg-[#3a303d]"}
+            >
+              <span className="grid min-w-0 flex-1 gap-1">
+                <span className="flex min-w-0 items-center gap-2">
+                  <TeamAvatarStack members={members} avatarUrl={team.avatarUrl} size={20} />
+                  <span className="min-w-0 truncate text-[15px] font-semibold leading-5 text-foreground">
+                    {team.name}
+                  </span>
+                  <span className="shrink-0 rounded-full bg-[#e8e1eb] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[#756878] dark:bg-white/10 dark:text-[#c9bdcc]">
+                    {tr("Group", "群聊")}
+                  </span>
+                  <span className="ml-auto shrink-0 text-[11px] font-normal text-muted-foreground/80">
+                    {relativeSessionTime(team.updatedAt, locale)}
+                  </span>
+                </span>
+                <span className="truncate text-[13px] font-normal leading-5 text-muted-foreground">
+                  {team.preview
+                    ? renderInlineMarkdown(team.preview)
+                    : memberLabel || tr("No Agents", "暂无 Agent")}
+                </span>
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        );
+      
+  };
+
+  const renderAgentRow = (agent: ConsumerAgentItem) => {
+        const active = !activeTeamId && activeAgentId === agent.id;
+        // Previews are the raw last reply, so fold multi-bubble split
+        // markers back into spaces.
+        const summary = (agent.preview || agent.description || t("sidebar.greeting", { name: agent.name }))
+          .replace(/\s*<\|split\|>\s*/g, " ");
+        const unreadCount = inbox.filter((notice) => notice.agentId === agent.id).length;
+        return (
+          <SidebarMenuItem key={agent.id}>
+            <SidebarMenuButton
+              isActive={active}
+              onClick={() => openAgent(agent)}
+              tooltip={agent.name}
+              className={SIDEBAR_ROW_CLASS + " data-active:bg-black/[0.075] dark:data-active:bg-white/[0.11]"}
+            >
+              <span className="grid min-w-0 flex-1 gap-1">
+                <span className="flex min-w-0 items-center gap-2">
+                  <BotAvatar
+                    agentId={agent.id}
+                    avatarUrl={agent.avatarUrl}
+                    seed={agent.id}
+                    size={20}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[15px] font-semibold leading-5 text-foreground">
+                    {agent.name || t("sidebar.untitledBot")}
+                  </span>
+                  <span className="shrink-0 text-[11px] font-normal text-muted-foreground/80">
+                    {relativeSessionTime(agent.updatedAt, locale)}
+                  </span>
+                </span>
+                {/* Unread count sits at the end of the preview line, under
+                    the time, like a messaging app's chat list. */}
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[13px] font-normal leading-5 text-muted-foreground">
+                    {renderInlineMarkdown(summary)}
+                  </span>
+                  {unreadCount > 0 && (
+                    <span
+                      aria-label={tr("{{count}} unread private messages", "{{count}} 条未读私信", { count: unreadCount })}
+                      className="inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-medium tabular-nums leading-none text-white"
+                    >
+                      {unreadCount > 99 ? "99+" : unreadCount}
+                    </span>
+                  )}
+                </span>
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        );
+      
   };
 
   return (
     <>
       <Sidebar
-        collapsible="icon"
+        collapsible="offcanvas"
         className="border-r border-black/8 bg-[#f7f7f7] dark:border-white/8 dark:bg-[#171717]"
       >
       {/* Same header box as the Console / Admin sidebars (SidebarHeader's
-          p-2 + SidebarTitle); search and create sit right of the title. */}
-      <SidebarHeader className="pb-3 group-data-[collapsible=icon]:pb-2">
+          p-2 + SidebarTitle); search and create sit right of the title.
+          56px title + 8px bottom puts the first row at 64px, level with the
+          AppRail's first area button (8 + 40 logo + 12 + 4 gap). */}
+      <SidebarHeader className="pt-0 pb-2">
         <SidebarTitle
           title={tr("Chat", "对话")}
           className="group-data-[collapsible=icon]:justify-center"
@@ -261,12 +376,12 @@ export function ConsumerChatSidebar({
             <>
               {[0, 1, 2].map((item) => (
                 <SidebarMenuItem key={`agent-loading-${item}`}>
-                  <div className="flex h-[58px] items-center gap-3 rounded-lg px-2.5 py-2 group-data-[collapsible=icon]:size-12! group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:rounded-xl group-data-[collapsible=icon]:p-[7px]!">
-                    <div className="size-[34px] shrink-0 animate-pulse rounded-full bg-black/[0.075] motion-reduce:animate-none dark:bg-white/[0.1]" />
-                    <div className="min-w-0 flex-1 space-y-2 group-data-[collapsible=icon]:hidden">
+                  <div className="space-y-2 rounded-lg px-2.5 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="size-5 shrink-0 animate-pulse rounded-full bg-black/[0.075] motion-reduce:animate-none dark:bg-white/[0.1]" />
                       <div className="h-3 w-2/5 animate-pulse rounded-full bg-black/[0.08] motion-reduce:animate-none dark:bg-white/[0.11]" />
-                      <div className="h-2.5 w-4/5 animate-pulse rounded-full bg-black/[0.055] motion-reduce:animate-none dark:bg-white/[0.075]" />
                     </div>
+                    <div className="h-2.5 w-3/5 animate-pulse rounded-full bg-black/[0.055] motion-reduce:animate-none dark:bg-white/[0.075]" />
                   </div>
                 </SidebarMenuItem>
               ))}
@@ -275,72 +390,7 @@ export function ConsumerChatSidebar({
               </span>
             </>
           )}
-          {filteredTeams.map((team) => {
-            const members = team.agents
-              .map((id) => agents.find((agent) => agent.id === id))
-              .filter((agent): agent is ConsumerAgentItem => !!agent);
-            const memberLabel = members.map((member) => member.name).join("、");
-            return (
-              <SidebarMenuItem key={`team-${team.id}`}>
-                <SidebarMenuButton
-                  isActive={activeTeamId === team.id}
-                  onClick={() => openTeam(team)}
-                  tooltip={team.name}
-                  className="h-[58px] gap-3 rounded-lg px-2.5 py-2 data-active:bg-[#e9e3ec] data-active:font-normal hover:bg-black/[0.05] group-data-[collapsible=icon]:size-12! group-data-[collapsible=icon]:rounded-xl group-data-[collapsible=icon]:p-[7px]! dark:data-active:bg-[#3a303d] dark:hover:bg-white/[0.07]"
-                >
-                  <TeamAvatarStack members={members} size={34} />
-                  <span className="grid min-w-0 flex-1 gap-0.5 group-data-[collapsible=icon]:hidden">
-                    <span className="flex min-w-0 items-baseline justify-between gap-2">
-                      <span className="truncate text-[15px] font-semibold leading-5 text-foreground">
-                        {team.name}
-                      </span>
-                      <span className="shrink-0 rounded-full bg-[#e8e1eb] px-1.5 py-0.5 text-[10px] font-semibold text-[#756878] dark:bg-white/10 dark:text-[#c9bdcc]">
-                        {tr("Group", "群聊")}
-                      </span>
-                    </span>
-                    <span className="truncate text-[13px] font-normal leading-5 text-muted-foreground">
-                      {memberLabel || tr("No Agents", "暂无 Agent")}
-                    </span>
-                  </span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            );
-          })}
-          {visibleAgents.map((agent) => {
-            const active = !activeTeamId && activeAgentId === agent.id;
-            const summary = agent.preview || agent.description || t("sidebar.greeting", { name: agent.name });
-            return (
-              <SidebarMenuItem key={agent.id}>
-                <SidebarMenuButton
-                  isActive={active}
-                  onClick={() => openAgent(agent)}
-                  tooltip={agent.name}
-                  className="h-[58px] gap-3 rounded-lg px-2.5 py-2 data-active:bg-black/[0.075] data-active:font-normal hover:bg-black/[0.05] group-data-[collapsible=icon]:size-12! group-data-[collapsible=icon]:rounded-xl group-data-[collapsible=icon]:p-[7px]! dark:data-active:bg-white/[0.11] dark:hover:bg-white/[0.07]"
-                >
-                  <BotAvatar
-                    agentId={agent.id}
-                    avatarUrl={agent.avatarUrl}
-                    seed={agent.id}
-                    size={34}
-                  />
-                  <span className="grid min-w-0 flex-1 gap-0.5 group-data-[collapsible=icon]:hidden">
-                    <span className="flex min-w-0 items-baseline justify-between gap-2">
-                      <span className="truncate text-[15px] font-semibold leading-5 text-foreground">
-                        {agent.name || t("sidebar.untitledBot")}
-                        {inbox.some((notice) => notice.agentId === agent.id) && <span aria-label={tr("Unread private messages", "未读私信")} className="ml-2 inline-flex min-w-4 items-center justify-center rounded-full bg-red-500 px-1 text-[10px] leading-4 text-white">{inbox.filter((notice) => notice.agentId === agent.id).length}</span>}
-                      </span>
-                      <span className="shrink-0 text-[11px] font-normal text-muted-foreground/80">
-                        {relativeSessionTime(agent.updatedAt, locale)}
-                      </span>
-                    </span>
-                    <span className="truncate text-[13px] font-normal leading-5 text-muted-foreground">
-                      {renderInlineMarkdown(summary)}
-                    </span>
-                  </span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            );
-          })}
+          {visibleEntries.map((entry) => entry.kind === "team" ? renderTeamRow(entry.team) : renderAgentRow(entry.agent))}
           {hasMoreAgents && (
             <SidebarMenuItem>
               <SidebarMenuButton
@@ -406,7 +456,9 @@ export function ConsumerChatSidebar({
           subtitle={me?.user?.role || tr("user", "用户")}
         />
       </SidebarFooter>
-      <SidebarRail toggleOnClick={false} />
+      {/* Resize-only handle: nothing to drag once the list is collapsed,
+          and offcanvas would leave it peeking out past the app rail. */}
+      <SidebarRail toggleOnClick={false} className="group-data-[collapsible=offcanvas]:hidden!" />
       </Sidebar>
       <ChatSearchDialog
         open={searchOpen}
@@ -421,7 +473,7 @@ export function ConsumerChatSidebar({
         open={createOpen}
         onOpenChange={setCreateOpen}
         onCreated={(agentId) => {
-          router.push(`/agents/${encodeURIComponent(agentId)}/chat/`);
+          router.push(agentChatHref(agentId));
         }}
       />
       <CreateTeamDialog

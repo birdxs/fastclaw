@@ -40,12 +40,14 @@ import {
   getAgents,
   getChatSessions,
   getConfig,
+  getTeamTopics,
   getMe,
   getStatus,
   type MeResponse,
   type StatusResponse,
 } from "@/lib/api";
 import { useLocale } from "@/components/locale-provider";
+import { useChatRoute } from "@/lib/chat-route";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
 
 // Extract agent ID from pathname like /agents/default/chat/ or an Agent's
@@ -90,13 +92,19 @@ const consoleNav = (pathname: string): NavItem[] => [
 
 // The /admin sidebar: deployment-wide pages, super_admin only (AuthGuard
 // gates the routes, the APIs enforce it).
-const ADMIN_NAV: NavItem[] = [
-  { title: "Users", url: "/admin/users/", icon: UsersIcon },
-  { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
-  { title: "Token Usage", url: "/admin/usage/", icon: CoinsIcon },
+const adminNav = (pathname: string): NavItem[] => [
+  {
+    title: "Overview",
+    url: "/admin/",
+    icon: GaugeIcon,
+    active: pathname.replace(/\/$/, "") === "/admin",
+  },
   { title: "Models", url: "/admin/models/", icon: BrainIcon },
   { title: "Skills", url: "/admin/skills/", icon: SparklesIcon },
   { title: "Tools", url: "/admin/tools/", icon: WrenchIcon },
+  { title: "Users", url: "/admin/users/", icon: UsersIcon },
+  { title: "Chats", url: "/admin/chats/", icon: MessagesSquareIcon },
+  { title: "Token Usage", url: "/admin/usage/", icon: CoinsIcon },
   { title: "About", url: "/admin/about/", icon: InfoIcon },
 ];
 
@@ -108,8 +116,11 @@ function isAdminRoute(pathname: string) {
 export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   const { t, tr } = useLocale();
   const pathname = usePathname();
-  const activeAgentId = extractAgentId(pathname);
-  const activeTeamId = extractTeamId(pathname);
+  // /chat/<sessionId> doesn't name the agent or group; AppShell resolved it.
+  const chatRoute = useChatRoute();
+  const chatTarget = chatRoute.status === "ready" ? chatRoute.target : null;
+  const activeAgentId = extractAgentId(pathname) || (chatTarget?.kind === "agent" ? chatTarget.agentId : null);
+  const activeTeamId = extractTeamId(pathname) || (chatTarget?.kind === "team" ? chatTarget.teamId : null);
 
   const [status, setStatus] = React.useState<StatusResponse | null>(null);
   const [me, setMe] = React.useState<MeResponse | null>(null);
@@ -126,6 +137,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
   // Settings entry (User tabs only). `settingsUserOnly` picks the mode.
   const [settingsOpen, setSettingsOpen] = React.useState(false);
   const [settingsUserOnly, setSettingsUserOnly] = React.useState(false);
+  // The agent being edited. Defaults to the URL's agent; a group chat
+  // opens a member's settings by naming it in the event.
+  const [settingsAgentId, setSettingsAgentId] = React.useState("");
   const [settingsDefaultTab, setSettingsDefaultTab] =
     React.useState<AgentSettingsTab>("profile");
 
@@ -140,13 +154,17 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
         tab?: AgentSettingsTab;
         userOnly?: boolean;
       }>).detail;
-      if (detail?.agentId && detail.agentId !== activeAgentId) return;
+      // Away from an agent URL (a group chat) the event names the member
+      // to edit; on an agent URL, ignore events for another agent.
+      if (activeAgentId ? detail?.agentId && detail.agentId !== activeAgentId : !detail?.agentId) return;
+      setSettingsAgentId(activeAgentId ? "" : detail?.agentId || "");
       const userOnly = detail?.userOnly === true;
       setSettingsUserOnly(userOnly);
       setSettingsDefaultTab(detail?.tab || (userOnly ? "general" : "profile"));
       setSettingsOpen(true);
     };
     const openUserSettings = () => {
+      setSettingsAgentId("");
       setSettingsUserOnly(true);
       setSettingsDefaultTab("general");
       setSettingsOpen(true);
@@ -193,6 +211,7 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             model: a.model,
             description: a.description,
             avatarUrl: a.avatarUrl,
+            createdAt: a.createdAt,
           })),
         );
         const roles: Record<string, "owner" | "viewer"> = {};
@@ -234,7 +253,10 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             description: agent.description,
             avatarUrl: agent.avatarUrl,
             preview: latest?.lastMessage || latest?.preview,
-            updatedAt: latest?.lastMessageAt || latest?.updatedAt || latest?.createdAt,
+            // No chat yet → the Agent's creation time, which is when its
+            // welcome message first appeared, so the row still shows a time.
+            updatedAt: latest?.lastMessageAt || latest?.updatedAt || latest?.createdAt
+              || (agent.createdAt ? Date.parse(agent.createdAt) || undefined : undefined),
             sessionId: latest?.id,
           } satisfies ConsumerAgentItem;
         }),
@@ -284,6 +306,14 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
             name: team.name?.trim() || tr("Group chat", "群聊"),
           }));
           setConsumerTeams(items.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+          // Then fill in each group's latest message for the row preview.
+          return Promise.all(items.map((item) =>
+            getTeamTopics(item.id)
+              .then(({ topics }) => ({ ...item, preview: topics[0]?.preview, updatedAt: topics[0]?.updatedAt }))
+              .catch(() => item),
+          )).then((withPreview) => {
+            if (!aborted) setConsumerTeams(withPreview);
+          });
         })
         .catch(() => {
           if (!aborted) setConsumerTeams([]);
@@ -291,9 +321,11 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     };
     refreshTeams();
     window.addEventListener("fastclaw:teams-changed", refreshTeams);
+    window.addEventListener("fastclaw:sessions-changed", refreshTeams);
     return () => {
       aborted = true;
       window.removeEventListener("fastclaw:teams-changed", refreshTeams);
+      window.removeEventListener("fastclaw:sessions-changed", refreshTeams);
     };
   }, [tr]);
 
@@ -314,7 +346,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           prev.some((x) => x.id === a.id)
             ? prev
             : [
-                { id: a.id, name: a.name, model: a.model, description: a.description, avatarUrl: a.avatarUrl },
+                // createdAt too: a just-created agent arrives here, and with
+                // no chat yet it sorts by creation time — to the top.
+                { id: a.id, name: a.name, model: a.model, description: a.description, avatarUrl: a.avatarUrl, createdAt: a.createdAt },
                 ...prev,
               ],
         );
@@ -356,7 +390,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
     [tr],
   );
 
+  const settingsTargetId = settingsAgentId || activeAgentId;
   const isConsumerChat =
+    chatRoute.status !== "none" ||
     (!!activeAgentId && /^\/agents\/[^/]+\/(chat|project|chats|team)(?:\/|$)/.test(pathname)) ||
     /^\/teams\/[^/]+\/chat\/[^/]+(?:\/|$)/.test(pathname);
 
@@ -375,8 +411,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           open={settingsOpen}
           onOpenChange={setSettingsOpen}
           defaultTab={settingsDefaultTab}
-          role={activeAgentId && agentRoles[activeAgentId] === "viewer" ? "viewer" : "owner"}
-          userOnly={settingsUserOnly || !activeAgentId}
+          role={settingsTargetId && agentRoles[settingsTargetId] === "viewer" ? "viewer" : "owner"}
+          userOnly={settingsUserOnly || !settingsTargetId}
+          agentId={settingsAgentId || undefined}
         />
       </>
     );
@@ -384,16 +421,18 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
 
   return (
     <Sidebar collapsible="offcanvas" {...props}>
-      <SidebarHeader>
+      {/* pb-0: NavMain's SidebarGroup already pads the list, so the first
+          item sits the same distance under the title as in the Chat list. */}
+      <SidebarHeader className="pt-0 pb-0">
         <SidebarTitle
-          title={isAdminRoute(pathname) ? tr("Admin", "管理后台") : tr("Console", "控制台")}
+          title={isAdminRoute(pathname) ? tr("System", "系统") : tr("Console", "控制台")}
         />
       </SidebarHeader>
       <SidebarContent>
         {/* Console agent pages (/console/agents/<id>/…) keep the console
             nav, with Agents highlighted. */}
         {isAdminRoute(pathname) ? (
-          <NavMain items={localizeNavItems(ADMIN_NAV)} />
+          <NavMain items={localizeNavItems(adminNav(pathname))} />
         ) : (
           <NavMain items={localizeNavItems(consoleNav(pathname))} />
         )}
@@ -410,7 +449,9 @@ export function AppSidebar(props: React.ComponentProps<typeof Sidebar>) {
           subtitle={me?.user?.role || (isAdmin ? "super_admin" : "user")}
         />
       </SidebarFooter>
-      <SidebarRail />
+      {/* Collapsed offcanvas would leave the handle peeking out past the
+          app rail; the header trigger reopens the sidebar instead. */}
+      <SidebarRail className="group-data-[collapsible=offcanvas]:hidden!" />
       <AgentSettingsDialog
         open={settingsOpen}
         onOpenChange={setSettingsOpen}

@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -268,6 +270,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/admin/registration", admin(s.handleGetRegistration))
 	mux.HandleFunc("PUT /api/admin/registration", admin(s.handleSetRegistration))
 	mux.HandleFunc("GET /api/admin/chats", admin(s.handleAdminChats))
+	mux.HandleFunc("POST /api/admin/logs/reveal", admin(s.handleRevealLogs))
 
 	// Per-user config (system_settings + scoped providers/channels).
 	mux.HandleFunc("GET /api/config", auth(s.handleGetConfig))
@@ -482,7 +485,18 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("setup: embed sub: %w", err)
 	}
-	mux.Handle("/", spaHandler{fs: webRoot})
+	if devURL := os.Getenv("FASTCLAW_DEV_WEB_URL"); devURL != "" {
+		// `make dev`: pages come from `next dev` (hot reload) instead of the
+		// embedded export, so the gateway port stays the single entry point.
+		h, err := newDevWebProxy(devURL)
+		if err != nil {
+			return err
+		}
+		slog.Info("setup: proxying web UI to dev server", "url", devURL)
+		mux.Handle("/", h)
+	} else {
+		mux.Handle("/", spaHandler{fs: webRoot})
+	}
 
 	var addr string
 	if s.bind == "all" {
@@ -610,6 +624,13 @@ func legacyConsoleRedirect(path string, query url.Values) (string, bool) {
 		target = "/console/agents/"
 	case len(parts) >= 3 && parts[0] == "agents" && consoleAgentTabs[parts[2]]:
 		target = "/console/" + trimmed + "/"
+	case len(parts) == 4 && (parts[0] == "agents" || parts[0] == "teams") && parts[2] == "chat" &&
+		parts[3] != "_" && query.Get("actAs") == "":
+		// Conversations live at /chat/<sessionId>, private and group alike;
+		// the page resolves the agent or group from the id. Admin audit
+		// links (?actAs=) open someone else's session, which that lookup
+		// can't resolve, so they keep the long form.
+		target = "/chat/" + parts[3] + "/"
 	default:
 		return "", false
 	}
@@ -622,6 +643,29 @@ func legacyConsoleRedirect(path string, query url.Values) (string, bool) {
 // spaHandler serves the embedded Next.js UI with SPA-style fallback.
 type spaHandler struct {
 	fs fs.FS
+}
+
+// newDevWebProxy forwards UI requests to a `next dev` server. The legacy
+// console redirects still apply; everything else, including the HMR
+// WebSocket, is passed through.
+func newDevWebProxy(raw string) (http.Handler, error) {
+	target, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("setup: FASTCLAW_DEV_WEB_URL: %w", err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		http.Error(w, "web dev server not ready ("+raw+"): "+err.Error(), http.StatusBadGateway)
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
+			if dest, ok := legacyConsoleRedirect(r.URL.Path, r.URL.Query()); ok {
+				http.Redirect(w, r, dest, http.StatusFound)
+				return
+			}
+		}
+		proxy.ServeHTTP(w, r)
+	}), nil
 }
 
 func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -661,6 +705,27 @@ func (h spaHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	for _, prefix := range []string{"agents/", "console/agents/"} {
 		if strings.HasPrefix(fsPath, prefix) && h.serveAgentPlaceholder(w, r, prefix, strings.TrimPrefix(fsPath, prefix)) {
 			return
+		}
+	}
+	if rest, ok := strings.CutPrefix(fsPath, "chat/"); ok && rest != "" {
+		// /chat/<sessionId>/… → the static export's chat/_/… placeholder,
+		// for the page and its RSC payloads alike.
+		sub := strings.SplitN(rest, "/", 2)
+		if sub[0] != "_" {
+			placeholder := "chat/_"
+			if len(sub) == 2 {
+				placeholder += "/" + sub[1]
+			}
+			for _, p := range []string{placeholder, placeholder + "/index.html"} {
+				if f, err := h.fs.Open(p); err == nil {
+					stat, statErr := f.Stat()
+					f.Close()
+					if statErr == nil && !stat.IsDir() {
+						http.ServeFileFS(w, r, h.fs, p)
+						return
+					}
+				}
+			}
 		}
 	}
 	if strings.HasPrefix(fsPath, "teams/") {

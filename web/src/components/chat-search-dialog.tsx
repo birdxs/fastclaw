@@ -140,7 +140,7 @@ export function ChatSearchDialog({
                   )}
                 >
                   {entry.kind === "team" ? (
-                    <TeamAvatarStack members={entry.members} size={30} />
+                    <TeamAvatarStack members={entry.members} avatarUrl={entry.team.avatarUrl} size={30} />
                   ) : (
                     <BotAvatar agentId={entry.agent.id} avatarUrl={entry.agent.avatarUrl} seed={entry.agent.id} size={30} />
                   )}

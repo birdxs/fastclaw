@@ -1,4 +1,5 @@
 import { getAgents } from "@/lib/api";
+import { agentChatHref, chatSessionFromPath, resolveChatTarget } from "@/lib/chat-route";
 
 // FastClaw's web UI has three areas, switched from the left rail (AppRail):
 // the chat (the official FastClaw client), /console (the account's own
@@ -15,7 +16,7 @@ const LAST_KEY: Record<Area, string> = {
   admin: "fastclaw:last-admin",
 };
 
-const CHAT_ROUTE = /^\/(?:agents\/[^/]+\/(?:chat|project)(?:\/|$)|teams\/[^/]+\/chat\/)/;
+const CHAT_ROUTE = /^\/(?:chat\/[^/]+\/?$|agents\/[^/]+\/(?:chat|project)(?:\/|$)|teams\/[^/]+\/chat\/)/;
 
 // areaOf maps a pathname to its area, or null for pages outside all three
 // (settings, onboarding, legacy redirects).
@@ -61,10 +62,14 @@ export async function resolveChatLanding(): Promise<string> {
   const lastAgent = lastChat.match(/^\/agents\/([^/]+)\//)?.[1];
   // Agent chats only resume while the agent still exists for this user;
   // group chats re-check access on their own screen.
-  if (lastChat && (!lastAgent || agents.some((a) => a.id === decodeURIComponent(lastAgent)))) {
+  // A /chat/<id> the server doesn't know (a new chat left before its first
+  // message, or one since deleted) isn't resumed.
+  const lastSession = chatSessionFromPath(lastChat.split("?")[0]);
+  const lastSessionOk = !lastSession || !!(await resolveChatTarget(lastSession).catch(() => null));
+  if (lastChat && lastSessionOk && (!lastAgent || agents.some((a) => a.id === decodeURIComponent(lastAgent)))) {
     return lastChat;
   }
-  return `/agents/${encodeURIComponent(agents[0].id)}/chat/`;
+  return agentChatHref(agents[0].id);
 }
 
 // areaHome is where switching to a management area lands: its last page,

@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Dialog,
@@ -25,29 +24,24 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Bot, Plus, Trash2, ImagePlus, Pencil } from "lucide-react";
+import { Bot, Plus, Trash2, ImagePlus, Pencil, MoreHorizontal } from "lucide-react";
 import {
-  adminListAgents,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
   apiFetch,
   getAgents,
   getMe,
-  getStatus,
   createAgent,
   deleteAgent,
   type AgentDetail,
 } from "@/lib/api";
 import { useLocale } from "@/components/locale-provider";
+import { agentChatHref } from "@/lib/chat-route";
 import { AgentSettingsDialog } from "@/components/agent-settings-dialog";
-
-interface OtherAgent {
-  id: string;
-  name: string;
-  description?: string;
-  userId: string;
-  ownerUsername?: string;
-  ownerEmail?: string;
-  ownerDisplayName?: string;
-}
 
 // AgentAvatar tries to load /api/agents/{id}/files/avatar.png and falls
 // back to the default Bot icon when the agent has no avatar yet (404).
@@ -55,16 +49,19 @@ function AgentAvatar({
   agent,
   bust,
   size = 48,
+  round = false,
 }: {
   agent: AgentDetail;
   bust?: number; // cache-buster ticked after upload
   size?: number;
+  round?: boolean;
 }) {
   const [failed, setFailed] = useState(false);
+  const shape = round ? "rounded-full" : "rounded-xl";
   if (!agent.avatarUrl || failed) {
     return (
       <div
-        className="flex shrink-0 items-center justify-center rounded-xl bg-primary/10 dark:bg-primary/15 border border-primary/15"
+        className={`flex shrink-0 items-center justify-center ${shape} bg-primary/10 dark:bg-primary/15 border border-primary/15`}
         style={{ width: size, height: size }}
       >
         <Bot className="text-primary" style={{ width: size * 0.5, height: size * 0.5 }} />
@@ -77,20 +74,20 @@ function AgentAvatar({
     <img
       src={url}
       alt={agent.name || agent.id}
-      className="shrink-0 rounded-xl object-cover"
+      className={`shrink-0 ${shape} object-cover`}
       style={{ width: size, height: size }}
       onError={() => setFailed(true)}
     />
   );
 }
 
+// Agents rendered per page of the grid.
+const AGENT_PAGE_SIZE = 30;
+
 export default function AgentsPage() {
   const { tr } = useLocale();
   const [agents, setAgents] = useState<AgentDetail[]>([]);
-  const [otherAgents, setOtherAgents] = useState<OtherAgent[]>([]);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"own" | "others">("own");
   // quotaLocked = true when the caller has agent_quota=0 (admin
   // provisions only). They can still browse /agents to see what's
   // been provisioned for them and jump into chat — we just hide the
@@ -132,26 +129,36 @@ export default function AgentsPage() {
     // /api/agents returns the caller's owned agents only. Public agents
     // owned by other users surface as separate links — they don't auto-
     // populate the dashboard list.
+    // The console is the caller's own account for admins too; other
+    // users' agents aren't listed here.
     const list = await getAgents().catch(() => [] as AgentDetail[]);
     setAgents(list);
-    // Admins also see other users' agents (read-only) below their own.
-    // We resolve isAdmin from /api/status and only call adminListAgents
-    // when entitled — non-admins would 403 and the UI would flash an error.
-    const status = await getStatus().catch(() => null);
-    const admin = !!status?.isAdmin;
-    setIsAdmin(admin);
-    if (admin) {
-      const visibleIds = new Set(list.map((a) => a.id));
-      const res = await adminListAgents().catch(() => null);
-      const all: OtherAgent[] = (res?.agents || []) as OtherAgent[];
-      setOtherAgents(all.filter((a) => !visibleIds.has(a.id)));
-    } else {
-      setOtherAgents([]);
-    }
     setLoading(false);
   };
 
-  const ownedAgents = agents;
+  // Newest first, rendered a page at a time: the next page loads when
+  // the end of the grid scrolls into view.
+  const ownedAgents = [...agents].sort(
+    (a, b) => (Date.parse(b.createdAt || "") || 0) - (Date.parse(a.createdAt || "") || 0),
+  );
+  const [visibleCount, setVisibleCount] = useState(AGENT_PAGE_SIZE);
+  const visibleAgents = ownedAgents.slice(0, visibleCount);
+  const hasMore = visibleAgents.length < ownedAgents.length;
+  const loadMoreRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = loadMoreRef.current;
+    if (!el || !hasMore || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisibleCount((count) => count + AGENT_PAGE_SIZE);
+        }
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [hasMore, visibleCount]);
 
   useEffect(() => {
     fetchAgents();
@@ -247,7 +254,7 @@ export default function AgentsPage() {
             <Skeleton key={i} className="h-48" />
           ))}
         </div>
-      ) : ownedAgents.length === 0 && otherAgents.length === 0 ? (
+      ) : ownedAgents.length === 0 ? (
         <div className="rounded-lg border border-border bg-card">
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10 mb-4">
@@ -270,164 +277,89 @@ export default function AgentsPage() {
           </div>
         </div>
       ) : (
-        <>
-        {isAdmin && otherAgents.length > 0 && (
-          <div className="flex gap-1 border-b border-border overflow-x-auto">
-            <button
-              onClick={() => setActiveTab("own")}
-              className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
-                activeTab === "own"
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {tr("Your agents", "你的 Agent")}
-              <span className="ml-1.5 text-xs text-muted-foreground/70">
-                {ownedAgents.length}
-              </span>
-            </button>
-            <button
-              onClick={() => setActiveTab("others")}
-              className={`px-3 py-2 text-sm font-medium whitespace-nowrap border-b-2 transition-colors ${
-                activeTab === "others"
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              {tr("Others' agents", "其他人的 Agent")}
-              <span className="ml-1.5 text-xs text-muted-foreground/70">
-                {otherAgents.length}
-              </span>
-            </button>
-          </div>
-        )}
-        {(activeTab === "own" || !(isAdmin && otherAgents.length > 0)) && ownedAgents.length > 0 && (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {ownedAgents.map((agent) => (
+          {visibleAgents.map((agent) => (
             <div
               key={agent.id}
-              className="group flex h-full flex-col rounded-lg border border-border bg-card p-5 transition-colors hover:bg-muted/50 cursor-pointer"
-              onClick={() => (window.location.href = `/agents/${agent.id}/chat/`)}
+              className="group relative flex h-full cursor-pointer flex-col gap-3 rounded-2xl border border-border bg-card p-4 transition-colors hover:bg-muted/40"
+              onClick={() => (window.location.href = agentChatHref(agent.id))}
             >
-              <div className="flex items-start justify-between mb-4">
-                <AgentAvatar agent={agent} bust={avatarBust[agent.id]} size={48} />
-                {agent.isPublic ? (
-                  <Badge
-                    variant="outline"
-                    className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
-                  >
-                    <span className="mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                    {tr("Public", "公开")}
-                  </Badge>
-                ) : (
-                  <Badge
-                    variant="outline"
-                    className="bg-muted/60 text-muted-foreground"
-                  >
-                    {tr("Private", "私有")}
-                  </Badge>
+              {/* Header: avatar, then name over the agent id. The right
+                  padding keeps the name clear of the corner tag / menu. */}
+              <div className={`flex min-w-0 items-center gap-3 ${agent.isPublic ? "pr-14" : "pr-8"}`}>
+                <AgentAvatar agent={agent} bust={avatarBust[agent.id]} size={44} round />
+                <div className="min-w-0">
+                  <p className="truncate text-base font-semibold">{agent.name || agent.id}</p>
+                  <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">{agent.id}</p>
+                </div>
+              </div>
+              {/* Public is a corner tag; it gives way to the ⋯ menu on
+                  hover, like a session row's run status. */}
+              {agent.isPublic && (
+                <span className={`pointer-events-none absolute right-3 top-4 inline-flex h-6 items-center rounded-md bg-emerald-500/10 px-2 text-xs text-emerald-700 dark:text-emerald-400 ${
+                  quotaLocked ? "" : "transition-opacity group-hover:opacity-0 group-focus-within:opacity-0"
+                }`}>
+                  {tr("Public", "公开")}
+                </span>
+              )}
+              {/* Always three lines tall, so cards in a row line up. */}
+              <p className={`line-clamp-3 min-h-[3.75rem] text-sm leading-5 ${agent.description ? "text-muted-foreground" : "text-muted-foreground/50"}`}>
+                {agent.description || tr("No description", "暂无描述")}
+              </p>
+              {/* Tags only when there's something to say: private is the
+                  default and gets no chip. */}
+              {agent.model && (
+              <div className="mt-auto flex min-w-0 flex-wrap gap-1.5">
+                {agent.model && (
+                  <span className="inline-flex h-6 min-w-0 max-w-full items-center truncate rounded-md bg-muted px-2 text-xs text-muted-foreground" title={agent.model}>
+                    {agent.model}
+                  </span>
                 )}
               </div>
-              <p className="text-base font-medium mb-1 truncate">{agent.name || agent.id}</p>
-              <p
-                className={`font-mono text-xs text-muted-foreground truncate ${
-                  agent.description ? "" : "mb-3"
-                }`}
-              >
-                {agent.id}
-              </p>
-              {agent.description && (
-                <p className="mt-2 mb-3 text-sm text-muted-foreground line-clamp-2">
-                  {agent.description}
-                </p>
               )}
-              {/* mt-auto pins the action row to the card bottom so cards
-                  with no description don't shrink — keeps the grid row
-                  aligned regardless of content length. */}
               {/* quotaLocked users (agent_quota=0) are admin-provisioned —
                   they can browse and chat but can't mutate the agent
-                  record, so hide Edit/Remove entirely. */}
+                  record, so the Edit / Remove menu is hidden entirely. */}
               {!quotaLocked && (
-                <div className="flex items-center gap-2 mt-auto pt-3 border-t border-border">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 text-xs"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setEditAgentId(agent.id);
-                    }}
-                  >
-                    <Pencil className="h-3 w-3 mr-1.5" />
-                    {tr("Edit", "编辑")}
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-8 text-xs text-destructive hover:text-destructive"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setDeleteId(agent.id);
-                    }}
-                  >
-                    <Trash2 className="h-3 w-3 mr-1.5" />
-                    {tr("Remove", "移除")}
-                  </Button>
-                </div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={
+                      <button
+                        type="button"
+                        onClick={(e) => e.stopPropagation()}
+                        className="absolute right-3 top-3 flex size-8 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 aria-expanded:opacity-100"
+                        aria-label={tr("Actions for {{name}}", "{{name}} 的操作", { name: agent.name || agent.id })}
+                      >
+                        <MoreHorizontal className="size-4" />
+                      </button>
+                    }
+                  />
+                  <DropdownMenuContent align="end" className="w-36" onClick={(e) => e.stopPropagation()}>
+                    <DropdownMenuItem onClick={() => setEditAgentId(agent.id)}>
+                      <Pencil className="size-4" />
+                      {tr("Edit", "编辑")}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={() => setDeleteId(agent.id)}
+                      className="text-destructive focus:text-destructive"
+                    >
+                      <Trash2 className="size-4 text-destructive" />
+                      {tr("Remove", "移除")}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               )}
             </div>
           ))}
         </div>
-        )}
-
-        {isAdmin && otherAgents.length > 0 && activeTab === "others" && (
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {otherAgents.map((agent) => (
-                <div
-                  key={agent.id}
-                  className="group flex h-full flex-col rounded-lg border border-border bg-card p-5 opacity-90 transition-colors hover:bg-muted/50 hover:opacity-100 cursor-pointer"
-                  onClick={() =>
-                    (window.location.href = `/agents/${agent.id}/chat/?actAs=${encodeURIComponent(agent.userId)}`)
-                  }
-                >
-                  <div className="flex items-start justify-between mb-4">
-                    <div className="flex shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-zinc-500 to-zinc-700 size-12">
-                      <Bot className="text-white size-6" />
-                    </div>
-                    <Badge
-                      variant="outline"
-                      className="max-w-[60%] bg-muted/40 text-muted-foreground"
-                    >
-                      <span className="truncate">
-                        {tr("Owner", "所有者")}：{agent.ownerDisplayName || agent.ownerUsername || agent.userId}
-                      </span>
-                    </Badge>
-                  </div>
-                  <p className="text-base font-medium mb-1 truncate">
-                    {agent.name || agent.id}
-                  </p>
-                  <p
-                    className={`font-mono text-xs text-muted-foreground truncate ${
-                      agent.description ? "" : "mb-3"
-                    }`}
-                  >
-                    {agent.id}
-                  </p>
-                  {agent.description && (
-                    <p className="mt-2 mb-3 text-sm text-muted-foreground line-clamp-2">
-                      {agent.description}
-                    </p>
-                  )}
-                  <div className="mt-auto pt-3 border-t border-border">
-                    <p className="text-xs text-muted-foreground">
-                      {tr("Click to chat — only the owner can edit or remove this agent.", "点击即可聊天；只有所有者能编辑或移除此 Agent。")}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-        )}
-        </>
+      )}
+      {hasMore && (
+        <div ref={loadMoreRef} className="flex justify-center py-4">
+          <Button variant="ghost" size="sm" onClick={() => setVisibleCount((count) => count + AGENT_PAGE_SIZE)}>
+            {tr("Load more", "加载更多")}
+            <span className="ml-1 tabular-nums text-muted-foreground">{ownedAgents.length - visibleAgents.length}</span>
+          </Button>
+        </div>
       )}
 
       {/* Create Dialog */}

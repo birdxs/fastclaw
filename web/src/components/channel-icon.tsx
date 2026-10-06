@@ -39,6 +39,12 @@ export function ChannelIcon({
   );
 }
 
+// hasChannelIcon reports whether ChannelIcon renders anything, so callers
+// can skip the slot (and its spacing) for web / unknown channels.
+export function hasChannelIcon(channel?: string): boolean {
+  return Boolean(channel && ASSETS[channel]);
+}
+
 // channelLabel returns a human-readable name suitable for tooltips.
 export function channelLabel(channel?: string): string {
   switch (channel) {
@@ -54,6 +60,10 @@ export function channelLabel(channel?: string): string {
       return "Slack";
     case "feishu":
       return "Feishu";
+    case "api":
+      return "API";
+    case "acp":
+      return "ACP";
     case "web":
     case "":
     case undefined:

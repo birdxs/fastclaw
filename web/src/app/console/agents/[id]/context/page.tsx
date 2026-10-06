@@ -46,7 +46,7 @@ export default function AgentContextPage() {
   // Per-agent multi-bubble toggle. Applies to web chat and every IM
   // channel the agent is bound to. False is the default; null on the
   // wire is treated as false here.
-  const [splitReplies, setSplitReplies] = useState(false);
+  const [splitReplies, setSplitReplies] = useState(true);
   const [splitRepliesSaving, setSplitRepliesSaving] = useState(false);
   // Per-agent auto-persist toggle. Off by default; null on the wire is
   // treated as false here. When on, every N turns the runtime fires an
@@ -70,7 +70,8 @@ export default function AgentContextPage() {
       } else {
         setPromptMode("");
       }
-      setSplitReplies(agentRec?.splitReplies === true);
+      // Unset means the runtime default, which is on.
+      setSplitReplies(agentRec?.splitReplies !== false);
       setAutoPersist(agentRec?.autoPersist === true);
       setSharedIdentity(agentRec?.sharedIdentity === true);
     } finally {
@@ -250,7 +251,7 @@ export default function AgentContextPage() {
             <div className="min-w-0">
               <h3 className="font-medium">{tr("Multi-bubble replies", "多气泡回复")}</h3>
               <p className="text-sm text-muted-foreground mt-1">
-                {tr("Make replies feel more conversational by splitting them into 2–4 short messages. Applies to web chat and all IM channels. Disabled by default, which keeps each reply in one message.", "将回复拆成 2–4 条短消息，让对话更自然。适用于网页聊天和所有即时通讯渠道。默认关闭，关闭时每次回复只发送一条消息。")}
+                {tr("Make replies feel more conversational by splitting them into 2–4 short messages. Applies to web chat and all IM channels. Enabled by default; turn it off to keep each reply in one message.", "将回复拆成 2–4 条短消息，让对话更自然。适用于网页聊天和所有即时通讯渠道。默认开启，关闭后每次回复只发送一条消息。")}
               </p>
             </div>
           </div>

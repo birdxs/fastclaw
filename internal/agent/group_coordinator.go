@@ -33,10 +33,19 @@ func (a *Agent) DecideGroup(ctx context.Context, scope, prompt string) (string, 
 	return strings.TrimSpace(response.Content), nil
 }
 
-// DeliverGroupPrivate creates a separate direct inbox; it does not publish the
-// private body to the group's event stream or to other members' sessions.
-func (a *Agent) DeliverGroupPrivate(ctx context.Context, sessionID, userID, groupName, content string) {
-	sess := a.sessions.Get("web", "", sessionID, "")
+// DeliverPrivate appends a private message from this agent to the
+// human into the given direct-chat session, the way a proactive message
+// lands there. The source (e.g. {kind:"group", id, name}) is UI-only
+// metadata for the "received privately from …" label; the body is not
+// published to the group stream or other members' sessions.
+func (a *Agent) DeliverPrivate(ctx context.Context, sessionID, userID string, source map[string]any, content string) {
+	channel, accountID, chatID, projectID := a.recoverWebTriple(sessionID)
+	sess := a.sessions.Get(channel, accountID, chatID, projectID)
 	sess.SetChatter(userID)
-	sess.Append(provider.Message{Role: "assistant", Content: "来自群聊「" + groupName + "」的私信：\n\n" + content, Timestamp: time.Now().UnixMilli()})
+	sess.Append(provider.Message{
+		Role:      "assistant",
+		Content:   content,
+		Timestamp: time.Now().UnixMilli(),
+		Metadata:  map[string]any{"privateFrom": source},
+	})
 }

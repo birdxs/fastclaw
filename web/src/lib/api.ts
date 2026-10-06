@@ -14,6 +14,8 @@ export interface StatusResponse {
   userId?: string;
   isAdmin?: boolean;
   users?: number;
+  // Every agent in the deployment; super_admin only.
+  totalAgents?: number;
 }
 
 export interface RegisterRequest {
@@ -127,6 +129,7 @@ export interface AgentDetail {
   soul?: string;
   skills?: string[];
   tools?: string[];
+  createdAt?: string;
 }
 
 export interface SkillEnvSpec {
@@ -284,6 +287,9 @@ export interface TeamEntry {
   sessionId?: string;
   groupBehavior?: string;
   createdAt?: number;
+  // The group's own picture (a small image data URL); empty shows the
+  // members' avatars.
+  avatarUrl?: string;
 }
 
 // Auth token for cloud mode. Set via setAuthToken() on login; empty in local mode.
@@ -710,6 +716,14 @@ export interface WorkspaceFile {
   modTime: number;
 }
 
+// revealLogs opens the gateway's log directory in the operator's file
+// browser. Super_admin and self-hosted only.
+export async function revealLogs(): Promise<{ ok: boolean; path?: string; error?: string }> {
+  const res = await apiFetch("/api/admin/logs/reveal", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  return res.ok ? { ok: true, path: data.path } : { ok: false, error: data.error || `HTTP ${res.status}` };
+}
+
 // revealAgentWorkspace opens the workspace folder for this scope in
 // the operator's native file browser (Finder/Explorer/xdg-open).
 // Self-hosted only — hosted deployments 403; the UI hides the
@@ -864,6 +878,18 @@ export interface ChatHistoryMessage {
   senderChannel?: string;
   timestamp?: number;
   groupTurnId?: string;
+  // A private message from another agent (message_agent) that started
+  // this turn; rendered as a "received privately from …" card.
+  privateFrom?: PrivateSource;
+}
+
+// PrivateSource is where a private message came from: a group chat that
+// sent it to the human, or another agent (with its original request).
+export interface PrivateSource {
+  kind: "group" | "agent";
+  id: string;
+  name: string;
+  content?: string;
 }
 
 export interface TodoItem {
@@ -1130,6 +1156,8 @@ export async function steerChat(
 
 export interface ToolResultMetadata {
   sandbox?: boolean;
+  // Assistant message delivered privately to the human from a group.
+  privateFrom?: PrivateSource;
   knowledgeSources?: KnowledgeSource[];
   // Stamped on the forced-final-delivery assistant message that the
   // backend emits when the per-turn tool-iteration cap was hit. Lets the
@@ -1299,6 +1327,17 @@ export interface TeamMessage {
   timestamp: number;
   agentId?: string;
   groupTurnId?: string;
+  // Envelopes of private messages the member sent with this message; the
+  // body reaches only the recipient (or the human's direct chat).
+  deliveries?: TeamDelivery[];
+}
+
+export interface TeamDelivery {
+  id: string;
+  recipientId: string;
+  recipientName: string;
+  intent?: string;
+  session?: string;
 }
 
 export interface TeamTopic {
@@ -1309,6 +1348,8 @@ export interface TeamTopic {
   sessionId: string;
   turnId?: string;
   title: string;
+  // Latest message ("Name: text"); only on topic listings.
+  preview?: string;
   status: "idle" | "running" | "completed" | "stopped" | "failed";
   updatedAt: number;
   activeAgents: string[];
@@ -1406,10 +1447,16 @@ export async function uploadAgentFiles(
   agentId: string,
   sessionId: string,
   files: File[],
+  // projectId places the first upload of a new chat started in a project
+  // (the session doesn't exist yet, so the server can't look it up).
+  projectId?: string,
 ): Promise<UploadedFile[]> {
   const fd = new FormData();
   for (const f of files) fd.append("file", f, f.name);
-  const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
+  if (projectId) params.set("projectId", projectId);
+  const qs = params.toString() ? `?${params}` : "";
   const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/files${qs}`, {
     method: "POST",
     body: fd,
@@ -2214,6 +2261,37 @@ export async function restoreSessionHistory(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ commit }),
+    },
+  );
+  if (!res.ok) throw new Error(`restore failed: ${res.status}`);
+}
+
+// Folder-addressed history for the owner's agent-wide file view, where a
+// previewed file is known by its chat folder ("sessions/<chat>" or
+// "projects/<pid>/<chat>") rather than a session id.
+export async function getFolderHistory(
+  agentId: string,
+  dir: string,
+): Promise<WorkspaceHistoryEntry[]> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/workspace/history?dir=${encodeURIComponent(dir)}`,
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.history || []) as WorkspaceHistoryEntry[];
+}
+
+export async function restoreFolderHistory(
+  agentId: string,
+  dir: string,
+  commit: string,
+): Promise<void> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/workspace/history/restore`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir, commit }),
     },
   );
   if (!res.ok) throw new Error(`restore failed: ${res.status}`);

@@ -410,8 +410,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp["role"] = ident.Role
 	resp["isAdmin"] = ident.Role == "super_admin"
 	if resp["isAdmin"].(bool) && s.accounts != nil {
-		if n, err := s.accounts.Count(r.Context()); err == nil {
+		// Dashboard accounts only: channel / app end-users are created
+		// per IM sender or API caller and aren't platform members.
+		if list, err := s.accounts.List(r.Context()); err == nil {
+			n := 0
+			for _, account := range list {
+				if account.Role == users.RoleSuperAdmin || account.Role == users.RoleUser {
+					n++
+				}
+			}
 			resp["users"] = n
+		}
+	}
+	// Deployment-wide agent count for the System overview; "agents"
+	// below stays the caller's own list.
+	if resp["isAdmin"].(bool) && s.dataStore != nil {
+		if recs, err := s.dataStore.ListAllAgents(r.Context()); err == nil {
+			resp["totalAgents"] = len(recs)
 		}
 	}
 
@@ -1251,12 +1266,27 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Subscribe to the hub BEFORE starting the agent so we don't race
-	// the first emitted event. The hub buffers in-flight events so
-	// dispatch from emitEvent never blocks even if we're slow to drain.
+	// the first emitted event. emitEvent never blocks on us: the queue
+	// grows while network writes are slow instead of dropping events.
 	hub := s.chatEventHub()
 	agentID := ag.Name()
-	sub, unsubscribe := hub.Subscribe(uid, agentID, streamSessionID)
+	// A lossless queue: the plain hub subscription drops events once 32 are
+	// waiting, and every network write below can stall on a slow reader (a
+	// CLI piped through ssh, a buffering proxy). Dropping `done` ended the
+	// SSE as "stream closed before the turn finished".
+	queue, unsubscribe := hub.SubscribeQueue(uid, agentID, streamSessionID)
 	defer unsubscribe()
+	turn := &turnForwarder{
+		ctx: r.Context(), events: s.dataStore, userID: uid, agentID: agentID, sessionKey: streamSessionID,
+		lastSeq: -1, forward: func(env agent.EventEnvelope) { forwardEvent(w, flusher, env) }, failed: &failed,
+	}
+	// Every event of this turn is persisted after this seq, so a gap or a
+	// missing `done` can be recovered from session_events.
+	if s.dataStore != nil {
+		if latest, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, agentID, streamSessionID); err == nil {
+			turn.lastSeq = latest
+		}
+	}
 
 	// Detach the agent's ctx from the request: when the browser tab
 	// disconnects (refresh, close, network blip) we want the agent to
@@ -1285,8 +1315,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	defer keepalive.Stop()
 
 	clientGone := r.Context().Done()
-	forwardedAny := false
-	// turnPending flips on when the slash handler reports it queued a
+	// turn.turnPending flips on when the slash handler reports it queued a
 	// continuation via bus.Inbound (`turn_pending` event). The POST
 	// goroutine's HandleMessage has already returned, but the real
 	// reply is still 10–15s away on a different goroutine — we keep
@@ -1294,7 +1323,6 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// and the continuation's content_delta/content events stream into
 	// the same connection. Cleared when the continuation's own `done`
 	// arrives, at which point the loop returns normally.
-	turnPending := false
 	for {
 		select {
 		case <-clientGone:
@@ -1308,34 +1336,19 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			// AND `defer close(agentDone)` fires from the same goroutine.
 			// Go's select picks at random when both are ready, so
 			// agentDone can win even when a turn_pending event is
-			// sitting in the sub buffer. Drain pending events first to
-			// make the decision deterministic.
-		drain:
-			for {
-				select {
-				case env, ok := <-sub:
-					if !ok {
-						return
-					}
-					if env.Event.Type == "error" {
-						failed = true
-					}
-					if env.Event.Type == "turn_pending" {
-						turnPending = true
-						continue
-					}
-					if env.Event.Type == "done" {
-						forwardEvent(w, flusher, env)
-						forwardedAny = true
-						return
-					}
-					forwardEvent(w, flusher, env)
-					forwardedAny = true
-				default:
-					break drain
+			// still queued. Take the queue first to make the decision
+			// deterministic: every publish completed before agentDone.
+			for _, env := range queue.Take() {
+				if turn.deliver(env) {
+					return
 				}
 			}
-			if turnPending {
+			// The turn is over but its `done` never reached this
+			// connection: recover the persisted tail before giving up.
+			if !turn.turnPending && turn.recoverTail() {
+				return
+			}
+			if turn.turnPending {
 				// HandleMessage returned silent after queueing a
 				// continuation. Don't close; wait for the continuation's
 				// `done` event over the hub instead. agentCtx.Done()
@@ -1343,7 +1356,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 				agentDone = nil
 				continue
 			}
-			if !forwardedAny {
+			if !turn.forwardedAny {
 				forwardSyntheticEvent(w, flusher, agent.ChatEvent{
 					Type: "error",
 					Data: map[string]any{"message": "agent finished without emitting a response"},
@@ -1358,21 +1371,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
-		case env, ok := <-sub:
-			if !ok {
-				return
-			}
-			if env.Event.Type == "error" {
-				failed = true
-			}
-			if env.Event.Type == "turn_pending" {
-				turnPending = true
-				continue
-			}
-			forwardEvent(w, flusher, env)
-			forwardedAny = true
-			if env.Event.Type == "done" {
-				return
+		case <-queue.Ready():
+			for _, env := range queue.Take() {
+				if turn.deliver(env) {
+					return
+				}
 			}
 		}
 	}

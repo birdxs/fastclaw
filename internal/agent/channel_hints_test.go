@@ -8,6 +8,16 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/channels"
 )
 
+func TestSplitRepliesDefaultsOn(t *testing.T) {
+	on, off := true, false
+	if !splitRepliesEnabled(nil) {
+		t.Fatal("unset override should default to multi-bubble replies")
+	}
+	if !splitRepliesEnabled(&on) || splitRepliesEnabled(&off) {
+		t.Fatal("explicit override should win")
+	}
+}
+
 func TestRenderChannelHintsForMultiBubbleReplies(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -33,7 +43,7 @@ func TestRenderChannelHintsForMultiBubbleReplies(t *testing.T) {
 			if !strings.Contains(hint, channels.SplitMessageMarker) {
 				t.Fatalf("hint does not advertise split marker %q: %q", channels.SplitMessageMarker, hint)
 			}
-			if !strings.Contains(hint, "default to 2–4") || !strings.Contains(hint, "1–2 short sentences") {
+			if !strings.Contains(hint, "usually 2–4") || !strings.Contains(hint, "1–2 short sentences") {
 				t.Fatalf("hint does not require short multi-message replies: %q", hint)
 			}
 		})

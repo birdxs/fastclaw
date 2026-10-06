@@ -160,14 +160,16 @@ export function AgentSettingsDialog({
       <DialogContent
         className={cn(
           "p-0 gap-0 overflow-hidden",
-          "h-[85vh] w-[95vw] max-w-[1100px] sm:max-w-[1100px]",
-          "grid grid-cols-[220px_1fr] grid-rows-1",
+          // Phones: a near-full-screen sheet with the tabs as a scrolling
+          // strip on top. md+: the side menu next to the content.
+          "h-[92dvh] w-[calc(100vw-1rem)] max-w-[1100px] sm:max-w-[1100px] md:h-[85vh] md:w-[95vw]",
+          "grid grid-cols-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[220px_1fr] md:grid-rows-1",
         )}
       >
-        <aside className="flex flex-col gap-1 border-r bg-muted/40 p-3 overflow-y-auto">
+        <aside className="flex gap-1 overflow-x-auto border-b bg-muted/40 p-2 pr-12 md:flex-col md:overflow-x-visible md:overflow-y-auto md:border-b-0 md:border-r md:p-3">
           {agentTabs.length > 0 && (
             <>
-              <SectionLabel>{t("common.agent")}</SectionLabel>
+              <SectionLabel className="hidden md:block">{t("common.agent")}</SectionLabel>
               {agentTabs.map((agentTab) => (
                 <TabButton
                   key={agentTab.id}
@@ -180,7 +182,7 @@ export function AgentSettingsDialog({
           )}
           {userTabs.length > 0 && (
             <>
-              <SectionLabel>{t("common.user")}</SectionLabel>
+              <SectionLabel className="hidden md:block">{t("common.user")}</SectionLabel>
               {userTabs.map((userTab) => (
                 <TabButton
                   key={userTab.id}
@@ -206,12 +208,12 @@ export function AgentSettingsDialog({
           {tab === "scheduler" && <AgentSchedulerPage />}
           {tab === "usage" && <AgentUsagePage />}
           {tab === "account" && (
-            <div className="p-6 max-w-3xl">
+            <div className="max-w-3xl p-4 md:p-6">
               <AccountSettingsPage />
             </div>
           )}
           {tab === "general" && (
-            <div className="p-6 max-w-3xl">
+            <div className="max-w-3xl p-4 md:p-6">
               <GeneralSettingsPage />
             </div>
           )}
@@ -256,7 +258,7 @@ function TabButton({
       type="button"
       onClick={() => onSelect(tab.id)}
       className={cn(
-        "flex items-center gap-2 rounded-md px-2.5 py-2 text-sm text-left transition-colors",
+        "flex shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2.5 py-2 text-sm text-left transition-colors",
         active
           ? "bg-accent text-accent-foreground font-medium"
           : "text-foreground/80 hover:bg-accent/50",

@@ -241,7 +241,13 @@ func (s *Server) handleTeamInbox(w http.ResponseWriter, r *http.Request) {
 			if s.resolveAgent(r, message.Sender) == nil {
 				continue
 			}
-			result = append(result, map[string]any{"id": message.ID, "agentId": message.Sender, "sessionId": "group-inbox-" + record.TeamID, "timestamp": message.Timestamp})
+			// Delivered into the sender's direct chat; legacy rows predate
+			// that and still point at the old per-group inbox session.
+			sessionID := message.Session
+			if sessionID == "" {
+				sessionID = "group-inbox-" + record.TeamID
+			}
+			result = append(result, map[string]any{"id": message.ID, "agentId": message.Sender, "sessionId": sessionID, "timestamp": message.Timestamp})
 		}
 	}
 	jsonResponse(w, 200, map[string]any{"messages": result})

@@ -85,7 +85,8 @@ type Agent struct {
 	// to the LLM (see renderChannelHints) AND stamps
 	// OutboundMessage.AllowSplit so the dispatcher splits the reply at
 	// the marker before handing each chunk to the channel adapter.
-	// Per-agent only — there's no system-level fallback.
+	// Per-agent only — there's no system-level fallback. On unless the
+	// agent explicitly opts out (see splitRepliesEnabled).
 	splitReplies bool
 	// memoryStore is the optional Store-backed source of identity files
 	// (SOUL.md, IDENTITY.md, ...). Kept on the Agent so ReloadWorkspaceFiles
@@ -406,16 +407,14 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	// Multi-bubble split-replies: per-agent only — system-level toggle
 	// was removed since "every agent splits the same way" is rarely
 	// what an operator wants for a deployment running multiple personas.
-	// nil override = off (default); non-nil = explicit value. Plumbed at
+	// nil override = on (default); non-nil = explicit value. Plumbed at
 	// this layer (not just NewAgentWithFullCfg) so foreign-attached
 	// agents — chatters reaching an agent they don't own via a channel
 	// binding — also pick up the toggle. Without this the wechat
 	// dispatcher hint never reaches the LLM for non-owner chatters and
 	// the model falls back to markdown `---` separators that render as
 	// one bubble.
-	if rc.SplitReplies != nil {
-		ag.splitReplies = *rc.SplitReplies
-	}
+	ag.splitReplies = splitRepliesEnabled(rc.SplitReplies)
 	// Stamp the operator-given display name onto the context builder
 	// so an empty IDENTITY.md doesn't leak the base-model identity
 	// ("I am Claude") through to chatters — the system prompt's
@@ -1151,6 +1150,9 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 			if value, ok := m.Metadata["groupTurnId"].(string); ok && value != "" {
 				entry["groupTurnId"] = value
 			}
+			if from, ok := m.Metadata["privateFrom"].(map[string]any); ok {
+				entry["privateFrom"] = from
+			}
 			history = append(history, entry)
 		case "assistant":
 			entry := map[string]any{"role": "assistant"}
@@ -1488,6 +1490,11 @@ func stripSenderPrefix(text, senderName string) string {
 // LLM payload. The nickname is still funneled to the LLM via the
 // `\[nickname\]: ` prefix on Message.Content (set by callers).
 func senderMetadata(msg bus.InboundMessage) map[string]any {
+	// A private message from another agent (message_agent) keeps its
+	// source so the recipient's chat can label the turn.
+	if from, ok := msg.Params[PrivateFromParamKey].(map[string]any); ok && msg.SenderName == "" {
+		return map[string]any{"privateFrom": from}
+	}
 	if msg.SenderName == "" {
 		return nil
 	}
@@ -1628,7 +1635,7 @@ func renderChatbotPersistenceReminder(mode, displayName, userMD, memoryMD string
 // one place. IM adapters split during dispatch; the web client splits
 // the stored reply while rendering it.
 //
-// `splitEnabled` is the per-agent toggle. When false (the default) we
+// `splitEnabled` is the per-agent toggle (on by default). When false we
 // skip the hint so the LLM never learns the marker — and the dispatcher
 // collapses any stray marker back to a newline. The two branches must
 // stay in lockstep.
@@ -1640,18 +1647,21 @@ func renderChannelHints(msg bus.InboundMessage, splitEnabled bool) string {
 		return ""
 	}
 	return "## Reply Format\n\n" +
-		"Multi-bubble mode is ON. For conversational replies, default to 2–4 " +
-		"separate, concise chat bubbles instead of one long message. Put one " +
-		"natural thought in each bubble, usually no more than 1–2 short sentences.\n\n" +
+		"Reply like a capable person in a messaging app: answer directly, in " +
+		"the chatter's language, as plain conversational text.\n\n" +
+		"A simple answer is one compact message. A richer answer is usually 2–4 " +
+		"separate chat bubbles, never more than 4, instead of one long message. " +
+		"Each bubble carries one conversational beat in 1–2 short sentences.\n\n" +
 		"Write `" + channels.SplitMessageMarker + "` on its own line between " +
 		"bubbles. Each part is delivered as a distinct message in order, for " +
 		"example: \"有结果了。\\n" + channels.SplitMessageMarker +
 		"\\nidoubi 是一位独立开发者。\\n" + channels.SplitMessageMarker +
 		"\\n他主要在做 AI 应用。\"\n\n" +
-		"Do not add headings, lists, or repeated summaries just to create more " +
-		"bubbles. Keep code blocks, tables, long quotes, and tightly coupled " +
-		"structured content together; only split their conversational framing. " +
-		"A one-line acknowledgement may remain a single bubble."
+		"Avoid headings, nested lists, bold section labels, repeated " +
+		"introductions, and generic offers to do more — say the few things that " +
+		"matter instead of cataloguing everything. Keep code blocks, tables, " +
+		"long quotes, and tightly coupled structured content together in one " +
+		"bubble; only split their conversational framing."
 }
 
 // isIMChannel returns true for channels with single-message-per-bubble
@@ -2483,7 +2493,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	}
 	messages = append(messages, withConversationGapContext(modelMessagesWithRecentImages(sessionMsgs))...)
 
-	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
+	toolDefs := withoutGroupSideChannels(a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode)), msg)
 
 	// Loop detection: track consecutive identical tool calls and results.
 	var loopDetector toolLoopDetector
@@ -3285,7 +3295,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	}
 	messages = append(messages, withConversationGapContext(modelMessagesWithRecentImages(sessionMsgs))...)
 
-	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
+	toolDefs := withoutGroupSideChannels(a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode)), msg)
 
 	var loopDetector toolLoopDetector
 	totalToolCalls := 0
@@ -3811,6 +3821,25 @@ var chatbotBuiltinAllowlist = []string{
 // given prompt mode. Plugin / MCP tools are always included regardless
 // — see Registry.DefinitionsForMode. nil means "all built-ins";
 // []string{} means "no built-ins"; a non-empty slice means "only these".
+// withoutGroupSideChannels drops the sending tools from a group-chat
+// turn. There, public text and [[private:…]] blocks are the only delivery
+// channels; `message` and `message_agent` would side-step the group's
+// privacy and scheduling (and `message` reported success for a made-up
+// "group" target).
+func withoutGroupSideChannels(defs []provider.Tool, msg bus.InboundMessage) []provider.Tool {
+	if _, group := msg.Params["__fastclawGroupChat"]; !group {
+		return defs
+	}
+	kept := defs[:0:0]
+	for _, def := range defs {
+		if def.Function.Name == "message" || def.Function.Name == "message_agent" {
+			continue
+		}
+		kept = append(kept, def)
+	}
+	return kept
+}
+
 func builtinAllowForMode(mode string) []string {
 	switch mode {
 	case config.PromptModeChatbot:
@@ -3932,12 +3961,16 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	// hook is needed for the tool surface.
 	a.promptMode = rc.PromptMode
 	a.ctxBuilder.SetPromptMode(rc.PromptMode)
-	// Per-agent WeChat split-replies. Nil override = keep whatever the
-	// system layer initialized at boot (don't reset to false). Non-nil
-	// = authoritative for this agent.
-	if rc.SplitReplies != nil {
-		a.splitReplies = *rc.SplitReplies
-	}
+	// Per-agent split-replies. Nil override (never set, or reset from
+	// the dashboard) falls back to the default.
+	a.splitReplies = splitRepliesEnabled(rc.SplitReplies)
+}
+
+// splitRepliesEnabled resolves the per-agent multi-bubble override.
+// Chat replies default to short messenger-style bubbles; an agent only
+// sends single long messages when it explicitly opts out.
+func splitRepliesEnabled(override *bool) bool {
+	return override == nil || *override
 }
 
 // chatterUserID picks the per-message chatter identity, falling back

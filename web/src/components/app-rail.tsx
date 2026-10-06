@@ -2,7 +2,7 @@
 
 import * as React from "react";
 import { usePathname, useRouter } from "next/navigation";
-import { LogOutIcon, MessagesSquareIcon, SettingsIcon, SquareTerminalIcon, UserCogIcon } from "lucide-react";
+import { ChevronDownIcon, LayoutDashboardIcon, LogOutIcon, MessagesSquareIcon, SettingsIcon, UserCogIcon } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   DropdownMenu,
@@ -18,6 +18,7 @@ import { getMe, type MeResponse } from "@/lib/api";
 import { logout } from "@/lib/auth";
 import { areaHome, areaOf, resolveChatLanding, type Area } from "@/lib/landing";
 import { cn } from "@/lib/utils";
+import { useSidebarOptional } from "@/components/ui/sidebar";
 
 // Width of the rail. SidebarLayout passes it to the sidebar as
 // --sidebar-offset so the (fixed-position) sidebar sits right of it.
@@ -29,33 +30,13 @@ export const APP_RAIL_WIDTH = "3.5rem";
 // user left it. Desktop only: on mobile the sidebar is a sheet.
 export function AppRail() {
   const { tr } = useLocale();
-  const pathname = usePathname() || "";
-  const router = useRouter();
-  const [me, setMe] = React.useState<MeResponse | null>(null);
-  const isAdmin = me?.user?.role === "super_admin";
-  const area = areaOf(pathname);
-
-  // Account settings live in a dialog, so a profile save doesn't remount
-  // the rail; refresh the name/avatar on the same event the sidebar uses.
-  React.useEffect(() => {
-    const refresh = () => {
-      getMe().then(setMe).catch(() => {});
-    };
-    refresh();
-    window.addEventListener("fastclaw:user-profile-changed", refresh);
-    return () => window.removeEventListener("fastclaw:user-profile-changed", refresh);
-  }, []);
-
-  const go = async (target: Area) => {
-    if (target === area) return;
-    router.push(target === "chat" ? await resolveChatLanding() : areaHome(target));
-  };
+  const { me, isAdmin, area, go } = useAreaNav();
 
   return (
     <div className="hidden w-(--app-rail-width) shrink-0 md:block" style={{ "--app-rail-width": APP_RAIL_WIDTH } as React.CSSProperties}>
       <nav
         aria-label={tr("Areas", "功能区")}
-        className="fixed inset-y-0 left-0 z-20 flex w-(--app-rail-width) flex-col items-center gap-1 border-r border-sidebar-border bg-sidebar py-3"
+        className="fixed inset-y-0 left-0 z-20 flex w-(--app-rail-width) flex-col items-center gap-1 border-r border-sidebar-border bg-sidebar pb-3 pt-2"
       >
         <button
           type="button"
@@ -77,11 +58,11 @@ export function AppRail() {
           label={tr("Console", "控制台")}
           active={area === "console"}
           onClick={() => go("console")}
-          icon={SquareTerminalIcon}
+          icon={LayoutDashboardIcon}
         />
         {isAdmin && (
           <RailButton
-            label={tr("Admin", "管理后台")}
+            label={tr("System", "系统")}
             active={area === "admin"}
             onClick={() => go("admin")}
             icon={UserCogIcon}
@@ -187,6 +168,78 @@ function RailAccount({ me }: { me: MeResponse | null }) {
           <LogOutIcon />
           <span>{t("common.logOut")}</span>
         </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+// useAreaNav is the area switching shared by the desktop rail and the
+// mobile area menu: the signed-in account, the current area, and a jump
+// that reopens an area where the user left it.
+function useAreaNav() {
+  const pathname = usePathname() || "";
+  const router = useRouter();
+  const [me, setMe] = React.useState<MeResponse | null>(null);
+  const isAdmin = me?.user?.role === "super_admin";
+  const area = areaOf(pathname);
+
+  // Account settings live in a dialog, so a profile save doesn't remount
+  // the rail; refresh the name/avatar on the same event the sidebar uses.
+  React.useEffect(() => {
+    const refresh = () => {
+      getMe().then(setMe).catch(() => {});
+    };
+    refresh();
+    window.addEventListener("fastclaw:user-profile-changed", refresh);
+    return () => window.removeEventListener("fastclaw:user-profile-changed", refresh);
+  }, []);
+
+  const go = async (target: Area) => {
+    if (target === area) return;
+    router.push(target === "chat" ? await resolveChatLanding() : areaHome(target));
+  };
+  return { me, isAdmin, area, go };
+}
+
+// MobileAreaMenu stands in for the rail on phones, where the rail is
+// hidden: the sidebar title opens a menu with the areas (the account sits
+// in the sheet's footer).
+export function MobileAreaMenu({ title }: { title: string }) {
+  const { tr } = useLocale();
+  const { isAdmin, area, go } = useAreaNav();
+  // The mobile sidebar is a sheet; close it so the new area isn't hidden.
+  const sidebar = useSidebarOptional();
+  const switchTo = (id: Area) => {
+    sidebar?.setOpenMobile(false);
+    void go(id);
+  };
+  const areas: Array<{ id: Area; label: string; icon: React.ComponentType<{ className?: string }> }> = [
+    { id: "chat", label: tr("Chat", "对话"), icon: MessagesSquareIcon },
+    { id: "console", label: tr("Console", "控制台"), icon: LayoutDashboardIcon },
+    ...(isAdmin ? [{ id: "admin" as Area, label: tr("System", "系统"), icon: UserCogIcon }] : []),
+  ];
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className="-ml-1 flex min-w-0 items-center gap-1 rounded-lg px-1 py-1 text-[15px] font-semibold text-foreground transition-colors hover:bg-sidebar-accent"
+            aria-label={tr("Switch area", "切换功能区")}
+          />
+        }
+      >
+        <span className="truncate">{title}</span>
+        <ChevronDownIcon className="size-4 shrink-0 text-muted-foreground" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" sideOffset={10} className="min-w-52 rounded-lg">
+        {areas.map(({ id, label, icon: Icon }) => (
+          <DropdownMenuItem key={id} onClick={() => switchTo(id)} aria-current={area === id ? "page" : undefined}
+            className={cn(area === id && "bg-accent text-accent-foreground")}>
+            <Icon />
+            <span>{label}</span>
+          </DropdownMenuItem>
+        ))}
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -892,6 +892,9 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		}
 	}
 
+	// Assigned once the space is built; message_agent only runs during a
+	// turn, which is after that.
+	var space *UserSpace
 	managerOpts := []agent.ManagerOption{
 		agent.WithUserID(userID),
 		agent.WithGlobalSkillsCfg(cfg.Skills),
@@ -906,6 +909,24 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		// provisioned illustration agent can draw anything at all.
 		agent.WithToolAvailability(func(_ context.Context, agentID string) (map[string]bool, error) {
 			return agentToolAvailability(cfg, agentID), nil
+		}),
+		// message_agent's lookup: another agent of this account by id or
+		// display name, loaded on demand (agents may be evicted when idle).
+		agent.WithAgentResolver(func(ctx context.Context, ref string) (*agent.Agent, error) {
+			if space == nil {
+				return nil, fmt.Errorf("user space is still loading")
+			}
+			id, err := resolveOwnedAgentRef(ctx, st, userID, ref)
+			if err != nil {
+				return nil, err
+			}
+			if err := space.EnsureOwnedAgent(ctx, st, mb, ws, id); err != nil {
+				return nil, err
+			}
+			if ag := space.Agents.AgentByID(id); ag != nil {
+				return ag, nil
+			}
+			return nil, fmt.Errorf("agent %q is not available", ref)
 		}),
 	}
 	if ws != nil {
@@ -956,7 +977,7 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		slog.Info("loaded user space", "user", userID, "agents", agentMgr.Names())
 	}
 
-	return &UserSpace{
+	space = &UserSpace{
 		UserID:         userID,
 		Config:         cfg,
 		Provider:       prov,
@@ -967,7 +988,8 @@ func loadUserSpace(ctx context.Context, userID string, mb *bus.MessageBus, st st
 		AppOwnerUserID: appOwner,
 		OnDemand:       onDemand,
 		pinned:         pinned,
-	}, nil
+	}
+	return space, nil
 }
 
 // registerHookPluginsForAgent walks every running hook-type plugin
@@ -1421,4 +1443,32 @@ func backgroundAgents(ctx context.Context, st store.Store, userID string, bindin
 		}
 	}
 	return out
+}
+
+// resolveOwnedAgentRef maps a message_agent target — an agent id or a
+// case-insensitive display name — to the id of an agent owned by userID.
+func resolveOwnedAgentRef(ctx context.Context, st store.Store, userID, ref string) (string, error) {
+	if st == nil {
+		return "", fmt.Errorf("agent lookup unavailable")
+	}
+	if rec, err := st.GetAgent(ctx, ref); err == nil && rec != nil && rec.UserID == userID {
+		return rec.ID, nil
+	}
+	recs, err := st.ListAgents(ctx, userID)
+	if err != nil {
+		return "", err
+	}
+	match := ""
+	for _, rec := range recs {
+		if strings.EqualFold(strings.TrimSpace(rec.Name), strings.TrimSpace(ref)) {
+			if match != "" {
+				return "", fmt.Errorf("more than one agent is named %q; use its id", ref)
+			}
+			match = rec.ID
+		}
+	}
+	if match == "" {
+		return "", fmt.Errorf("no agent named %q exists", ref)
+	}
+	return match, nil
 }

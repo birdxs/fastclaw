@@ -468,7 +468,7 @@ function WelcomeStep() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm text-muted-foreground">
-        <p>{tr("You will become the super administrator when setup is complete. You can add more users from the admin panel later.", "初始化完成后，你将成为超级管理员，之后可从管理后台添加更多用户。")}</p>
+        <p>{tr("You will become the super administrator when setup is complete. You can add more users from System later.", "初始化完成后，你将成为超级管理员，之后可在「系统」中添加更多用户。")}</p>
         <p>
           {tr("All user-facing configuration, including providers, channels, agents, and settings, is stored in the database and can be changed in the UI later.", "提供商、渠道、Agent 和设置等用户配置都会存储在数据库中，之后可随时通过界面修改。")}
         </p>

@@ -31,7 +31,7 @@ type teamCoordinator interface {
 	DecideGroup(context.Context, string, string) (string, error)
 }
 type teamPrivateDeliverer interface {
-	DeliverGroupPrivate(context.Context, string, string, string, string)
+	DeliverPrivate(ctx context.Context, sessionID, userID string, source map[string]any, content string)
 }
 type teamPending struct {
 	id       string
@@ -93,6 +93,8 @@ func teamSharedMessages(messages []teamRunMessage, triggers []string) []teamRunM
 			}
 			m.Attachments = nil
 		}
+		// Private bodies reach members only through their own privateInbox.
+		m.Deliveries = nil
 		r := []rune(m.Content)
 		r = r[:min(len(r), min(12000, remaining))]
 		m.Content = string(r)
@@ -274,7 +276,12 @@ func teamMemberPrompt(req teamChatRequest, member resolvedTeamMember, members []
 			inbox = append(inbox, p)
 		}
 	}
-	return `You are the current member of a group conversation and have been explicitly scheduled to respond now. Use your own identity and skills. Do not impersonate another member or answer a roll call on their behalf. Follow the triggering messages and the original request using this shared transcript. Continue prior work instead of restarting it. Mention @Name only to hand concrete work to that member; other members may hand results back to you for review. If members are unavailable, explain that honestly and take over or reassign their unfinished work. Ordinary text is public; use <|split|> on its own line for separate messages. [[private:MEMBER_ID]]body[[/private]] delivers privately to that member; [[private:human]]body[[/private]] sends to the human in a separate direct inbox. Private bodies are visible only to sender/recipient; do not disclose them in public or tool output. Tools are not private delivery channels. Your normal skills and tools remain available.
+	return `You are the current member of a group conversation and have been explicitly scheduled to respond now. Use your own identity and skills. Do not impersonate another member or answer a roll call on their behalf. Follow the triggering messages and the original request using this shared transcript. Continue prior work instead of restarting it. Mention @Name only to hand concrete work to that member; other members may hand results back to you for review. If members are unavailable, explain that honestly and take over or reassign their unfinished work. Ordinary text is public; use <|split|> on its own line for separate messages. Your normal skills and tools remain available.
+Private delivery: [[private:MEMBER_ID]]message[[/private]] sends to a member id; [[private:human]]message[[/private]] sends to the human in your direct chat with an unread notification. Private blocks are removed from the public stream; multiple private blocks and private-only replies are supported. Use [[private-info:MEMBER_ID]]information[[/private]] for information-only delivery that must NOT activate the recipient; use ordinary private blocks only when requesting a response or action. privateInbox bodies are visible only to their sender and recipient; keep them within that audience unless disclosure is authorized. Tool input and output are not private delivery channels.
+Confidentiality: interpret it semantically in any language. For confidential setup or assignments (secret words or roles in a game, hidden information, personal data), deliver each secret ONLY to its intended recipient, including the human via [[private:human]], and keep it out of public text entirely — never state a secret publicly and then also send it privately. A recipient may disclose private information only when the task authorizes it.
+Normal project contributions and assignments belong in the PUBLIC group so later workers can build on them; do not send private duplicates of public assignments. Use private delivery only when the human or the task calls for confidentiality or private contact.
+When the human asks you to contact another member, actually send the request with private delivery; do not impersonate their answer or claim delivery failed based on old chat text. A member who receives a private request replies privately to its sender unless the request asks for a public response or a direct message to the human.
+The member roster below is authoritative: every entry in members is an AI agent reachable by private delivery at its exact id; only human is the human participant. Disregard earlier conversation claims that these channels are unavailable.
 ` + teamJSON(map[string]any{"group": map[string]string{"name": req.Name, "description": req.Description}, "human": map[string]string{"id": "human", "name": req.HumanName}, "members": teamProfiles(members), "currentBot": map[string]string{"id": member.AgentID, "name": member.Name}, "turn": map[string]any{"round": round, "triggerMessageIds": triggers, "unavailableMemberIds": unavailable}, "originalRequest": req.Message, "messages": teamSharedMessages(messages, triggers), "privateInbox": inbox})
 }
 func (s *Server) executeTeamMember(r *http.Request, uid string, req teamChatRequest, m resolvedTeamMember, members []resolvedTeamMember, run *teamRun, visible []teamRunMessage, round int, triggers []string, unavailable map[string]bool) teamOutcome {
@@ -391,7 +398,8 @@ func teamHandoffs(messages []teamRunMessage, private []teamPrivateMessage, membe
 		}
 	}
 	for _, p := range private {
-		if p.Recipient != "human" {
+		// Information-only deliveries never activate the recipient.
+		if p.Recipient != "human" && p.Intent != "inform" {
 			add(p.Recipient, p.ID, p.Sender)
 		}
 	}
@@ -467,6 +475,25 @@ func (s *Server) runTeamConversation(r *http.Request, uid string, req teamChatRe
 			}
 			turns = append(turns, teamTurn{out.member.AgentID, out.round, out.triggers, ids})
 			batchMessages = append(batchMessages, out.messages...)
+			for i, p := range out.private {
+				if p.Recipient == "human" {
+					// Like a proactive message: it lands in the sender's
+					// direct chat (its latest session), labelled with the
+					// group it came from, and raises an unread notice.
+					if deliverer, ok := out.member.Handle.(teamPrivateDeliverer); ok {
+						sessionID := latestDirectSession(out.member.Handle)
+						source := map[string]any{"kind": "group", "id": req.TeamID, "name": req.Name}
+						deliverer.DeliverPrivate(r.Context(), sessionID, uid, source, p.Content)
+						out.private[i].Session = sessionID
+						s.chatEventHub().Publish(uid, out.member.AgentID, sessionID, agent.EventEnvelope{Seq: -1, Event: agent.ChatEvent{Type: "content", Data: map[string]any{"content": p.Content, "metadata": map[string]any{"privateFrom": source}}}})
+						s.chatEventHub().Publish(uid, out.member.AgentID, sessionID, agent.EventEnvelope{Seq: -1, Event: agent.ChatEvent{Type: "done"}})
+					} else {
+						run.notice(out.member.Name + " 的私信未能投递")
+					}
+				}
+			}
+			// Recorded after delivery so human-addressed entries carry the
+			// session their unread notice opens.
 			batchPrivate = append(batchPrivate, out.private...)
 			run.mu.Lock()
 			run.private = append(run.private, out.private...)
@@ -475,17 +502,7 @@ func (s *Server) runTeamConversation(r *http.Request, uid string, req teamChatRe
 			}
 			run.snapshot.Rounds = attempts
 			run.mu.Unlock()
-			for _, p := range out.private {
-				if p.Recipient == "human" {
-					if deliverer, ok := out.member.Handle.(teamPrivateDeliverer); ok {
-						deliverer.DeliverGroupPrivate(r.Context(), "group-inbox-"+req.TeamID, uid, req.Name, p.Content)
-						s.chatEventHub().Publish(uid, out.member.AgentID, "group-inbox-"+req.TeamID, agent.EventEnvelope{Seq: -1, Event: agent.ChatEvent{Type: "content", Data: map[string]any{"content": "来自群聊「" + req.Name + "」的私信：\n\n" + p.Content}}})
-						s.chatEventHub().Publish(uid, out.member.AgentID, "group-inbox-"+req.TeamID, agent.EventEnvelope{Seq: -1, Event: agent.ChatEvent{Type: "done"}})
-					} else {
-						run.notice(out.member.Name + " 的私信未能投递")
-					}
-				}
-			}
+			run.attachDeliveries(out, members, req.HumanName)
 			scheduled[out.member.AgentID] = true
 			s.persistTeamTopic(uid, req.TeamID, run)
 		}

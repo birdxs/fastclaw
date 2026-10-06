@@ -194,15 +194,9 @@ function SystemSkillsPanel() {
             >
               <div className="flex items-start justify-between mb-3">
                 <div className="flex items-center gap-2.5">
-                  <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary/10">
-                    <Sparkles className="h-4 w-4 text-primary" />
-                  </div>
                   <div>
                     <p className="text-sm font-medium">{skill.name}</p>
-                    <Badge
-                      variant="outline"
-                      className="mt-1 text-[10px]"
-                    >
+                    <Badge variant="outline" className="mt-1 text-[10px]">
                       {skill.type || "skill"}
                     </Badge>
                   </div>

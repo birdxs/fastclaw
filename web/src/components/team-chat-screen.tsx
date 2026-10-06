@@ -3,12 +3,14 @@
 
 import * as React from "react";
 import { usePathname } from "next/navigation";
-import { ArrowUp, Check, ChevronsRight, LoaderCircle, PanelRight, Plus, Square, UsersRound, Settings, Paperclip, X, MoreHorizontal, Pencil, Trash2, Crown } from "lucide-react";
+import { ArrowUp, Check, ChevronDown, ChevronRight, ChevronUp, CircleAlert, CirclePause, Copy, LoaderCircle, LockKeyhole, Plus, RefreshCw, RotateCcw, Square, SquarePen, UserPlus, UsersRound, Settings, Paperclip, X, MoreHorizontal, Pencil, Trash2, Crown } from "lucide-react";
+import { RightPanel, RightPanelListHeader, RightPanelTabs, RightPanelToggle, RIGHT_PANEL_CARD_BG } from "@/components/right-panel";
 import { BotAvatar } from "@/components/bot-avatar";
+import { CHAT_RELEASE_BOTTOM_STICK_EVENT, FileTreeView, ToolActivity, WorkspacePanel, conversationDayLabel, isSystemFile, scopeRootPrefix, type ProducedFile, type ToolCallEntry } from "@/components/chat-screen";
 import { ChatMarkdown } from "@/components/chat-markdown";
+import { TeamMembersDialog } from "@/components/team-members-dialog";
 import { TeamSettingsDialog } from "@/components/team-settings-dialog";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
-import { TeamAvatarStack } from "@/components/team-avatar-stack";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
@@ -23,7 +25,9 @@ import {
   getTeamTopics,
   startTeamRun,
   stopTeamRun,
-  updateConfig,
+  listAgentFiles,
+  type WorkspaceFile,
+  type TeamDelivery,
   renameTeamTopic,
   deleteTeamTopic,
   type TeamRun,
@@ -33,6 +37,7 @@ import {
   type ChatHistoryMessage,
   type TeamEntry,
 } from "@/lib/api";
+import { chatHref, rememberChatTarget, useChatRoute } from "@/lib/chat-route";
 
 // A group topic id, shaped like a private chat's (s-<ms>-<rand>) with a g-
 // prefix. The server ties the topic to its group through the member
@@ -96,6 +101,71 @@ function normalizeTeamContent(value: string, agentReply = false) {
   }).join("\n").trim();
 }
 
+function teamToolLine(event: Record<string, string>) {
+  return JSON.stringify(event);
+}
+
+// parseTeamTools turns a member's tool message (one JSON line per
+// tool_call / tool_result event) into the entries ToolActivity renders.
+// Calls left without a result once the run is over show as stopped.
+function parseTeamTools(message: TeamMessage, settled: boolean): ToolCallEntry[] {
+  const calls = new Map<string, ToolCallEntry>();
+  for (const line of message.content.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { id?: string; name?: string; arguments?: string; result?: string };
+      const id = event.id || message.id;
+      const call = calls.get(id) || { id, name: event.name || "tool", arguments: "" };
+      if (event.arguments != null) call.arguments = event.arguments;
+      if (event.result != null) call.result = event.result;
+      if (event.name) call.name = event.name;
+      calls.set(id, call);
+    } catch {
+      calls.set(message.id, { id: message.id, name: "tool", arguments: "", result: message.content });
+    }
+  }
+  return [...calls.values()].map((call) => call.result == null && settled ? { ...call, result: "(stopped)" } : call);
+}
+
+type TeamBlock =
+  | { kind: "user"; message: TeamMessage }
+  | { kind: "status"; message: TeamMessage }
+  | { kind: "agent"; id: string; agentId?: string; items: Array<
+    | { kind: "text"; id: string; text: string; timestamp: number }
+    | { kind: "tools"; id: string; calls: ToolCallEntry[]; timestamp: number }
+    | { kind: "private"; id: string; deliveries: TeamDelivery[]; timestamp: number }> };
+
+// buildTeamBlocks groups the flat group transcript into rendered turns:
+// a member's consecutive replies and tool calls share one block, and
+// back-to-back tool messages collapse into one activity row.
+function buildTeamBlocks(messages: TeamMessage[], settled: boolean): TeamBlock[] {
+  const blocks: TeamBlock[] = [];
+  for (const message of messages) {
+    if (message.role === "user" || message.role === "status") {
+      blocks.push(message.role === "user" ? { kind: "user", message } : { kind: "status", message });
+      continue;
+    }
+    const isTool = message.role === "tool";
+    const text = isTool ? "" : normalizeTeamContent(message.content, true);
+    const deliveries = isTool ? [] : message.deliveries || [];
+    if (!isTool && !text && deliveries.length === 0) continue;
+    let block = blocks[blocks.length - 1];
+    if (block?.kind !== "agent" || block.agentId !== message.agentId) {
+      block = { kind: "agent", id: `block-${message.id}`, agentId: message.agentId, items: [] };
+      blocks.push(block);
+    }
+    const last = block.items[block.items.length - 1];
+    if (isTool && last?.kind === "tools") last.calls.push(...parseTeamTools(message, settled));
+    else if (isTool) block.items.push({ kind: "tools", id: message.id, calls: parseTeamTools(message, settled), timestamp: message.timestamp });
+    else {
+      if (text) block.items.push({ kind: "text", id: message.id, text, timestamp: message.timestamp });
+      // Group receipts show who got a private message, never its body.
+      if (deliveries.length) block.items.push({ kind: "private", id: `${message.id}-private`, deliveries, timestamp: message.timestamp });
+    }
+  }
+  return blocks;
+}
+
 function mergeTeamHistory(
   histories: Array<{ agentId: string; history: ChatHistoryMessage[] }>,
   members: AgentDetail[],
@@ -105,9 +175,31 @@ function mergeTeamHistory(
   let fallbackOrder = 0;
 
   for (const { agentId, history } of histories) {
-    for (const item of history) {
+    const toolResults = new Map(history.flatMap((item) => item.role === "tool" && item.toolCallId ? [[item.toolCallId, item.content || ""] as const] : []));
+    for (const [index, item] of history.entries()) {
       const content = normalizeTeamContent(item.content || "", item.role === "assistant");
-      if (!content) continue;
+      // Tool calls replay in the same one-line-per-event form the live run
+      // streams, so both render through the same tool activity row.
+      const toolCalls = item.role === "assistant" ? item.toolCalls || [] : [];
+      const pushTools = () => {
+        if (!toolCalls.length) return;
+        // Untimed tool turns sort just before the reply that follows them.
+        const timestamp = item.timestamp || history.slice(index + 1).find((later) => later.timestamp)?.timestamp || 0;
+        for (const call of toolCalls) {
+          const result = toolResults.get(call.id);
+          merged.push({
+            id: `history-${agentId}-${fallbackOrder}`,
+            role: "tool",
+            content: [teamToolLine({ id: call.id, name: call.name, arguments: call.arguments }),
+              teamToolLine({ id: call.id, name: call.name, result: result ?? "(stopped)" })].join("\n"),
+            timestamp,
+            agentId,
+            groupTurnId: item.groupTurnId,
+            fallbackOrder: fallbackOrder++,
+          });
+        }
+      };
+      if (!content) { pushTools(); continue; }
       // Bot-to-bot context is stored as a user-role message in the target
       // Agent session. The originating Agent already has its own visible
       // assistant bubble, so don't render the injected copy again.
@@ -125,6 +217,7 @@ function mergeTeamHistory(
         groupTurnId: item.groupTurnId,
         fallbackOrder: fallbackOrder++,
       });
+      pushTools();
     }
   }
 
@@ -156,10 +249,16 @@ function mergeTeamHistory(
 
 export function TeamChatScreen() {
   const pathname = usePathname() || "";
-  const { teamId, sessionId } = React.useMemo(() => parseTeamRoute(pathname), [pathname]);
-  // null follows the original desktop panel/mobile drawer layout. Keep the
-  // user's panel choice while the keyed topic view changes.
-  const [panelOpen, setPanelOpen] = React.useState<boolean | null>(null);
+  const chatRoute = useChatRoute();
+  // /chat/<sessionId> doesn't name the group; AppShell resolved it.
+  const routeTeamId = chatRoute.status === "ready" && chatRoute.target.kind === "team" ? chatRoute.target.teamId : "";
+  const { teamId, sessionId } = React.useMemo(
+    () => (routeTeamId ? { teamId: routeTeamId, sessionId: chatRoute.sessionId } : parseTeamRoute(pathname)),
+    [routeTeamId, chatRoute.sessionId, pathname],
+  );
+  // Closed by default like the private chat's panel. Keep the user's panel
+  // choice while the keyed topic view changes.
+  const [panelOpen, setPanelOpen] = React.useState(false);
   if (!teamId || !sessionId) return null;
   // The server owns execution; a keyed view owns only this topic's UI.
   return <TeamConversation key={`${teamId}/${sessionId}`} teamId={teamId} sessionId={sessionId}
@@ -169,14 +268,18 @@ export function TeamChatScreen() {
 function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
   teamId: string;
   sessionId: string;
-  panelOpen: boolean | null;
+  panelOpen: boolean;
   onPanelChange: (open: boolean) => void;
 }) {
-  const { tr } = useLocale();
+  const { locale, t, tr } = useLocale();
   const [team, setTeam] = React.useState<TeamEntry | null>(null);
   const [members, setMembers] = React.useState<AgentDetail[]>([]);
   const [addMembersOpen, setAddMembersOpen] = React.useState(false);
   const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const [panelTab, setPanelTab] = React.useState<"sessions" | "members" | "files" | "settings">("sessions");
+  // A member's workspace opened from the Files tab replaces the panel,
+  // as in the private chat; its back button returns to the tab.
+  const [workspace, setWorkspace] = React.useState<{ agentId: string; sessionId: string; file: ProducedFile } | null>(null);
   const [topicEdit, setTopicEdit] = React.useState<{ topic: TeamTopic; remove: boolean } | null>(null);
   const [topicTitle, setTopicTitle] = React.useState("");
   const [topicSaving, setTopicSaving] = React.useState(false);
@@ -212,7 +315,11 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
   const generationRef = React.useRef(0);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+  const contentRef = React.useRef<HTMLDivElement>(null);
   const stickToBottom = React.useRef(true);
+  const [scrollState, setScrollState] = React.useState({ overflow: false, canScrollUp: false, canScrollDown: false });
+  const [copiedId, setCopiedId] = React.useState<string | null>(null);
+  const [lightboxSrc, setLightboxSrc] = React.useState<string | null>(null);
   const sending = submitting || run?.status === "running" || !!run?.activeAgents.length;
   const messages = React.useMemo(() => [
     ...(run?.completeHistory ? [] : history.filter((message) => !run?.turnId || message.groupTurnId !== run.turnId)),
@@ -224,7 +331,8 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
       || newTeamTopicId();
     // Group contacts and old bookmarks may still point at the deleted default
     // topic. Replace that URL so Back cannot lead straight into the tombstone.
-    window.history.replaceState(null, "", `/teams/${encodeURIComponent(teamId)}/chat/${encodeURIComponent(nextId)}/`);
+    rememberChatTarget(nextId, { kind: "team", teamId });
+    window.history.replaceState(null, "", chatHref(nextId));
   }, [teamId, sessionId]);
 
   React.useEffect(() => {
@@ -290,31 +398,96 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
     area.style.height = `${Math.min(area.scrollHeight, 180)}px`;
   }, [input]);
 
+  const updateScrollState = React.useCallback(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const next = {
+      overflow: el.scrollHeight > el.clientHeight + 8,
+      canScrollUp: el.scrollTop > 8,
+      canScrollDown: el.scrollHeight - el.scrollTop - el.clientHeight > 8,
+    };
+    setScrollState((current) => current.overflow === next.overflow && current.canScrollUp === next.canScrollUp
+      && current.canScrollDown === next.canScrollDown ? current : next);
+  }, []);
+
   React.useEffect(() => {
     const viewport = scrollRef.current;
     if (!viewport) return;
     if (stickToBottom.current) viewport.scrollTop = viewport.scrollHeight;
-  }, [messages, sending]);
+    updateScrollState();
+  }, [messages, sending, updateScrollState]);
 
+  // Same scroll behavior as the private chat: stay pinned to the bottom
+  // while content grows, except after the user opens a disclosure.
+  React.useEffect(() => {
+    const el = scrollRef.current;
+    const content = contentRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 64;
+      updateScrollState();
+    };
+    const releaseBottomStick = () => { stickToBottom.current = false; };
+    // Publish the list's scrollbar gutter so the composer pads by the
+    // same amount and both columns line up (as in the private chat).
+    const syncScrollbarGutter = () => {
+      el.parentElement?.style.setProperty("--chat-scrollbar", `${el.offsetWidth - el.clientWidth}px`);
+    };
+    const resizeObserver = new ResizeObserver(() => {
+      if (stickToBottom.current) el.scrollTop = el.scrollHeight;
+      syncScrollbarGutter();
+      updateScrollState();
+    });
+    el.addEventListener("scroll", onScroll, { passive: true });
+    window.addEventListener(CHAT_RELEASE_BOTTOM_STICK_EVENT, releaseBottomStick);
+    if (content) resizeObserver.observe(content);
+    resizeObserver.observe(el);
+    syncScrollbarGutter();
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      window.removeEventListener(CHAT_RELEASE_BOTTOM_STICK_EVENT, releaseBottomStick);
+      resizeObserver.disconnect();
+    };
+  }, [updateScrollState]);
+
+  const scrollByPage = (direction: -1 | 1) => {
+    const el = scrollRef.current;
+    el?.scrollBy({ top: direction * Math.max(240, el.clientHeight * 0.72), behavior: "smooth" });
+  };
+
+  const copyText = (id: string, text: string) => {
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopiedId(id);
+      setTimeout(() => setCopiedId((current) => (current === id ? null : current)), 1500);
+    }).catch(() => {});
+  };
+
+  const formatTime = (ts: number) =>
+    new Date(ts).toLocaleTimeString(locale === "zh-CN" ? "zh-CN" : "en-US", { hour: "2-digit", minute: "2-digit" });
   const teamName = team?.name?.trim() || tr("Group chat", "群聊");
+  // Same compact header as the private chat: the name opens settings,
+  // the panel toggle sits on the right.
   const header = React.useMemo(
     () => (
-      <div className="flex h-full min-w-0 flex-1 items-center gap-3 px-4 md:px-5">
-        <TeamAvatarStack members={members} size={30} />
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-foreground">{teamName}</p>
-          <p className="truncate text-[11px] text-muted-foreground">
-            {tr("{{count}} Agents", "{{count}} 个 Agent", { count: members.length })}
-          </p>
+      <div className="flex h-full min-w-0 flex-1 items-center gap-3 pl-1 pr-4 md:pr-5">
+        <button
+          type="button"
+          onClick={() => setSettingsOpen(true)}
+          disabled={!team}
+          className="group flex min-w-0 max-w-[min(60vw,32rem)] items-center gap-3 rounded-xl px-1.5 py-1 transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring disabled:hover:bg-transparent"
+          title={tr("Open settings for {{name}}", "打开 {{name}} 的设置", { name: teamName })}
+          aria-label={tr("Open settings for {{name}}", "打开 {{name}} 的设置", { name: teamName })}
+        >
+          <span className="truncate text-sm font-semibold text-foreground">{teamName}</span>
+        </button>
+        <div className="ml-auto shrink-0">
+          <RightPanelToggle open={panelOpen}
+            label={panelOpen ? tr("Close group panel", "关闭群聊侧栏") : tr("Open sessions and members", "打开会话和群成员")}
+            onToggle={() => onPanelChange(!panelOpen)} />
         </div>
-        <Button variant="ghost" size="icon" className="ml-auto size-8 text-muted-foreground"
-          aria-label={tr("Toggle members and recent sessions", "展开或收起群成员和最近会话")}
-          onClick={() => onPanelChange(!(panelOpen ?? window.matchMedia("(min-width: 1280px)").matches))}>
-          <PanelRight className="size-4" />
-        </Button>
       </div>
     ),
-    [members, teamName, tr, panelOpen, onPanelChange],
+    [team, teamName, tr, panelOpen, onPanelChange],
   );
   usePageHeader(header, [header]);
 
@@ -349,8 +522,27 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
     catch (cause) { setActionError(cause instanceof Error ? cause.message : String(cause)); }
   };
   const openTopic = (id: string) => {
-    window.history.pushState(null, "", `/teams/${encodeURIComponent(teamId)}/chat/${encodeURIComponent(id)}/`);
+    // The topic may not exist server-side until its first message; record
+    // its group so /chat/<id> opens it without a lookup.
+    rememberChatTarget(id, { kind: "team", teamId });
+    window.history.pushState(null, "", chatHref(id));
   };
+  const newTopic = () => openTopic(newTeamTopicId());
+  const newTopicRef = React.useRef(newTopic);
+  newTopicRef.current = newTopic;
+  // ⌘N starts a new session while the panel is open, as in the private chat.
+  const shortcutBlocked = !!topicEdit || settingsOpen || addMembersOpen;
+  React.useEffect(() => {
+    if (!panelOpen || shortcutBlocked) return;
+    const handleShortcut = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        newTopicRef.current();
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, [panelOpen, shortcutBlocked]);
   const updateTopic = async () => {
     if (!topicEdit || topicSaving) return;
     setTopicSaving(true); setActionError("");
@@ -410,237 +602,397 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
     { sessionId, title: tr("New session", "新会话"), status: "idle" as const, updatedAt: Date.now(), activeAgents: [] }, ...topics,
   ];
 
+  const showWelcome = !loading && !loadError && messages.length === 0 && members.length > 0;
+  const lead = members.find((member) => member.id === (team?.defaultAgent || team?.agents[0])) || members[0];
+  const blocks = buildTeamBlocks(messages, !sending);
+  const memberName = (id?: string) => members.find((m) => m.id === id)?.name || id || tr("Agent", "Agent");
+  const actionButton = "rounded p-0.5 text-muted-foreground/60 opacity-0 transition-all hover:bg-muted hover:text-muted-foreground group-hover:opacity-100";
+
   return (
     <main className="relative flex h-[calc(100vh-3.5rem)] min-w-0 bg-background">
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div ref={scrollRef} onScroll={() => { const el = scrollRef.current; if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }} className="min-h-0 flex-1 overflow-y-auto px-4 py-5 [scrollbar-gutter:stable] sm:px-6">
-        <div className="mx-auto w-full max-w-5xl space-y-4">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col xl:min-w-[520px]">
+      <div ref={scrollRef}
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-4 [scrollbar-gutter:stable]">
+        <div ref={contentRef} className={`mx-auto w-full max-w-4xl ${loading || loadError ? "flex min-h-full items-center justify-center" : "space-y-3"}`}>
           {loading && (
-            <div className="flex min-h-[50vh] items-center justify-center text-sm text-muted-foreground">
-              <LoaderCircle className="mr-2 size-4 animate-spin motion-reduce:animate-none" />
-              {tr("Loading group chat…", "正在加载群聊…")}
+            <div role="status" aria-live="polite"
+              className="inline-flex items-center gap-2.5 rounded-full border border-black/[0.07] bg-card px-4 py-2.5 text-sm text-muted-foreground shadow-[0_5px_20px_rgba(0,0,0,0.04)] dark:border-white/[0.09]">
+              <RefreshCw className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+              <span>{tr("Loading group chat…", "正在加载群聊…")}</span>
             </div>
           )}
 
           {!loading && loadError && (
-            <div className="mx-auto mt-20 max-w-md rounded-2xl border border-dashed px-6 py-10 text-center">
+            <div className="max-w-md rounded-2xl border border-dashed px-6 py-10 text-center">
               <UsersRound className="mx-auto mb-3 size-7 text-muted-foreground" />
               <p className="text-sm text-muted-foreground">{loadError}</p>
             </div>
           )}
 
-          {!loading && !loadError && messages.length === 0 && (
-            <div className="flex min-h-[52vh] flex-col items-center justify-center text-center">
-              <TeamAvatarStack members={members} size={62} />
-              <h1 className="mt-5 font-heading text-3xl font-semibold tracking-tight">{teamName}</h1>
-              <p className="mt-2 max-w-lg text-sm leading-6 text-muted-foreground">
-                {tr(
-                  "Mention an Agent by name, use @all for everyone, or just describe the task and FastClaw will route it.",
-                  "可以 @指定 Agent，使用 @all 让全员参与，或直接描述任务，由队长协调分工、接力讨论并汇总结果。",
-                )}
-              </p>
-              <div className="mt-5 flex flex-wrap justify-center gap-2">
-                {members.map((member) => (
-                  <button
-                    key={member.id}
-                    type="button"
-                    onClick={() => {
-                      setInput(`@${member.name || member.id} `);
-                      requestAnimationFrame(() => textareaRef.current?.focus());
-                    }}
-                    className="inline-flex items-center gap-2 rounded-full border border-black/[0.08] bg-card px-3 py-1.5 text-xs font-medium transition hover:bg-muted dark:border-white/[0.1]"
-                  >
-                    <BotAvatar agentId={member.id} avatarUrl={member.avatarUrl} seed={member.id} size={20} />
-                    @{member.name || member.id}
-                  </button>
-                ))}
-              </div>
+          {!loading && !loadError && (
+            <div className="pb-5 pt-1 text-center text-xs font-medium text-muted-foreground/75">
+              {conversationDayLabel(messages.find((message) => message.timestamp)?.timestamp || Date.now(), locale)}
             </div>
           )}
 
-          {!loading && !loadError && messages.map((message) => {
-            if (message.role === "tool") return <details key={message.id} className="rounded-xl border px-4 py-2 text-xs text-muted-foreground"><summary className="cursor-pointer">{members.find((m) => m.id === message.agentId)?.name || message.agentId} · {tr("Tool activity", "工具执行")}</summary><pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap">{message.content}</pre></details>;
-            if (message.role === "status") {
+          {/* A new session opens in conversation mode with a local greeting
+              from the lead, like the private chat's new-chat welcome. */}
+          {showWelcome && (
+            <div className="min-w-0 space-y-2">
+              <div className="flex h-5 items-center gap-2 text-[13px] font-medium text-muted-foreground">
+                <BotAvatar agentId={lead?.id} avatarUrl={lead?.avatarUrl} seed={lead?.id} size={20} className="rounded-md" />
+                <span className="truncate">{memberName(lead?.id)}</span>
+              </div>
+              <p className="max-w-full whitespace-pre-wrap py-0.5 text-[15px] leading-6 text-[#202020] dark:text-foreground">
+                {tr(
+                  "Hey, this is {{team}}. I'm {{lead}}, the lead. Mention a member with @, use @all for everyone, or just describe the task and I'll coordinate. What should we start with?",
+                  "Hey，这里是「{{team}}」，我是队长{{lead}}。可以 @指定成员，用 @all 让全员参与，或直接说任务，我来协调分工。想先从哪件事开始？",
+                  { team: teamName, lead: memberName(lead?.id) },
+                )}
+              </p>
+            </div>
+          )}
+
+          {!loading && !loadError && blocks.map((block) => {
+            if (block.kind === "status") {
               return (
-                <div key={message.id} className="mx-auto max-w-xl rounded-xl border border-destructive/20 bg-destructive/5 px-4 py-2.5 text-center text-sm text-destructive">
-                  {message.content}
+                // A quiet system notice: small, left-aligned in the turn lane,
+                // like the private chat's inline warnings.
+                <div key={block.message.id} role="status"
+                  className="flex w-fit max-w-full items-start gap-1.5 rounded-lg bg-destructive/[0.06] px-2.5 py-1.5 text-xs leading-5 text-destructive/90 dark:bg-destructive/10">
+                  <CircleAlert aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+                  <span className="min-w-0 break-words">{block.message.content}</span>
                 </div>
               );
             }
-            if (message.role === "user") {
+            if (block.kind === "user") {
+              const message = block.message;
+              const text = normalizeTeamContent(message.content);
               return (
                 <div key={message.id} className="flex justify-end">
-                  <div className="user-chat-bubble max-w-[80%] rounded-2xl rounded-br-md border border-[#ded5e2] bg-[#eee9f0] px-4 py-2.5 text-[#29252a] dark:border-[#4b404e] dark:bg-[#342d36] dark:text-[#f8f5f9]">
-                    {message.imageUrls?.map((url, index) => <a key={index} href={url} target="_blank" rel="noreferrer"><img src={url} alt={tr("Attachment", "图片附件")} className="mb-2 max-h-56 rounded-lg" /></a>)}
-                    {message.attachments?.map((file, index) => <a key={index} className="mb-2 block truncate text-sm underline" href={file.url} download={file.name}>{file.name}</a>)}
-                    <ChatMarkdown text={normalizeTeamContent(message.content)} />
+                  <div className="group relative min-w-0 max-w-[80%]">
+                    {/* Attachments sit above the bubble, which carries only text. */}
+                    {(message.imageUrls?.length || message.attachments?.length) ? (
+                      <div className="mb-2 flex flex-wrap justify-end gap-2">
+                        {message.imageUrls?.map((url, index) => (
+                          <button key={index} type="button" onClick={() => setLightboxSrc(url)}
+                            className="block size-32 shrink-0 cursor-zoom-in overflow-hidden rounded-xl border border-black/10 bg-muted/40 transition hover:opacity-90 focus-visible:ring-2 focus-visible:ring-ring md:size-36 dark:border-white/10"
+                            aria-label={tr("Preview image", "预览图片")}>
+                            <img src={url} alt={tr("Attachment", "图片附件")} className="size-full object-cover" />
+                          </button>
+                        ))}
+                        {message.attachments?.map((file, index) => (
+                          <a key={index} href={file.url} download={file.name}
+                            className="flex max-w-[16rem] items-center gap-2 rounded-xl border border-black/10 bg-background px-3 py-2 text-sm text-foreground dark:border-white/10">
+                            <Paperclip className="size-4 shrink-0 text-muted-foreground" />
+                            <span className="truncate">{file.name}</span>
+                          </a>
+                        ))}
+                      </div>
+                    ) : null}
+                    {text && (
+                      <div className="user-chat-bubble break-words rounded-2xl rounded-br-md border border-[#ded5e2] bg-[#eee9f0] px-4 py-2.5 text-[#29252a] dark:border-[#4b404e] dark:bg-[#342d36] dark:text-[#f8f5f9]">
+                        <ChatMarkdown text={text} />
+                      </div>
+                    )}
+                    <div className="mt-1 flex items-center justify-end gap-1.5">
+                      {message.timestamp > 0 && (
+                        <span className="text-[10px] text-muted-foreground/60 opacity-0 transition-all group-hover:opacity-100">{formatTime(message.timestamp)}</span>
+                      )}
+                      <button type="button" onClick={() => copyText(message.id, text)} className={actionButton} title={tr("Copy", "复制")} aria-label={tr("Copy", "复制")}>
+                        {copiedId === message.id ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
+                      </button>
+                      <button type="button" className={actionButton}
+                        onClick={() => { setInput(text); requestAnimationFrame(() => textareaRef.current?.focus()); }}
+                        title={tr("Resend (refills the composer)", "重新发送（填回输入框）")} aria-label={tr("Resend (refills the composer)", "重新发送（填回输入框）")}>
+                        <RotateCcw className="size-3" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
             }
-            const member = members.find((candidate) => candidate.id === message.agentId);
-            const content = normalizeTeamContent(message.content, true);
-            if (!content) return null;
+            // One member's consecutive replies and tool activity read as a
+            // single plain-text turn under that member's name.
+            const member = members.find((candidate) => candidate.id === block.agentId);
+            const memberSession = member ? memberSessionId(sessionId, member.id) : undefined;
+            const replyText = block.items.flatMap((item) => item.kind === "text" ? [item.text] : []).join("\n\n");
+            const lastTimestamp = [...block.items].reverse().find((item) => item.timestamp)?.timestamp || 0;
             return (
-              <div key={message.id} className="flex items-start gap-2.5">
-                <BotAvatar agentId={member?.id} avatarUrl={member?.avatarUrl} seed={member?.id || message.agentId} size={30} className="mt-0.5" />
-                <div className="min-w-0 max-w-[min(88%,56rem)]">
-                  <p className="mb-1 px-1 text-xs font-semibold text-muted-foreground">
-                    {member?.name || message.agentId || tr("Agent", "Agent")}
-                  </p>
-                  <div className="rounded-2xl rounded-bl-md bg-[#f1f1f1] px-4 py-2.5 text-[#202020] dark:bg-white/[0.09] dark:text-foreground">
-                    <ChatMarkdown text={content} agentId={member?.id} sessionId={member ? memberSessionId(sessionId, member.id) : undefined} />
-                  </div>
+              <div key={block.id} className="group relative min-w-0 space-y-2">
+                <div className="flex h-5 items-center gap-2 text-[13px] font-medium text-muted-foreground">
+                  <BotAvatar agentId={member?.id} avatarUrl={member?.avatarUrl} seed={member?.id || block.agentId} size={20} className="rounded-md" />
+                  <span className="truncate">{memberName(block.agentId)}</span>
                 </div>
+                {block.items.map((item) => item.kind === "tools" ? (
+                  <ToolActivity key={item.id} items={item.calls.map((tc) => ({ kind: "tool" as const, tc }))} />
+                ) : item.kind === "private" ? (
+                  <p key={item.id} className="flex items-center gap-2 text-sm leading-6 text-muted-foreground">
+                    <LockKeyhole className="size-4 shrink-0 stroke-[1.8]" />
+                    <span className="truncate">
+                      {tr("Sent private message to {{names}}", "已发送私信给 {{names}}", {
+                        names: [...new Set(item.deliveries.map((delivery) =>
+                          delivery.recipientId === "human" ? tr("you", "你") : delivery.recipientName || memberName(delivery.recipientId)))].join(", "),
+                      })}
+                    </span>
+                  </p>
+                ) : (
+                  <div key={item.id} className="break-words py-0.5 text-[#202020] dark:text-foreground">
+                    <ChatMarkdown text={item.text} agentId={member?.id} sessionId={memberSession} />
+                  </div>
+                ))}
+                {replyText && (
+                  <div className="flex h-5 items-center gap-1.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+                    {lastTimestamp > 0 && <span className="text-[10px] text-muted-foreground/60">{formatTime(lastTimestamp)}</span>}
+                    <button type="button" onClick={() => copyText(block.id, replyText)} className={actionButton} title={tr("Copy", "复制")} aria-label={tr("Copy", "复制")}>
+                      {copiedId === block.id ? <Check className="size-3 text-emerald-500" /> : <Copy className="size-3" />}
+                    </button>
+                  </div>
+                )}
               </div>
             );
           })}
 
-          {sending && (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <span className="flex gap-1">
-                {[0, 1, 2].map((dot) => (
-                  <span key={dot} className="typing-dot size-1.5 rounded-full bg-current" style={{ animationDelay: `${dot * 140}ms` }} />
-                ))}
+          {!loading && !loadError && sending && (
+            <div className="flex items-center gap-2.5">
+              <div className="rounded-2xl rounded-bl-md bg-muted px-4 py-3">
+                <div className="flex items-center gap-1">
+                  {[0, 200, 400].map((delay) => (
+                    <span key={delay} className="typing-dot inline-block size-2 rounded-full bg-muted-foreground/60" style={{ animationDelay: `${delay}ms` }} />
+                  ))}
+                </div>
+              </div>
+              <span className="truncate text-xs text-muted-foreground">
+                {run?.activeAgents.length ? tr("{{names}} is replying…", "{{names}} 正在回复…", { names: run.activeAgents.map((id) => memberName(id)).join(tr(", ", "、")) }) : teamProgressLabel(run, tr)}
               </span>
-              {run?.activeAgents.length ? tr("{{names}} is replying…", "{{names}} 正在回复…", { names: run.activeAgents.map((id) => members.find((member) => member.id === id)?.name || id).join(tr(", ", "、")) }) : teamProgressLabel(run, tr)}
             </div>
           )}
         </div>
       </div>
 
-      {(actionError || connectionError) && <p role="status" className="px-5 py-2 text-sm text-destructive">{actionError || tr("Connection interrupted. Reconnecting; replies continue in the background.", "连接暂时中断，正在重连；回复仍在后台继续。")}</p>}
+      {!loading && !loadError && scrollState.overflow && (
+        <div className="pointer-events-none absolute right-3 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-1.5">
+          {([[-1, ChevronUp, tr("Scroll up", "向上滚动"), scrollState.canScrollUp], [1, ChevronDown, tr("Scroll down", "向下滚动"), scrollState.canScrollDown]] as const).map(([direction, Icon, label, enabled]) => (
+            <button key={direction} type="button" onClick={() => scrollByPage(direction)} disabled={!enabled}
+              className="pointer-events-auto flex size-9 items-center justify-center rounded-xl border border-black/[0.08] bg-background/95 text-muted-foreground shadow-[0_6px_20px_rgba(0,0,0,0.12)] backdrop-blur transition hover:bg-background hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-35 dark:border-white/[0.1]"
+              aria-label={label} title={label}>
+              <Icon className="size-4" />
+            </button>
+          ))}
+        </div>
+      )}
+
       {!loading && !loadError && (
-        <div className="shrink-0 px-3 pb-5 pt-2 sm:px-5">
-          <div className="relative mx-auto w-full max-w-5xl rounded-[22px] border border-black/10 bg-card p-1.5 shadow-[0_8px_28px_rgba(0,0,0,0.055)] transition-shadow focus-within:border-black/15 focus-within:ring-2 focus-within:ring-black/5 dark:border-white/10 dark:focus-within:border-white/16 dark:focus-within:ring-white/5">
-            {mention && <div id="team-mentions" role="listbox" aria-label={tr("Mention a member", "提及成员")} className="absolute bottom-full left-0 z-20 mb-2 max-h-60 w-72 overflow-auto rounded-xl border bg-background p-1 shadow-lg">
+        <div className="shrink-0 pb-5 pl-4 pr-[calc(1rem+var(--chat-scrollbar,0px))] pt-2">
+          <div className="relative mx-auto w-full max-w-4xl">
+            {(actionError || connectionError) && <p role="status" className="mb-2 px-1 text-sm text-destructive">{actionError || tr("Connection interrupted. Reconnecting; replies continue in the background.", "连接暂时中断，正在重连；回复仍在后台继续。")}</p>}
+            {mention && <div id="team-mentions" role="listbox" aria-label={tr("Mention a member", "提及成员")} className="absolute bottom-full left-0 z-20 mb-2 max-h-60 w-72 overflow-auto rounded-2xl border bg-popover p-1.5 shadow-xl">
               {mention.options.length ? mention.options.map((option, index) => <button key={option.id} id={`team-mention-${index}`} role="option" aria-selected={index === mentionIndex}
-                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm ${index === mentionIndex ? "bg-muted" : "hover:bg-muted/50"}`}
+                className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2 text-left text-sm ${index === mentionIndex ? "bg-muted" : "hover:bg-muted/50"}`}
                 onMouseDown={(e) => e.preventDefault()} onClick={() => insertMention(option.mention)}>
-                {option.id === "all" ? <UsersRound className="size-5" /> : <BotAvatar agentId={option.id} size={24} />}<span className="truncate">{option.name}</span>
+                {option.id === "all" ? <UsersRound className="size-5 text-muted-foreground" /> : <BotAvatar agentId={option.id} size={20} className="rounded-md" />}<span className="truncate">{option.name}</span>
               </button>) : <p className="p-3 text-xs text-muted-foreground">{tr("No matching members", "没有匹配的成员")}</p>}
             </div>}
-            {images.length > 0 && <div className="flex gap-2 overflow-x-auto p-2">{images.map((url, index) => <div key={index} className="relative shrink-0"><img src={url} alt={tr("Image attachment", "图片附件")} className="size-16 rounded-lg object-cover" /><button aria-label={tr("Remove image", "移除图片")} className="absolute -right-1 -top-1 rounded-full bg-background p-0.5 shadow" onClick={() => setImages((current) => current.filter((_, i) => i !== index))}><X className="size-3" /></button></div>)}</div>}
-            {attachments.length > 0 && <div className="flex flex-wrap gap-2 p-2">{attachments.map((file, index) => <span key={index} className="inline-flex max-w-full items-center gap-2 rounded-lg border px-2 py-1 text-xs"><Paperclip className="size-3" /><span className="truncate">{file.name}</span><button aria-label={tr("Remove attachment", "移除附件")} onClick={() => setAttachments((current) => current.filter((_, i) => i !== index))}><X className="size-3" /></button></span>)}</div>}
-            <input ref={fileRef} type="file" multiple className="hidden" onChange={(e) => { void addImages(Array.from(e.target.files || [])); e.target.value = ""; }} />
-            <div className="flex items-end gap-2">
-              <Button variant="ghost" size="icon" className="size-8 shrink-0 rounded-full" aria-label={tr("Attach files", "添加附件")} onClick={() => fileRef.current?.click()}><Paperclip className="size-4" /></Button>
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(event) => { setInput(event.target.value); setCaret(event.target.selectionStart); setMentionIndex(0); setMentionDismissed(false); }}
-                onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
-                onPaste={(event) => { const files = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/")).flatMap((item) => { const file = item.getAsFile(); return file ? [file] : []; }); if (files.length) { event.preventDefault(); void addImages(files); } }}
-                aria-controls={mention ? "team-mentions" : undefined}
-                aria-activedescendant={mention?.options.length ? `team-mention-${mentionIndex}` : undefined}
-                onKeyDown={(event) => {
-                  if (mention && !event.nativeEvent.isComposing) {
-                    if (event.key === "Escape") { event.preventDefault(); setMentionDismissed(true); return; }
-                    if (mention.options.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) { event.preventDefault(); setMentionIndex((current) => (current + (event.key === "ArrowDown" ? 1 : -1) + mention.options.length) % mention.options.length); return; }
-                    if (mention.options.length && (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey))) { event.preventDefault(); insertMention(mention.options[mentionIndex % mention.options.length].mention); return; }
-                  }
-                  if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
-                    event.preventDefault();
-                    void send();
-                  }
-                }}
-                rows={1}
-                placeholder={tr("Message group · @Agent or @all", "给群聊发消息 · @Agent 或 @all")}
-                className="block min-w-0 flex-1 resize-none bg-transparent px-1 py-1 text-[15px] leading-6 placeholder:text-muted-foreground/45 outline-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-                style={{ maxHeight: 180, minHeight: 32 }}
-              />
-              {sending ? (
-                <Button disabled={submitting} onClick={() => void stop()} size="icon" className="size-8 shrink-0 rounded-full bg-[#111] text-white hover:bg-black dark:bg-white dark:text-black">
-                  <Square className="size-3 fill-current" />
-                  <span className="sr-only">{tr("Stop generating", "停止生成")}</span>
-                </Button>
-              ) : input.trim() || images.length || attachments.length ? (
-                <Button onClick={() => void send()} size="icon" className="size-8 shrink-0 rounded-full bg-[#111] text-white hover:bg-black dark:bg-white dark:text-black">
-                  <ArrowUp className="size-[17px] stroke-[2.25]" />
-                  <span className="sr-only">{tr("Send message", "发送消息")}</span>
-                </Button>
-              ) : null}
+            <div className="rounded-[22px] border border-black/10 bg-card p-1.5 shadow-[0_8px_28px_rgba(0,0,0,0.055)] transition-shadow focus-within:border-black/15 focus-within:ring-2 focus-within:ring-black/5 dark:border-white/10 dark:focus-within:border-white/16 dark:focus-within:ring-white/5">
+              {(images.length > 0 || attachments.length > 0) && (
+                <div className="mx-1 mb-2 flex flex-wrap gap-2 border-b border-border/60 px-1 pb-2 pt-1">
+                  {images.map((url, index) => (
+                    <div key={`image-${index}`} className="group relative size-14 overflow-hidden rounded-md border border-border bg-muted">
+                      <button type="button" onClick={() => setLightboxSrc(url)} className="block size-full cursor-zoom-in" aria-label={tr("Preview image", "预览图片")}>
+                        <img src={url} alt={tr("Image attachment", "图片附件")} className="size-full object-cover" />
+                      </button>
+                      <button type="button" onClick={() => setImages((current) => current.filter((_, i) => i !== index))}
+                        className="absolute right-0.5 top-0.5 flex size-4 items-center justify-center rounded-full bg-background/80 text-muted-foreground opacity-0 transition hover:text-foreground group-hover:opacity-100"
+                        aria-label={tr("Remove attachment", "移除附件")}>
+                        <X className="size-3" />
+                      </button>
+                    </div>
+                  ))}
+                  {attachments.map((file, index) => (
+                    <div key={`file-${index}`} className="flex items-center gap-1.5 rounded-md bg-muted/60 py-1 pl-2 pr-1 text-xs">
+                      <Paperclip className="size-3 text-muted-foreground" />
+                      <span className="max-w-[160px] truncate">{file.name}</span>
+                      <button type="button" onClick={() => setAttachments((current) => current.filter((_, i) => i !== index))}
+                        className="rounded p-0.5 text-muted-foreground hover:bg-muted-foreground/15 hover:text-foreground" aria-label={tr("Remove attachment", "移除附件")}>
+                        <X className="size-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <input ref={fileRef} type="file" multiple className="sr-only" onChange={(e) => { void addImages(Array.from(e.target.files || [])); e.target.value = ""; }} />
+              <div className="flex items-end gap-2">
+                <DropdownMenu>
+                  <DropdownMenuTrigger render={
+                    <button type="button" aria-label={t("composer.moreOptions")} title={t("composer.moreOptions")}
+                      className="flex size-8 shrink-0 items-center justify-center rounded-full border border-border/80 bg-muted/35 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground">
+                      <Plus className="size-[17px]" />
+                    </button>
+                  } />
+                  <DropdownMenuContent align="start" side="top" sideOffset={10} className="w-56 rounded-2xl p-1.5 shadow-xl">
+                    <DropdownMenuItem onClick={() => fileRef.current?.click()} className="gap-2.5 rounded-xl px-3 py-2.5">
+                      <Paperclip className="size-4 text-muted-foreground" />
+                      <span>{t("composer.addAttachment")}</span>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <textarea
+                  ref={textareaRef}
+                  value={input}
+                  onChange={(event) => { setInput(event.target.value); setCaret(event.target.selectionStart); setMentionIndex(0); setMentionDismissed(false); }}
+                  onSelect={(event) => setCaret(event.currentTarget.selectionStart)}
+                  onPaste={(event) => { const files = Array.from(event.clipboardData.items).filter((item) => item.type.startsWith("image/")).flatMap((item) => { const file = item.getAsFile(); return file ? [file] : []; }); if (files.length) { event.preventDefault(); void addImages(files); } }}
+                  aria-controls={mention ? "team-mentions" : undefined}
+                  aria-activedescendant={mention?.options.length ? `team-mention-${mentionIndex}` : undefined}
+                  onKeyDown={(event) => {
+                    if (mention && !event.nativeEvent.isComposing) {
+                      if (event.key === "Escape") { event.preventDefault(); setMentionDismissed(true); return; }
+                      if (mention.options.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) { event.preventDefault(); setMentionIndex((current) => (current + (event.key === "ArrowDown" ? 1 : -1) + mention.options.length) % mention.options.length); return; }
+                      if (mention.options.length && (event.key === "Tab" || (event.key === "Enter" && !event.shiftKey))) { event.preventDefault(); insertMention(mention.options[mentionIndex % mention.options.length].mention); return; }
+                    }
+                    if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                      event.preventDefault();
+                      void send();
+                    }
+                  }}
+                  rows={1}
+                  placeholder={tr("Message group · @Agent or @all", "给群聊发消息 · @Agent 或 @all")}
+                  className="block min-w-0 flex-1 resize-none bg-transparent px-1 py-1 text-[15px] leading-6 placeholder:text-muted-foreground/45 outline-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                  style={{ maxHeight: 180, minHeight: 32 }}
+                />
+                {sending ? (
+                  <Button disabled={submitting} onClick={() => void stop()} size="icon" aria-label={t("composer.stop")}
+                    className="size-8 shrink-0 rounded-full bg-[#111] text-white hover:bg-black disabled:bg-[#111] dark:bg-white dark:text-black dark:hover:bg-white/90">
+                    <Square className="size-3 fill-current" />
+                  </Button>
+                ) : (
+                  // Always present so the composer reads as sendable; it
+                  // stays dimmed until there's something to send.
+                  <Button onMouseDown={(event) => { event.preventDefault(); void send(); }}
+                    disabled={!(input.trim() || images.length || attachments.length)} size="icon" aria-label={t("composer.send")}
+                    className="size-8 shrink-0 rounded-full bg-[#111] text-white hover:bg-black disabled:bg-black/15 disabled:text-white disabled:opacity-100 dark:bg-white dark:text-black dark:hover:bg-white/90 dark:disabled:bg-white/20 dark:disabled:text-black/60">
+                    <ArrowUp className="size-[17px] stroke-[2.25]" />
+                  </Button>
+                )}
+              </div>
             </div>
           </div>
         </div>
       )}
+      {lightboxSrc && (
+        <div className="fixed inset-0 z-50 flex cursor-zoom-out items-center justify-center bg-black/80 p-6"
+          onClick={() => setLightboxSrc(null)} role="dialog" aria-modal="true" aria-label={tr("Image preview", "图片预览")}>
+          <img src={lightboxSrc} alt={tr("Preview", "预览")} className="max-h-full max-w-full rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} />
+          <button type="button" onClick={() => setLightboxSrc(null)} aria-label={tr("Close preview", "关闭预览")}
+            className="absolute right-4 top-4 flex size-9 items-center justify-center rounded-full bg-background/80 text-foreground hover:bg-background">
+            <X className="size-5" />
+          </button>
+        </div>
+      )}
       </div>
-      {panelOpen === true && <button className="fixed inset-0 z-40 bg-black/20 xl:hidden"
-        aria-label={tr("Close group sidebar", "关闭群聊侧栏")} onClick={() => onPanelChange(false)} />}
-      {panelOpen !== false && (
-        <aside aria-label={tr("Group sidebar", "群聊侧栏")}
-          className={`${panelOpen === null ? "hidden xl:flex" : "flex"} fixed inset-y-0 right-0 z-50 h-dvh w-[min(94vw,420px)] shrink-0 flex-col border-l border-border bg-background shadow-2xl xl:relative xl:z-30 xl:-mt-14 xl:h-screen xl:w-[400px] xl:min-w-[300px] xl:max-w-[calc(100%_-_520px)] xl:shadow-none`}>
-          <div className="flex h-14 shrink-0 items-center justify-between px-5">
-            <h2 className="mr-auto text-sm font-medium">{tr("Group chat", "群聊")}</h2>
-            <Button variant="ghost" size="icon" className="size-8 text-muted-foreground" disabled={!team} aria-label={tr("Group settings", "群聊设置")} onClick={() => setSettingsOpen(true)}><Settings className="size-4" /></Button>
-            <Button variant="ghost" size="icon" className="size-8 text-muted-foreground"
-              aria-label={tr("Collapse group sidebar", "收起群聊侧栏")} onClick={() => onPanelChange(false)}>
-              <ChevronsRight className="size-4" />
-            </Button>
-          </div>
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-8 pt-1">
-            <section aria-label={tr("Members", "群成员")} className="border-b border-border px-1 pb-6 pt-3">
-              <div className="grid grid-cols-5 gap-x-2 gap-y-3">
-                {members.map((member) => <button key={member.id}
-                  title={member.name || member.id}
-                  aria-label={tr("Mention {{name}}", "提及 {{name}}", { name: member.name || member.id })}
-                  className="group flex min-w-0 flex-col items-center gap-1.5 rounded-lg py-1 focus-visible:outline-2 focus-visible:outline-ring"
-                  onClick={() => {
-                    setInput((current) => `${current}${current && !current.endsWith(" ") ? " " : ""}@${member.name || member.id} `);
-                    if (!window.matchMedia("(min-width: 1280px)").matches) onPanelChange(false);
-                    requestAnimationFrame(() => textareaRef.current?.focus());
-                  }}>
-                  <span className="flex size-12 items-center justify-center overflow-hidden rounded-xl bg-black/[0.06] transition group-hover:bg-black/10 dark:bg-white/[0.08] dark:group-hover:bg-white/[0.14]">
-                    <BotAvatar agentId={member.id} avatarUrl={member.avatarUrl} seed={member.id} size={40} className="rounded-lg" />
-                  </span>
-                  <span className="flex w-full items-center justify-center gap-0.5 text-xs text-muted-foreground">{(team?.defaultAgent || team?.agents[0]) === member.id && <Crown className="size-2.5 shrink-0" />}<span className="truncate">{member.name || member.id}</span></span>
-                </button>)}
-                <button onClick={() => setAddMembersOpen(true)} disabled={!team}
-                  aria-label={tr("Add members", "添加成员")}
-                  className="group flex min-w-0 flex-col items-center gap-1.5 rounded-lg py-1 text-muted-foreground focus-visible:outline-2 focus-visible:outline-ring disabled:opacity-50">
-                  <span className="flex size-12 items-center justify-center rounded-xl border border-dashed border-muted-foreground/60 transition group-hover:bg-muted">
-                    <Plus className="size-5" />
-                  </span>
-                  <span className="text-xs">{tr("Add", "添加")}</span>
-                </button>
-              </div>
-            </section>
-            <section className="mt-5">
-              <div className="mb-2 flex items-center justify-between px-1">
-                <h3 className="text-sm font-medium text-muted-foreground">{tr("Sessions", "会话")}</h3>
-                <Button variant="ghost" size="icon" className="size-8 text-muted-foreground"
-                  aria-label={tr("New session", "新会话")} title={tr("New session", "新会话")}
-                  onClick={() => openTopic(newTeamTopicId())}>
-                  <Plus className="size-4" />
-                </Button>
-              </div>
-              <nav aria-label={tr("Group sessions", "群聊会话")} className="space-y-1">
+      {workspace && (
+        <WorkspacePanel
+          key={`${workspace.agentId}/${workspace.sessionId}`}
+          agentId={workspace.agentId}
+          sessionId={workspace.sessionId}
+          initialPreview={workspace.file}
+          onBack={() => { setWorkspace(null); setPanelTab("files"); onPanelChange(true); }}
+          onClose={() => setWorkspace(null)}
+        />
+      )}
+      {panelOpen && !workspace && (
+        <RightPanel title={tr("Group chat", "群聊")} label={tr("group panel", "群聊侧栏")} onClose={() => onPanelChange(false)}>
+          <RightPanelTabs label={tr("Group chat", "群聊")} value={panelTab} onChange={setPanelTab} tabs={[
+            ["sessions", tr("Sessions", "会话")],
+            ["members", tr("Members", "成员")],
+            ["files", tr("Files", "文件")],
+            ["settings", tr("Settings", "设置")],
+          ]} />
+          <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-8 pt-3">
+            {panelTab === "sessions" && <>
+              <RightPanelListHeader
+                label={tr("{{count}} sessions", "{{count}} 个会话", { count: visibleTopics.length })}
+                actionLabel={tr("New session", "新建会话")} shortcut="⌘N" icon={SquarePen} onAction={newTopic} />
+              <nav aria-label={tr("Group sessions", "群聊会话")} className="space-y-0.5">
                 {visibleTopics.map((topic) => {
                   const running = topic.status === "running" || !!topic.activeAgents?.length;
-                  return <div key={topic.sessionId} className="group/topic relative"><button onClick={() => {
-                    openTopic(topic.sessionId);
-                    if (!window.matchMedia("(min-width: 1280px)").matches) onPanelChange(false);
-                  }} aria-current={topic.sessionId === sessionId ? "page" : undefined}
-                    className={`w-full rounded-lg py-2 pl-3 pr-9 text-left transition focus-visible:outline-2 focus-visible:outline-ring ${topic.sessionId === sessionId ? "bg-black/[0.07] dark:bg-white/[0.09]" : "hover:bg-muted"}`}>
-                    <span className="block truncate text-sm">{topic.title || tr("Untitled session", "未命名会话")}</span>
-                    <span className={`mt-1 flex items-center gap-1.5 text-[11px] ${running ? "text-violet-600 dark:text-violet-300" : topic.status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
-                      {running && <LoaderCircle className="size-3 animate-spin motion-reduce:animate-none" />}
-                      {statusLabel(topic)}
-                      {running && <span className="truncate">{topic.activeAgents.map((id) => members.find((m) => m.id === id)?.name || id).join(" · ")}</span>}
+                  const active = topic.sessionId === sessionId;
+                  const title = topic.title || tr("Untitled session", "未命名会话");
+                  const runningNames = topic.activeAgents?.map((id) => members.find((m) => m.id === id)?.name || id).join(" · ");
+                  return <div key={topic.sessionId} className={`group relative rounded-xl transition-colors ${RIGHT_PANEL_CARD_BG(active)}`}>
+                    <button type="button" onClick={() => openTopic(topic.sessionId)} aria-current={active ? "page" : undefined}
+                      title={running && runningNames ? `${title} · ${runningNames}` : title}
+                      className="flex h-8 w-full min-w-0 items-center gap-2 rounded-xl px-3 pr-10 text-left focus-visible:ring-2 focus-visible:ring-ring">
+                      <span className={`min-w-0 flex-1 truncate text-[13.5px] leading-5 text-foreground ${active ? "font-medium" : ""}`}>{title}</span>
+                    </button>
+                    {/* Run status sits in the ⋯ button's slot and gives way to it on hover. */}
+                    <span className="pointer-events-none absolute right-1.5 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">
+                      <TeamTopicStatus topic={topic} label={statusLabel(topic)} />
                     </span>
-                  </button>
-                  <DropdownMenu><DropdownMenuTrigger render={<button aria-label={tr("Session actions", "会话操作")} className="absolute right-1 top-2 rounded-md p-1 text-muted-foreground hover:bg-muted"><MoreHorizontal className="size-4" /></button>} />
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem disabled={running} onClick={() => { setTopicTitle(topic.title); setTopicEdit({ topic, remove: false }); }}><Pencil className="size-4" />{tr("Rename", "重命名")}</DropdownMenuItem>
-                      <DropdownMenuItem disabled={running} onClick={() => setTopicEdit({ topic, remove: true })}><Trash2 className="size-4" />{tr("Delete session", "删除会话")}</DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger render={<button type="button" onClick={(event) => event.stopPropagation()}
+                        aria-label={tr("More actions for {{name}}", "{{name}} 的更多操作", { name: title })}
+                        className="absolute right-1.5 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground opacity-0 transition-opacity hover:bg-background/70 hover:text-foreground group-hover:opacity-100 group-focus-within:opacity-100 aria-expanded:opacity-100">
+                        <MoreHorizontal className="size-4" /></button>} />
+                      <DropdownMenuContent align="end" className="w-36 rounded-xl">
+                        <DropdownMenuItem disabled={running} onClick={() => { setTopicTitle(topic.title); setTopicEdit({ topic, remove: false }); }}>
+                          <Pencil className="size-4 text-muted-foreground" />{tr("Rename", "重命名")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem disabled={running} onClick={() => setTopicEdit({ topic, remove: true })} className="text-destructive focus:text-destructive">
+                          <Trash2 className="size-4 text-destructive" />{tr("Delete", "删除")}
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>;
                 })}
               </nav>
-            </section>
+            </>}
+            {panelTab === "members" && <>
+              <RightPanelListHeader
+                label={tr("{{count}} members", "{{count}} 位成员", { count: members.length })}
+                actionLabel={tr("Manage members", "成员管理")} icon={UserPlus} disabled={!team} onAction={() => setAddMembersOpen(true)} />
+              <div className="space-y-0.5">
+                {members.map((member) => {
+                  const name = member.name || member.id;
+                  const lead = (team?.defaultAgent || team?.agents[0]) === member.id;
+                  return <button key={member.id} type="button"
+                    title={tr("Open settings for {{name}}", "打开 {{name}} 的设置", { name })}
+                    className={`flex h-10 w-full min-w-0 items-center gap-2.5 rounded-xl px-3 text-left transition-colors focus-visible:ring-2 focus-visible:ring-ring ${RIGHT_PANEL_CARD_BG(false)}`}
+                    // AppSidebar owns the Agent settings dialog; naming the
+                    // member opens it for that Agent from the group route.
+                    onClick={() => window.dispatchEvent(new CustomEvent("fastclaw:open-agent-settings", { detail: { agentId: member.id } }))}>
+                    <BotAvatar agentId={member.id} avatarUrl={member.avatarUrl} seed={member.id} size={24} className="shrink-0 rounded-md" />
+                    <span className="min-w-0 flex-1 truncate text-[13.5px] leading-5 text-foreground">{name}</span>
+                    {lead && <span className="flex shrink-0 items-center gap-1 text-xs text-muted-foreground"><Crown className="size-3" />{tr("Lead", "队长")}</span>}
+                  </button>;
+                })}
+              </div>
+            </>}
+            {panelTab === "files" && (
+              <TeamFilesTab members={members} sessionId={sessionId} refreshKey={`${run?.turnId || ""}:${sending}`}
+                onOpen={(agentId, file) => {
+                  setWorkspace({ agentId, sessionId: memberSessionId(sessionId, agentId), file });
+                  onPanelChange(false);
+                }} />
+            )}
+            {panelTab === "settings" && (
+              <div className="overflow-hidden rounded-xl bg-black/[0.03] dark:bg-white/[0.05]">
+                {([
+                  [Settings, tr("Group settings", "群聊设置"), () => setSettingsOpen(true)],
+                  [UsersRound, tr("Manage members", "成员管理"), () => setAddMembersOpen(true)],
+                ] as const).map(([Icon, label, action], index) => (
+                  <button key={label} type="button" onClick={action} disabled={!team} title={label}
+                    className={`flex h-11 w-full min-w-0 items-center gap-3 px-3.5 text-left text-foreground transition-colors hover:bg-black/[0.04] focus-visible:bg-black/[0.04] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:hover:bg-white/[0.06] ${
+                      index > 0 ? "border-t border-black/[0.05] dark:border-white/[0.06]" : ""}`}>
+                    <Icon className="size-4 shrink-0 stroke-[1.8] text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate text-sm">{label}</span>
+                    <ChevronRight className="size-4 shrink-0 text-muted-foreground/70" />
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
-        </aside>
+        </RightPanel>
       )}
       {settingsOpen && team && <TeamSettingsDialog teamId={teamId} team={team} onClose={() => setSettingsOpen(false)}
         onSaved={(next, nextMembers) => { setTeam(next); setMembers(nextMembers); setSettingsOpen(false); window.dispatchEvent(new CustomEvent("fastclaw:teams-changed")); }} />}
@@ -652,8 +1004,8 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
         <DialogFooter><Button variant="outline" disabled={topicSaving} onClick={() => setTopicEdit(null)}>{tr("Cancel", "取消")}</Button>
           <Button disabled={topicSaving || (!topicEdit.remove && !topicTitle.trim())} onClick={() => void updateTopic()}>{tr("Confirm", "确定")}</Button></DialogFooter>
       </DialogContent></Dialog>}
-      {addMembersOpen && <AddTeamMembersDialog teamId={teamId} onClose={() => setAddMembersOpen(false)}
-        onAdded={(nextTeam, nextMembers) => {
+      {addMembersOpen && team && <TeamMembersDialog teamId={teamId} team={team} onClose={() => setAddMembersOpen(false)}
+        onSaved={(nextTeam, nextMembers) => {
           setTeam(nextTeam);
           setMembers(nextMembers);
           setAddMembersOpen(false);
@@ -663,80 +1015,68 @@ function TeamConversation({ teamId, sessionId, panelOpen, onPanelChange }: {
   );
 }
 
-function AddTeamMembersDialog({ teamId, onClose, onAdded }: {
-  teamId: string;
-  onClose: () => void;
-  onAdded: (team: TeamEntry, members: AgentDetail[]) => void;
+// TeamFilesTab lists what each member produced in this session. Members
+// keep separate workspaces, so their trees are listed under their names.
+function TeamFilesTab({ members, sessionId, refreshKey, onOpen }: {
+  members: AgentDetail[];
+  sessionId: string;
+  refreshKey: string;
+  onOpen: (agentId: string, file: ProducedFile) => void;
 }) {
   const { tr } = useLocale();
-  const [agents, setAgents] = React.useState<AgentDetail[]>([]);
-  const [existing, setExisting] = React.useState<string[]>([]);
-  const [selected, setSelected] = React.useState<string[]>([]);
-  const [query, setQuery] = React.useState("");
-  const [loading, setLoading] = React.useState(true);
-  const [saving, setSaving] = React.useState(false);
-  const [error, setError] = React.useState("");
-
+  const [files, setFiles] = React.useState<Record<string, WorkspaceFile[]> | null>(null);
   React.useEffect(() => {
     let cancelled = false;
-    Promise.all([getAgents(), getConfig("user")]).then(([available, config]) => {
-      if (cancelled) return;
-      if (!config.teams?.[teamId]) throw new Error(tr("Group chat no longer exists", "群聊已不存在"));
-      setAgents(available);
-      setExisting(config.teams[teamId].agents);
-    }).catch((cause) => {
-      if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
-    }).finally(() => { if (!cancelled) setLoading(false); });
+    // A finished turn changes refreshKey; keep the current trees while
+    // refetching instead of flashing the spinner.
+    Promise.all(members.map(async (member) => [member.id,
+      (await listAgentFiles(member.id, memberSessionId(sessionId, member.id)).catch(() => [] as WorkspaceFile[]))
+        .filter((file) => !isSystemFile(file.path))] as const))
+      .then((entries) => { if (!cancelled) setFiles(Object.fromEntries(entries)); });
     return () => { cancelled = true; };
-  }, [teamId, tr]);
-
-  const save = async () => {
-    if (saving || !selected.length) return;
-    setSaving(true);
-    setError("");
-    try {
-      // Read the latest group so adding members preserves its other settings.
-      const config = await getConfig("user");
-      const current = config.teams?.[teamId];
-      if (!current) throw new Error(tr("Group chat no longer exists", "群聊已不存在"));
-      const next = { ...current, agents: [...new Set([...current.agents, ...selected])] };
-      const response = await updateConfig({ teams: { [teamId]: next } }, "user");
-      if (!response?.ok) throw new Error(response?.error || tr("Failed to add members", "添加成员失败"));
-      const byId = new Map(agents.map((agent) => [agent.id, agent]));
-      onAdded(next, next.agents.map((id) => byId.get(id)).filter((agent): agent is AgentDetail => !!agent));
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally { setSaving(false); }
-  };
-  const available = agents.filter((agent) => !existing.includes(agent.id)
-    && `${agent.name} ${agent.id}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-
-  return <Dialog open onOpenChange={(open) => { if (!open && !saving) onClose(); }}>
-    <DialogContent className="sm:max-w-md">
-      <DialogHeader>
-        <DialogTitle>{tr("Add members", "添加成员")}</DialogTitle>
-        <DialogDescription>{tr("Choose Agents to join this group chat.", "选择要加入群聊的 Agent。")}</DialogDescription>
-      </DialogHeader>
-      <Input value={query} onChange={(event) => setQuery(event.target.value)}
-        placeholder={tr("Search Agents", "搜索 Agent")} aria-label={tr("Search Agents", "搜索 Agent")} />
-      <div className="max-h-72 space-y-1 overflow-y-auto">
-        {loading ? <p className="py-6 text-center text-sm text-muted-foreground">{tr("Loading…", "正在加载…")}</p>
-          : available.length === 0 ? <p className="py-6 text-center text-sm text-muted-foreground">{tr("No Agents available to add", "暂无可添加的 Agent")}</p>
-          : available.map((agent) => <button key={agent.id} disabled={saving} aria-pressed={selected.includes(agent.id)}
-            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm hover:bg-muted focus-visible:outline-2 focus-visible:outline-ring"
-            onClick={() => setSelected((current) => current.includes(agent.id) ? current.filter((id) => id !== agent.id) : [...current, agent.id])}>
-            <BotAvatar agentId={agent.id} avatarUrl={agent.avatarUrl} size={32} />
-            <span className="min-w-0 flex-1 truncate">{agent.name || agent.id}</span>
-            {selected.includes(agent.id) && <Check className="size-4" />}
-          </button>)}
-      </div>
-      {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-      <DialogFooter>
-        <Button variant="outline" disabled={saving} onClick={onClose}>{tr("Cancel", "取消")}</Button>
-        <Button disabled={loading || saving || !selected.length} onClick={() => void save()}>
-          {saving && <LoaderCircle className="size-4 animate-spin" />}{tr("Add members", "添加成员")}
-        </Button>
-      </DialogFooter>
-    </DialogContent>
-  </Dialog>;
+  }, [members, sessionId, refreshKey]);
+  if (!files) {
+    return <div className="flex justify-center py-6"><LoaderCircle className="size-4 animate-spin text-muted-foreground" /></div>;
+  }
+  const withFiles = members.filter((member) => files[member.id]?.length);
+  if (!withFiles.length) {
+    return (
+      <p className="px-1 py-6 text-center text-sm leading-5 text-muted-foreground/75">
+        {tr("Files members create in this session appear here.", "成员在本会话中生成的文件会显示在这里。")}
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-4">
+      {withFiles.map((member) => {
+        const memberFiles = files[member.id];
+        return (
+          <section key={member.id} aria-label={member.name || member.id}>
+            <div className="mb-1 flex h-8 items-center gap-2 px-3 text-[13px] text-muted-foreground">
+              <BotAvatar agentId={member.id} avatarUrl={member.avatarUrl} seed={member.id} size={18} className="rounded-md" />
+              <span className="min-w-0 flex-1 truncate">{member.name || member.id}</span>
+              <span className="shrink-0 tabular-nums text-xs text-muted-foreground/70">{memberFiles.length}</span>
+            </div>
+            <FileTreeView files={memberFiles} rootPrefix={scopeRootPrefix(memberFiles)} onSelect={(file) => onOpen(member.id, file)} />
+          </section>
+        );
+      })}
+    </div>
+  );
 }
+
+// TeamTopicStatus marks sessions that need attention; idle and completed
+// ones stay unmarked, like the private chat's session list.
+function TeamTopicStatus({ topic, label }: { topic: TeamTopic; label: string }) {
+  const running = topic.status === "running" || !!topic.activeAgents?.length;
+  const Icon = running ? LoaderCircle
+    : topic.limited || topic.status === "stopped" ? CirclePause
+      : topic.status === "failed" ? CircleAlert : null;
+  if (!Icon) return null;
+  return (
+    <span role="img" title={label} aria-label={label} className={`flex size-4 shrink-0 items-center justify-center ${running ? "text-violet-600 dark:text-violet-300" : topic.status === "failed" ? "text-destructive" : "text-muted-foreground"}`}>
+      <Icon aria-hidden="true" className={`size-3.5 ${running ? "animate-spin motion-reduce:animate-none" : ""}`} />
+    </span>
+  );
+}
+

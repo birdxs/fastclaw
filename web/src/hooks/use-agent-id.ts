@@ -2,6 +2,7 @@
 
 import { createContext, useContext } from "react";
 import { useParams, usePathname } from "next/navigation";
+import { useChatRoute } from "@/lib/chat-route";
 
 // AgentIdContext lets a surface that isn't on an Agent URL — e.g. the
 // console Agent list opening the full Agent settings dialog — tell the
@@ -17,9 +18,14 @@ export const AgentIdContext = createContext("");
 // shows the wrong history).
 export function useAgentIdFromURL(): string {
   const override = useContext(AgentIdContext);
+  const chatRoute = useChatRoute();
   const pathname = usePathname();
   const params = useParams<{ id: string }>();
   if (override) return override;
+  // /chat/<sessionId> doesn't name the agent; AppShell resolved it.
+  if (chatRoute.status === "ready" && chatRoute.target.kind === "agent") {
+    return chatRoute.target.agentId;
+  }
   const m = pathname?.match(/\/agents\/([^/]+)\//);
   if (m) return m[1];
   return params?.id ?? "default";

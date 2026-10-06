@@ -11,13 +11,28 @@ export interface TeamAvatarMember {
 
 export function TeamAvatarStack({
   members,
+  avatarUrl,
   size = 36,
   className,
 }: {
   members: TeamAvatarMember[];
+  // A custom group picture replaces the member stack.
+  avatarUrl?: string;
   size?: number;
   className?: string;
 }) {
+  if (avatarUrl) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={avatarUrl}
+        alt=""
+        aria-hidden="true"
+        className={cn("shrink-0 rounded-[34%] object-cover", className)}
+        style={{ width: size, height: size }}
+      />
+    );
+  }
   const visible = members.slice(0, 3);
   if (visible.length === 0) {
     return (
