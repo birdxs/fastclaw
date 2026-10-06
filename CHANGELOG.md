@@ -5,6 +5,61 @@ action on upgrade — read those notes before deploying.
 
 ## [Unreleased]
 
+### Changed — **BREAKING**: IM channels must be paired before they answer
+
+Connecting a bot proves you control the bot, not which chat account is
+you. Channels now have an owner: the console shows a one-time code, and
+sending `/pair <code>` to the bot from your own IM account pairs it. Until
+then the bot answers every message with a "not paired" notice and routes
+nothing to the agent. Only the paired account gets owner (host) access;
+everyone else can still chat once the channel is paired.
+
+**On upgrade:** existing WeChat channels are paired automatically with the
+account that scanned their QR code. **Every other existing channel stops
+replying until its owner pairs it** from the agent's Channels page.
+Channels connected by QR scan (WeChat, Feishu, WhatsApp) and iMessage are
+paired at connect time.
+
+### Changed — **BREAKING**: LINE requires the channel secret
+
+The LINE webhook used to skip signature verification when no channel
+secret was stored, so anyone who knew the bot's userId could post forged
+messages. The secret is now required to connect, and the webhook rejects
+every event when it's missing. **LINE channels connected without a secret
+must be disconnected and reconnected with it.**
+
+### Added — new IM channels
+
+- **WeCom (企业微信):** smart bots over a long connection (no public URL).
+  The connect dialog creates and connects a bot by scanning a QR code;
+  pasting a Bot ID + Secret still works. Shows WeCom's native "thinking"
+  state while the agent works.
+- **WhatsApp:** link a number as a companion device by scanning a QR code,
+  like WhatsApp Web. Unofficial protocol (whatsmeow) — automated use can
+  get a number banned, so use a dedicated number. Device keys live in
+  `$FASTCLAW_HOME/whatsapp.db`.
+- **iMessage (macOS, admins only):** the Mac fastclaw runs on answers
+  direct messages to its Apple ID. Needs Full Disk Access and Automation →
+  Messages.
+
+### Improved — channels
+
+- **LINE:** group chats (replies when @-mentioned), inbound images, video,
+  audio and files, outbound images (served from `/api/line/media/…`) and
+  file links, the loading animation in 1:1 chats, and up to five messages
+  per reply. LINE still needs a public HTTPS address for its webhook.
+- **Feishu:** the connect dialog creates and connects a bot by scanning a
+  QR code; a "Typing" reaction shows on the user's message while the agent
+  works.
+
+### Changed — `make dev` uses its own data directory
+
+`make dev` now runs with `FASTCLAW_HOME=~/.fastclaw-dev` on port 18955, so
+it never touches the installed release's database. The PID file, logs,
+`fastclaw session export` and `fastclaw daemon install` now honor
+`FASTCLAW_HOME` too, and a daemon installed for a non-default home gets its
+own service name.
+
 ### Changed — `/v1/chat/completions` no longer falls back to another agent
 
 Naming an agent (`agent_id` in the body or `X-Fastclaw-Agent-ID`) that
