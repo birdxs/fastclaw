@@ -302,8 +302,8 @@ export default function AgentsPage() {
                   {tr("Public", "公开")}
                 </span>
               )}
-              {/* Always three lines tall, so cards in a row line up. */}
-              <p className={`line-clamp-3 min-h-[3.75rem] text-sm leading-5 ${agent.description ? "text-muted-foreground" : "text-muted-foreground/50"}`}>
+              {/* Always two lines tall, so cards in a row line up. */}
+              <p className={`line-clamp-2 min-h-10 text-sm leading-5 ${agent.description ? "text-muted-foreground" : "text-muted-foreground/50"}`}>
                 {agent.description || tr("No description", "暂无描述")}
               </p>
               {/* Tags only when there's something to say: private is the
