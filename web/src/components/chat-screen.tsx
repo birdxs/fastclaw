@@ -1496,13 +1496,19 @@ export function ChatScreen() {
         <button
           type="button"
           onClick={openBotSettings}
-          className="group flex min-w-0 max-w-[min(60vw,32rem)] items-center gap-3 rounded-xl px-1.5 py-1 transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring"
+          className="group flex min-w-0 max-w-[min(60vw,32rem)] items-center gap-1.5 rounded-xl px-1.5 py-1 transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring"
           title={tr("Open settings for {{agent}}", "打开 {{agent}} 的设置", { agent: agentName || selectedAgent })}
           aria-label={tr("Open settings for {{agent}}", "打开 {{agent}} 的设置", { agent: agentName || selectedAgent })}
         >
           <span className="truncate text-sm font-semibold text-foreground">
             {agentName || selectedAgent}
           </span>
+          {/* Edit affordance: always takes its space (no layout shift),
+              only visible on hover / keyboard focus. */}
+          <Pencil
+            aria-hidden="true"
+            className="size-3.5 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+          />
         </button>
         {/* Pushes share + the panel toggle to the right edge, with or
             without the share button. */}
