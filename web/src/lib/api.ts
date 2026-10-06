@@ -1959,6 +1959,15 @@ export interface AgentChannel {
   enabled: boolean;
   sharedIdentity: boolean;
   updatedAt?: string;
+  // Pairing: an unpaired channel answers every message with a "not
+  // paired" notice until its binder sends `pairCommand` to the bot.
+  paired: boolean;
+  pairedName?: string;
+  // The paired account may act on the host (self-hosted, agent owner's
+  // own channel only).
+  hostAccess: boolean;
+  pairCommand?: string;       // outstanding "/pair XXXXXXXX", binder only
+  pairCodeExpiresAt?: string; // RFC3339
 }
 
 // AgentCronJob mirrors store.CronJobRecord. Returned by GET
@@ -2087,6 +2096,32 @@ export async function pollAgentWeChatLoginStatus(
   return res.json();
 }
 
+export type IMessageStatus = {
+  available: boolean;
+  fullDiskAccess?: boolean;
+  binaryPath?: string;
+  error?: string;
+};
+
+// iMessage is only offered when fastclaw runs on macOS and the caller is
+// a platform admin; the UI hides the card otherwise.
+export async function getAgentIMessageStatus(agentId: string): Promise<IMessageStatus> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/imessage/status`);
+  if (!res.ok) return { available: false };
+  return res.json();
+}
+
+export async function connectAgentIMessage(
+  agentId: string,
+): Promise<{ ok?: boolean; accountId?: string; error?: string; code?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/imessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
 export async function connectAgentLINE(
   agentId: string,
   channelToken: string,
@@ -2104,6 +2139,33 @@ export async function connectAgentLINE(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channelToken, channelSecret }),
   });
+  return res.json();
+}
+
+export async function startAgentFeishuRegister(
+  agentId: string,
+): Promise<{ sessionId?: string; qrUrl?: string; interval?: number; expiresIn?: number; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/feishu/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function pollAgentFeishuRegisterStatus(
+  agentId: string,
+  sessionId: string,
+): Promise<{
+  status?: "pending" | "confirmed" | "denied" | "expired" | "error";
+  connected?: boolean;
+  appId?: string;
+  botName?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/feishu/register/status?session=${encodeURIComponent(sessionId)}`,
+  );
   return res.json();
 }
 
@@ -2210,6 +2272,30 @@ export async function disconnectAgentChannel(
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await apiFetch(
     `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}`,
+    { method: "DELETE" },
+  );
+  return res.json();
+}
+
+export async function createChannelPairCode(
+  agentId: string,
+  type: string,
+  accountId: string,
+): Promise<{ code?: string; command?: string; expiresAt?: string; error?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}/pair-code`,
+    { method: "POST" },
+  );
+  return res.json();
+}
+
+export async function deleteChannelPairing(
+  agentId: string,
+  type: string,
+  accountId: string,
+): Promise<{ ok?: boolean; error?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}/pairing`,
     { method: "DELETE" },
   );
   return res.json();

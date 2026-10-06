@@ -51,6 +51,8 @@ func registerChannelInstance(rec store.ConfigRecord, mb *bus.MessageBus, chanMgr
 		return registerSlackChannels(cc, mb, chanMgr, hot)
 	case "line":
 		return registerLINEChannels(cc, mb, chanMgr, hot)
+	case "imessage":
+		return registerIMessageChannels(cc, mb, chanMgr, hot)
 	case "wechat":
 		return registerWeChatChannels(rec, cc, mb, chanMgr, st, hot)
 	case "feishu":
@@ -76,6 +78,8 @@ func registerChannelFromRecord(rec store.ChannelRecord, mb *bus.MessageBus, chan
 		return registerSlackChannels(cc, mb, chanMgr, hot)
 	case "line":
 		return registerLINEChannels(cc, mb, chanMgr, hot)
+	case "imessage":
+		return registerIMessageChannels(cc, mb, chanMgr, hot)
 	case "wechat":
 		cfgRec := channelRecordToConfigRecord(rec)
 		return registerWeChatChannels(cfgRec, cc, mb, chanMgr, st, hot)

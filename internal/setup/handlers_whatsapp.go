@@ -116,6 +116,10 @@ func (s *Server) handleAgentWhatsAppLoginStatus(w http.ResponseWriter, r *http.R
 			jsonResponse(w, http.StatusOK, map[string]any{"status": "error", "connected": false, "error": err.Error()})
 			return
 		}
+		// Pre-pair with the number itself: whoever scanned owns it, and
+		// its own messages never reach the agent (they're IsFromMe), so
+		// no outside account can claim owner rights via /pair.
+		s.pairChannelToScanner(r.Context(), "whatsapp", accountID, device.ToNonAD().String())
 		s.invalidateOwner(sess.scope, sess.scopeID)
 		if ch, err := s.dataStore.LookupChannel(r.Context(), "whatsapp", accountID); err == nil && ch != nil {
 			s.hotRegisterChannelRecord(*ch)

@@ -155,7 +155,7 @@ export default function OnboardPage() {
   const [testError, setTestError] = useState("");
 
   // Agent
-  const [agentName, setAgentName] = useState("default");
+  const [agentName, setAgentName] = useState("FastClaw");
 
   // Sandbox (optional — disabled by default; user can flip and configure)
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
@@ -658,15 +658,6 @@ function ProviderStep(props: {
         </div>
 
         <div className="space-y-1.5">
-          <Label>{tr("Default Model", "默认模型")}</Label>
-          <Input
-            value={props.model}
-            onChange={(e) => props.setModel(e.target.value)}
-            placeholder={preset?.models[0] || "model-id"}
-            className="font-mono text-sm"
-          />
-        </div>
-        <div className="space-y-1.5">
           <Label>{tr("API Base URL", "API 基础 URL")}</Label>
           <Input
             value={props.apiBase}
@@ -713,6 +704,16 @@ function ProviderStep(props: {
               </SelectContent>
             </Select>
           </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label>{tr("Default Model", "默认模型")}</Label>
+          <Input
+            value={props.model}
+            onChange={(e) => props.setModel(e.target.value)}
+            placeholder={preset?.models[0] || "model-id"}
+            className="font-mono text-sm"
+          />
         </div>
 
         <div className="flex items-center gap-3 pt-2">
@@ -770,7 +771,7 @@ function AgentStep(props: {
             id="ob-agent"
             value={props.agentName}
             onChange={(e) => props.setAgentName(e.target.value)}
-            placeholder="default"
+            placeholder="FastClaw"
           />
           <p className="text-xs text-muted-foreground">
             {tr("The agent receives a globally unique ID (for example", "Agent 会获得全局唯一 ID（例如")} {" "}

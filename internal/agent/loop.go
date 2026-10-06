@@ -605,12 +605,12 @@ func (a *Agent) SteerWeb(sessionId, projectIDHint, text string) bool {
 // turn is active so the caller falls back to taskQueue.Submit.
 func (a *Agent) SteerInbound(msg bus.InboundMessage, text string) bool {
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
-	return sess.PushSteerIfActive(provider.Message{
+	return sess.PushSteerIfActiveFrom(provider.Message{
 		Role:      "user",
 		Content:   text,
 		Metadata:  senderMetadata(msg),
 		Timestamp: time.Now().UnixMilli(),
-	})
+	}, a.isTrustedTurn(msg))
 }
 
 // recoverWebTriple maps a URL `?session=` token (which can be a
@@ -1670,7 +1670,7 @@ func renderChannelHints(msg bus.InboundMessage, splitEnabled bool) string {
 // React renderer understands the same marker; API responses do not.
 func isIMChannel(channel string) bool {
 	switch channel {
-	case "wechat", "telegram", "discord", "slack", "line", "feishu", "wecom", "whatsapp":
+	case "wechat", "telegram", "discord", "slack", "line", "feishu", "wecom", "whatsapp", "imessage":
 		return true
 	}
 	return false
@@ -1873,6 +1873,9 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// the user's next turn — which matches the plan-mode contract
 	// (review the plan, then reply to execute).
 	sess.BeginTurn()
+	if a.isTrustedTurn(msg) {
+		sess.MarkTurnTrusted()
+	}
 	defer a.flushLeftoverSteer(sess)
 	defer padOrphanToolResults(sess)
 
@@ -2418,6 +2421,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// before padOrphanToolResults so it runs LAST (defers are LIFO) —
 	// orphan padding settles history first.
 	sess.BeginTurn()
+	if a.isTrustedTurn(msg) {
+		sess.MarkTurnTrusted()
+	}
 	defer a.flushLeftoverSteer(sess)
 
 	// Safety net for client-aborted turns: if the loop exits with a

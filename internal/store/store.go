@@ -271,6 +271,11 @@ type Store interface {
 	SaveChannel(ctx context.Context, ch *ChannelRecord) error
 	DeleteChannel(ctx context.Context, id string) error
 	LookupChannel(ctx context.Context, channelType, accountID string) (*ChannelRecord, error)
+	// SetChannelBinding records (or, with empty boundUserID, clears) the
+	// paired platform sender and drops any outstanding pair code.
+	SetChannelBinding(ctx context.Context, id, boundUserID, boundUserName string) error
+	// SetChannelPairCode stores a one-time /pair code (empty clears it).
+	SetChannelPairCode(ctx context.Context, id, code string, expiresAt time.Time) error
 
 	// --- Cron jobs (per agent) ---
 	//
@@ -694,10 +699,24 @@ type ChannelRecord struct {
 	// owner share sessions and memory across multiple personal channels
 	// (e.g. WeChat + Feishu + Telegram all resolving as the same user).
 	// Default false — each platform sender gets an isolated chatter.
-	SharedIdentity bool                   `json:"sharedIdentity"`
-	Data           map[string]interface{} `json:"data,omitempty"` // extra config (accounts map, etc.)
-	CreatedAt      time.Time              `json:"createdAt"`
-	UpdatedAt      time.Time              `json:"updatedAt"`
+	SharedIdentity bool `json:"sharedIdentity"`
+	// BoundUserID is the platform-side sender ID (Feishu open_id, iLink
+	// user id, Telegram numeric id, …) of the person who paired this
+	// channel — normally the binder themselves, proven either by the
+	// connect-time QR scan or by sending the console-issued /pair code
+	// from that account. Empty = unpaired: the gateway answers every
+	// inbound with a "not paired" notice instead of routing it. Only
+	// messages from this sender may act as the channel's owner.
+	BoundUserID   string `json:"boundUserId,omitempty"`
+	BoundUserName string `json:"boundUserName,omitempty"`
+	// PairCode is the outstanding one-time /pair code, valid until
+	// PairCodeExpiresAt. Written only by SetChannelPairCode; SaveChannel
+	// leaves pairing columns alone so reconnects keep the pairing.
+	PairCode          string                 `json:"-"`
+	PairCodeExpiresAt time.Time              `json:"-"`
+	Data              map[string]interface{} `json:"data,omitempty"` // extra config (accounts map, etc.)
+	CreatedAt         time.Time              `json:"createdAt"`
+	UpdatedAt         time.Time              `json:"updatedAt"`
 }
 
 // computeConfigScope derives the scope label from the (userID, agentID)

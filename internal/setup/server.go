@@ -372,14 +372,20 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /api/agents/{id}/channels/wechat/login", auth(s.handleStartAgentWeChatLogin))
 	mux.HandleFunc("GET /api/agents/{id}/channels/wechat/login/status", auth(s.handleAgentWeChatLoginStatus))
 	mux.HandleFunc("POST /api/agents/{id}/channels/line", auth(s.handleConnectAgentLINE))
+	mux.HandleFunc("GET /api/agents/{id}/channels/imessage/status", auth(s.handleAgentIMessageStatus))
+	mux.HandleFunc("POST /api/agents/{id}/channels/imessage", auth(s.handleConnectAgentIMessage))
 	mux.HandleFunc("POST /api/agents/{id}/channels/feishu", auth(s.handleConnectAgentFeishu))
 	mux.HandleFunc("POST /api/agents/{id}/channels/wecom", auth(s.handleConnectAgentWeCom))
 	mux.HandleFunc("POST /api/agents/{id}/channels/whatsapp/login", auth(s.handleStartAgentWhatsAppLogin))
 	mux.HandleFunc("GET /api/agents/{id}/channels/whatsapp/login/status", auth(s.handleAgentWhatsAppLoginStatus))
 	mux.HandleFunc("POST /api/agents/{id}/channels/wecom/register", auth(s.handleStartAgentWeComRegister))
 	mux.HandleFunc("GET /api/agents/{id}/channels/wecom/register/status", auth(s.handleAgentWeComRegisterStatus))
+	mux.HandleFunc("POST /api/agents/{id}/channels/feishu/register", auth(s.handleStartAgentFeishuRegister))
+	mux.HandleFunc("GET /api/agents/{id}/channels/feishu/register/status", auth(s.handleAgentFeishuRegisterStatus))
 	mux.HandleFunc("DELETE /api/agents/{id}/channels/{type}/{accountId}", auth(s.handleDisconnectAgentChannel))
 	mux.HandleFunc("PATCH /api/agents/{id}/channels/{type}/{accountId}", auth(s.handleUpdateAgentChannel))
+	mux.HandleFunc("POST /api/agents/{id}/channels/{type}/{accountId}/pair-code", auth(s.handleCreateChannelPairCode))
+	mux.HandleFunc("DELETE /api/agents/{id}/channels/{type}/{accountId}/pairing", auth(s.handleDeleteChannelPairing))
 
 	// Feishu (飞书) event webhook. UNAUTHENTICATED — Feishu posts here
 	// without a fastclaw bearer token. Per-event security comes from

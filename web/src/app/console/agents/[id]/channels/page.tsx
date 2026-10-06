@@ -34,6 +34,10 @@ import {
   ExternalLink,
   Loader2,
   QrCode,
+  Copy,
+  Check,
+  KeyRound,
+  ShieldCheck,
 } from "lucide-react";
 import {
   listAgentChannels,
@@ -42,16 +46,22 @@ import {
   connectAgentSlack,
   connectAgentLINE,
   connectAgentFeishu,
+  getAgentIMessageStatus,
   connectAgentWeCom,
   startAgentWeComRegister,
   pollAgentWeComRegisterStatus,
   startAgentWhatsAppLogin,
   pollAgentWhatsAppLoginStatus,
+  startAgentFeishuRegister,
+  pollAgentFeishuRegisterStatus,
   startAgentWeChatLogin,
   pollAgentWeChatLoginStatus,
   disconnectAgentChannel,
+  createChannelPairCode,
+  deleteChannelPairing,
   type AgentChannel,
 } from "@/lib/api";
+import { ConnectIMessageDialog } from "@/components/connect-imessage-dialog";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { useAgentName } from "@/hooks/use-agent-name";
 import { useLocale } from "@/components/locale-provider";
@@ -95,6 +105,12 @@ const CATALOG: { type: string; label: string; description: string; available: bo
     available: true,
   },
   {
+    type: "imessage",
+    label: "iMessage",
+    description: "Answer iMessage DMs with the Apple ID signed into this Mac.",
+    available: true,
+  },
+  {
     type: "wechat",
     label: "WeChat",
     description: "Scan a QR code with the WeChat phone app to relay messages to this agent.",
@@ -103,7 +119,7 @@ const CATALOG: { type: string; label: string; description: string; available: bo
   {
     type: "feishu",
     label: "Feishu",
-    description: "Connect a Feishu custom-app bot via webhook (App ID + App Secret).",
+    description: "Scan a QR code to create a Feishu bot in one step, or connect an existing custom app.",
     available: true,
   },
   {
@@ -128,10 +144,13 @@ export default function AgentChannelsPage() {
   const [slackOpen, setSlackOpen] = useState(false);
   const [lineOpen, setLineOpen] = useState(false);
   const [wechatOpen, setWechatOpen] = useState(false);
+  const [imessageOpen, setImessageOpen] = useState(false);
   const [feishuOpen, setFeishuOpen] = useState(false);
   const [wecomOpen, setWecomOpen] = useState(false);
   const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentChannel | null>(null);
+  const [pairTarget, setPairTarget] = useState<AgentChannel | null>(null);
+  const [unpairTarget, setUnpairTarget] = useState<AgentChannel | null>(null);
 
   const refresh = useCallback(() => {
     if (!agentId) return;
@@ -146,6 +165,20 @@ export default function AgentChannelsPage() {
     refresh();
   }, [refresh]);
 
+  // iMessage only exists on self-hosted macOS (admin only); the server
+  // says whether to offer it.
+  const [imessageAvailable, setImessageAvailable] = useState(false);
+  useEffect(() => {
+    if (!agentId) return;
+    let cancelled = false;
+    getAgentIMessageStatus(agentId)
+      .then((st) => !cancelled && setImessageAvailable(!!st.available))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [agentId]);
+
   // First binding per channel type — the UI is currently single-bot,
   // even though the backend allows multiple. If multiple exist (legacy
   // data), the rest are still wired up server-side, just hidden here.
@@ -156,6 +189,15 @@ export default function AgentChannelsPage() {
     }
     return m;
   }, [channels]);
+
+  const handleUnpair = async () => {
+    if (!unpairTarget || !agentId) return;
+    const target = unpairTarget;
+    setUnpairTarget(null);
+    const res = await deleteChannelPairing(agentId, target.type, target.accountId);
+    if (res.error) setError(res.error);
+    refresh();
+  };
 
   const handleDelete = async () => {
     if (!deleteTarget || !agentId) return;
@@ -200,12 +242,15 @@ export default function AgentChannelsPage() {
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {CATALOG.map((entry) => {
             const connected = byType[entry.type];
+            if (entry.type === "imessage" && !imessageAvailable && !connected) return null;
             return connected ? (
               <ConnectedCard
                 key={entry.type}
                 label={entry.label}
                 channel={connected}
                 onDelete={() => setDeleteTarget(connected)}
+                onPair={() => setPairTarget(connected)}
+                onUnpair={() => setUnpairTarget(connected)}
               />
             ) : (
               <CatalogCard
@@ -220,6 +265,7 @@ export default function AgentChannelsPage() {
                   else if (entry.type === "slack") setSlackOpen(true);
                   else if (entry.type === "line") setLineOpen(true);
                   else if (entry.type === "wechat") setWechatOpen(true);
+                  else if (entry.type === "imessage") setImessageOpen(true);
                   else if (entry.type === "feishu") setFeishuOpen(true);
                   else if (entry.type === "wecom") setWecomOpen(true);
                   else if (entry.type === "whatsapp") setWhatsappOpen(true);
@@ -258,6 +304,13 @@ export default function AgentChannelsPage() {
         onConnected={refresh}
       />
 
+      <ConnectIMessageDialog
+        open={imessageOpen}
+        onOpenChange={setImessageOpen}
+        agentId={agentId}
+        onConnected={refresh}
+      />
+
       <ConnectWeChatDialog
         open={wechatOpen}
         onOpenChange={setWechatOpen}
@@ -285,6 +338,57 @@ export default function AgentChannelsPage() {
         agentId={agentId}
         onConnected={refresh}
       />
+
+      <Dialog
+        open={!!pairTarget}
+        onOpenChange={(v) => {
+          if (!v) {
+            setPairTarget(null);
+            refresh();
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{tr("Pair your account", "配对你的账号")}</DialogTitle>
+            <DialogDescription>
+              {tr(
+                "Pairing tells this bot which account is yours, so other people who find the bot can't act as you.",
+                "配对用来告诉机器人哪个账号是你本人，这样找到这个机器人的其他人无法冒充你。",
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          {pairTarget && agentId && <PairingPanel agentId={agentId} type={pairTarget.type} />}
+          <DialogFooter>
+            <Button
+              onClick={() => {
+                setPairTarget(null);
+                refresh();
+              }}
+            >
+              {tr("Done", "完成")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={!!unpairTarget} onOpenChange={(v) => !v && setUnpairTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{tr("Unpair channel", "解除配对")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {tr(
+                "The bot will stop answering anyone until it is paired again with a new /pair code.",
+                "解除后，机器人会暂停回复所有人，直到用新的 /pair 配对码重新配对。",
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{tr("Cancel", "取消")}</AlertDialogCancel>
+            <AlertDialogAction onClick={handleUnpair}>{tr("Unpair", "解除配对")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
         <AlertDialogContent>
@@ -333,8 +437,9 @@ function CatalogCard({
       discord: "连接 Discord 机器人，支持私信和已邀请的服务器。",
       slack: "通过 Socket Mode 连接 Slack 应用。",
       line: "通过 Webhook 连接 LINE Messaging API 渠道，需要公网 HTTPS 地址。",
+      imessage: "用这台 Mac 上登录的 Apple ID 回复 iMessage 私聊。",
       wechat: "使用微信手机客户端扫码，将消息转发给此 Agent。",
-      feishu: "通过长连接或 Webhook 连接飞书自建应用机器人。",
+      feishu: "扫码一键创建飞书机器人，或手动连接已有的自建应用。",
       wecom: "扫码一键创建企业微信智能机器人，或手动连接已有的机器人。",
       whatsapp: "像 WhatsApp Web 一样扫码关联一个 WhatsApp 号码。",
     } as Record<string, string>)[type] || description;
@@ -363,10 +468,14 @@ function ConnectedCard({
   label,
   channel,
   onDelete,
+  onPair,
+  onUnpair,
 }: {
   label: string;
   channel: AgentChannel;
   onDelete: () => void;
+  onPair: () => void;
+  onUnpair: () => void;
 }) {
   const { tr } = useLocale();
   // Telegram is the only provider with a public profile URL pattern
@@ -413,6 +522,36 @@ function ConnectedCard({
         <code className="text-xs text-muted-foreground/80 font-mono truncate block">
           {channel.botToken}
         </code>
+        {channel.paired ? (
+          <div className="flex items-center gap-1.5 text-xs min-w-0">
+            <ShieldCheck className="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <span className="truncate text-muted-foreground">
+              {channel.pairedName
+                ? tr("Paired with {{name}}", "已配对：{{name}}", { name: channel.pairedName })
+                : tr("Paired", "已配对")}
+              {channel.hostAccess && tr(" · host access", " · 可访问宿主机")}
+            </span>
+            <button
+              type="button"
+              onClick={onUnpair}
+              className="ml-auto shrink-0 text-muted-foreground hover:text-foreground underline-offset-2 hover:underline"
+            >
+              {tr("Unpair", "解除配对")}
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-1.5 text-xs">
+            <KeyRound className="h-3 w-3 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span className="text-amber-700 dark:text-amber-400">{tr("Not paired", "未配对")}</span>
+            <button
+              type="button"
+              onClick={onPair}
+              className="ml-auto shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
+            >
+              {tr("Pair", "去配对")}
+            </button>
+          </div>
+        )}
       </div>
 
       <Button
@@ -428,6 +567,145 @@ function ConnectedCard({
   );
 }
 
+// PairingPanel walks the binder through pairing the channel of `type`:
+// shows the one-time `/pair` command to send to the bot from their own
+// IM account, and flips to a confirmation once the gateway records the
+// pairing. QR-connected Feishu / WeChat channels arrive already paired
+// with the scanner, so it just confirms.
+function PairingPanel({ agentId, type }: { agentId: string; type: string }) {
+  const { tr } = useLocale();
+  const [channel, setChannel] = useState<AgentChannel | null>(null);
+  const [command, setCommand] = useState("");
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const issuing = useRef(false);
+
+  const issueCode = useCallback(
+    async (ch: AgentChannel) => {
+      if (issuing.current) return;
+      issuing.current = true;
+      setError("");
+      try {
+        const res = await createChannelPairCode(agentId, ch.type, ch.accountId);
+        if (res.command) setCommand(res.command);
+        else setError(res.error || tr("Failed to create a pairing code", "生成配对码失败"));
+      } finally {
+        issuing.current = false;
+      }
+    },
+    [agentId, tr],
+  );
+
+  // Poll until paired: the pairing itself happens in the IM app.
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      const list = await listAgentChannels(agentId).catch(() => [] as AgentChannel[]);
+      if (stopped) return;
+      const ch = list.find((c) => c.type === type) || null;
+      setChannel(ch);
+      if (ch && !ch.paired) {
+        if (ch.pairCommand) setCommand(ch.pairCommand);
+        else issueCode(ch);
+      }
+      if (!ch || !ch.paired) timer = setTimeout(tick, 3000);
+    };
+    tick();
+    return () => {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [agentId, type, issueCode]);
+
+  if (!channel) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        {tr("Checking pairing…", "正在检查配对状态…")}
+      </div>
+    );
+  }
+
+  if (channel.paired) {
+    return (
+      <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-1">
+        <div className="flex items-center gap-2">
+          <ShieldCheck className="h-4 w-4 text-emerald-500" />
+          <span className="text-sm font-medium">
+            {channel.pairedName
+              ? tr("Paired with {{name}}", "已配对：{{name}}", { name: channel.pairedName })
+              : tr("Paired with your account", "已与你的账号配对")}
+          </span>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {channel.hostAccess
+            ? tr(
+                "Messages from this account can use this computer (files, shell). Anyone else can chat with the bot, but can't touch the host.",
+                "这个账号发来的消息可以操作这台电脑（文件、命令行）。其他人也能和机器人聊天，但无法访问宿主机。",
+              )
+            : tr(
+                "Anyone can chat with the bot; this account is recognised as its owner.",
+                "所有人都可以和机器人聊天，这个账号会被识别为机器人的主人。",
+              )}
+        </p>
+      </div>
+    );
+  }
+
+  const copy = async () => {
+    if (!command) return;
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard can be blocked (non-HTTPS origin); the code stays selectable.
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <KeyRound className="h-4 w-4 text-amber-500" />
+        <span className="text-sm font-medium">{tr("One more step: pair your account", "最后一步：配对你的账号")}</span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        {tr(
+          "From your own account, send this message to the bot in a direct message. Until then, the bot tells everyone it isn't paired yet.",
+          "用你自己的账号私聊机器人，发送下面这条消息。配对完成前，机器人会提示所有人它尚未配对。",
+        )}
+      </p>
+      {command ? (
+        <div className="flex items-center gap-2">
+          <code className="flex-1 min-w-0 truncate rounded-md border bg-background px-3 py-2 font-mono text-sm select-all">
+            {command}
+          </code>
+          <Button size="sm" variant="outline" onClick={copy} aria-label={tr("Copy", "复制")}>
+            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+          </Button>
+        </div>
+      ) : (
+        !error && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+      )}
+      {error && <p className="text-xs text-destructive">{error}</p>}
+      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span className="inline-flex items-center gap-1.5">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          {tr("Waiting for the message… The code expires in 10 minutes.", "等待消息中… 配对码 10 分钟内有效。")}
+        </span>
+        <button
+          type="button"
+          onClick={() => issueCode(channel)}
+          className="shrink-0 underline-offset-2 hover:underline hover:text-foreground"
+        >
+          {tr("New code", "换一个")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ChannelIcon({ type }: { type: string }) {
   // Brand SVG/PNG assets live in /public/channels — copied from the
   // workany-web icon set. We size them at 16x16 to match the lucide
@@ -439,6 +717,7 @@ function ChannelIcon({ type }: { type: string }) {
     discord: "/channels/discord.svg",
     slack: "/channels/slack.svg",
     line: "/channels/line.png",
+    imessage: "/channels/imessage.svg",
     feishu: "/channels/feishu.png",
     wechat: "/channels/wechat.svg",
     wecom: "/channels/wecom.png",
@@ -563,6 +842,8 @@ function ConnectTelegramDialog({
           </div>
         )}
 
+        {connected && agentId && <PairingPanel agentId={agentId} type="telegram" />}
+
         <DialogFooter>
           {connected ? (
             <Button onClick={() => onOpenChange(false)}>{tr("Done", "完成")}</Button>
@@ -677,6 +958,8 @@ function ConnectDiscordDialog({
             {error && <p className="text-xs text-destructive">{error}</p>}
           </div>
         )}
+
+        {connected && agentId && <PairingPanel agentId={agentId} type="discord" />}
 
         <DialogFooter>
           {connected ? (
@@ -804,6 +1087,8 @@ function ConnectSlackDialog({
             {error && <p className="text-xs text-destructive">{error}</p>}
           </div>
         )}
+
+        {connected && agentId && <PairingPanel agentId={agentId} type="slack" />}
 
         <DialogFooter>
           {connected ? (
@@ -1078,6 +1363,8 @@ function ConnectWeComDialog({
             </button>
           </div>
         )}
+
+        {connected && agentId && <PairingPanel agentId={agentId} type="wecom" />}
 
         <DialogFooter>
           {connected ? (
@@ -1451,6 +1738,8 @@ function ConnectLINEDialog({
           </div>
         )}
 
+        {connected && agentId && <PairingPanel agentId={agentId} type="line" />}
+
         <DialogFooter>
           {connected ? (
             <Button onClick={() => onOpenChange(false)}>{tr("Done", "完成")}</Button>
@@ -1637,6 +1926,8 @@ function ConnectWeChatDialog({
           </div>
         )}
 
+        {connected && agentId && <PairingPanel agentId={agentId} type="wechat" />}
+
         <DialogFooter>
           {connected ? (
             <Button onClick={() => onOpenChange(false)}>{tr("Done", "完成")}</Button>
@@ -1658,7 +1949,12 @@ function ConnectWeChatDialog({
   );
 }
 
-// Feishu / Feishu connect dialog. Two-step UX:
+// Feishu connect dialog. Defaults to one-click QR registration: the
+// server starts Feishu's app-registration device flow, we render its
+// verification URL as a QR, the user scans it in the Feishu app and
+// picks "一键创建飞书机器人", and the poll endpoint persists the
+// freshly-minted app in long-connection mode. Manual mode keeps the
+// original paste-credentials flow:
 //   1. User pastes App ID + App Secret + Verification Token, we validate
 //      via /tenant_access_token + /bot/v3/info.
 //   2. On success, we surface the webhook URL — user must paste it
@@ -1688,10 +1984,92 @@ function ConnectFeishuDialog({
     botName: string;
     webhookUrl: string;
     useLongConn: boolean;
+    viaQR?: boolean;
   } | null>(null);
+
+  type RegisterStatus = "pending" | "denied" | "expired" | "";
+  const [mode, setMode] = useState<"qr" | "manual">("qr");
+  const [qrUrl, setQrUrl] = useState("");
+  const [qrStatus, setQrStatus] = useState<RegisterStatus>("");
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrError, setQrError] = useState("");
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped on every new QR / close so a poll already in flight for a
+  // stale session can't reschedule itself.
+  const genRef = useRef(0);
+
+  const stopPolling = useCallback(() => {
+    genRef.current++;
+    if (pollRef.current) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  const startRegister = useCallback(async () => {
+    if (!agentId) return;
+    stopPolling();
+    const gen = genRef.current;
+    setQrLoading(true);
+    setQrError("");
+    setQrStatus("");
+    setQrUrl("");
+    const res = await startAgentFeishuRegister(agentId);
+    if (gen !== genRef.current) return;
+    setQrLoading(false);
+    if (res.error || !res.sessionId || !res.qrUrl) {
+      setQrError(res.error || tr("Failed to fetch QR code", "获取二维码失败"));
+      return;
+    }
+    setQrUrl(res.qrUrl);
+    setQrStatus("pending");
+    const sessionId = res.sessionId;
+    const intervalMs = Math.max(res.interval || 5, 3) * 1000;
+    const tick = async () => {
+      const r = await pollAgentFeishuRegisterStatus(agentId, sessionId);
+      if (gen !== genRef.current) return;
+      if (r.connected) {
+        setConnected({
+          botName: r.botName || "",
+          webhookUrl: "",
+          useLongConn: true,
+          viaQR: true,
+        });
+        onConnected();
+        return;
+      }
+      if (r.status === "denied" || r.status === "expired") {
+        setQrStatus(r.status);
+        return;
+      }
+      if (r.status === "error") {
+        setQrError(r.error || tr("Failed to create bot", "创建机器人失败"));
+        setQrStatus("expired");
+        return;
+      }
+      // Transient upstream errors surface as a banner; keep polling.
+      setQrError(r.error || "");
+      pollRef.current = setTimeout(tick, intervalMs);
+    };
+    pollRef.current = setTimeout(tick, intervalMs);
+  }, [agentId, onConnected, stopPolling, tr]);
+
+  useEffect(() => {
+    if (open && mode === "qr" && !connected && !qrUrl && !qrLoading && !qrError) {
+      startRegister();
+    }
+  }, [open, mode, connected, qrUrl, qrLoading, qrError, startRegister]);
 
   useEffect(() => {
     if (!open) {
+      stopPolling();
+      setMode("qr");
+      setQrUrl("");
+      setQrStatus("");
+      setQrLoading(false);
+      setQrError("");
       setAppId("");
       setAppSecret("");
       setVerificationToken("");
@@ -1701,7 +2079,19 @@ function ConnectFeishuDialog({
       setSubmitting(false);
       setConnected(null);
     }
-  }, [open]);
+  }, [open, stopPolling]);
+
+  const switchMode = (next: "qr" | "manual") => {
+    if (next === "manual") {
+      stopPolling();
+      setQrUrl("");
+      setQrStatus("");
+      setQrLoading(false);
+      setQrError("");
+    }
+    setError("");
+    setMode(next);
+  };
 
   const submit = async () => {
     if (!appId.trim() || !appSecret.trim() || !agentId) return;
@@ -1736,6 +2126,11 @@ function ConnectFeishuDialog({
             <img src="/channels/feishu.png" alt="Feishu" className="h-5 w-5 object-contain" />
             {tr("Connect Feishu app", "连接飞书应用")}
           </DialogTitle>
+          {mode === "qr" ? (
+          <DialogDescription>
+            {tr("Scan the QR code with the Feishu mobile app and choose \"Create Feishu bot in one click\". The bot is created on your tenant and connected to this agent automatically — no developer console setup needed.", "使用飞书手机客户端扫描二维码，选择「一键创建飞书机器人」。机器人会在你的企业下自动创建并接入此 Agent，无需在开发者后台做任何配置。")}
+          </DialogDescription>
+          ) : (
           <DialogDescription>
             {tr("Create a custom app at", "在以下地址创建自建应用：")} {" "}
             <a
@@ -1750,6 +2145,7 @@ function ConnectFeishuDialog({
             <code>im:message</code> + <code>im:message:send_as_bot</code>{" "}
             {tr("scopes, then copy the App ID and App Secret from Credentials & Basic Info. Long-connection mode (recommended) needs nothing else; webhook mode also needs the Verification Token and Encrypt Key from Event Subscriptions.", "权限，然后从「凭证与基础信息」复制 App ID 和 App Secret。长连接模式（推荐）无需其他配置；Webhook 模式还需填写「事件订阅」中的 Verification Token 和 Encrypt Key。")}
           </DialogDescription>
+          )}
         </DialogHeader>
 
         {connected ? (
@@ -1757,14 +2153,20 @@ function ConnectFeishuDialog({
             <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                <span className="text-sm font-medium">{tr("Credentials valid", "凭证有效")}</span>
+                <span className="text-sm font-medium">
+                  {connected.viaQR ? tr("Bot created and connected", "机器人已创建并接入") : tr("Credentials valid", "凭证有效")}
+                </span>
               </div>
               <p className="text-sm">
                 {tr("Bot identified as", "已识别机器人：")} {" "}
                 <strong>{connected.botName || tr("(unnamed)", "（未命名）")}</strong>.
               </p>
             </div>
-            {connected.useLongConn ? (
+            {connected.viaQR ? (
+              <p className="text-sm text-muted-foreground">
+                {tr("Find the bot in Feishu and send it a message to test.", "在飞书中找到该机器人并发送一条消息即可测试。")}
+              </p>
+            ) : connected.useLongConn ? (
               <div className="rounded-lg border bg-muted/30 p-4 space-y-2">
                 <p className="text-sm font-medium">{tr("Long-connection mode", "长连接模式")}</p>
                 <p className="text-xs text-muted-foreground">
@@ -1788,6 +2190,39 @@ function ConnectFeishuDialog({
                 </p>
               </div>
             )}
+          </div>
+        ) : mode === "qr" ? (
+          <div className="flex flex-col items-center gap-4 py-2">
+            {qrLoading ? (
+              <div className="flex h-56 w-56 items-center justify-center">
+                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : qrUrl && qrStatus === "pending" ? (
+              <div className="rounded-lg border bg-white p-4">
+                <QRCodeSVG value={qrUrl} size={224} level="M" />
+              </div>
+            ) : (
+              <div className="flex h-56 w-56 items-center justify-center text-sm text-muted-foreground">
+                <QrCode className="h-8 w-8 opacity-50" />
+              </div>
+            )}
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              {qrStatus === "pending" && <>{tr("Waiting for scan…", "等待扫码…")}</>}
+              {qrStatus === "denied" && (
+                <span className="text-destructive">{tr("Creation was cancelled.", "已取消创建。")}</span>
+              )}
+              {qrStatus === "expired" && !qrError && (
+                <span className="text-destructive">{tr("QR code expired.", "二维码已过期。")}</span>
+              )}
+            </div>
+            {qrError && <p className="text-xs text-destructive">{qrError}</p>}
+            <button
+              type="button"
+              className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              onClick={() => switchMode("manual")}
+            >
+              {tr("Already have a Feishu app? Enter credentials manually", "已有飞书应用？手动填写参数")}
+            </button>
           </div>
         ) : (
           <div className="space-y-3 py-2">
@@ -1860,12 +2295,32 @@ function ConnectFeishuDialog({
               </>
             )}
             {error && <p className="text-xs text-destructive">{error}</p>}
+            <button
+              type="button"
+              className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              onClick={() => switchMode("qr")}
+            >
+              {tr("Create a new bot by scanning a QR code instead", "改用扫码一键创建机器人")}
+            </button>
           </div>
         )}
+
+        {connected && agentId && <PairingPanel agentId={agentId} type="feishu" />}
 
         <DialogFooter>
           {connected ? (
             <Button onClick={() => onOpenChange(false)}>{tr("Done", "完成")}</Button>
+          ) : mode === "qr" ? (
+            <>
+              {(qrStatus === "expired" || qrStatus === "denied" || (qrError && !qrUrl)) && (
+                <Button onClick={startRegister} disabled={qrLoading}>
+                  {qrLoading ? tr("Refreshing…", "正在刷新…") : tr("Refresh QR", "刷新二维码")}
+                </Button>
+              )}
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
+                {tr("Cancel", "取消")}
+              </Button>
+            </>
           ) : (
             <>
               <Button

@@ -168,6 +168,9 @@ func (d *DBStore) Migrate(ctx context.Context) error {
 	if err := d.migrateChannelsAddSharedIdentity(ctx); err != nil {
 		return fmt.Errorf("migrate channels shared_identity: %w", err)
 	}
+	if err := d.migrateChannelsAddPairing(ctx); err != nil {
+		return fmt.Errorf("migrate channels pairing: %w", err)
+	}
 	if err := d.migrateChannelsFromConfigs(ctx); err != nil {
 		return fmt.Errorf("migrate channels from configs: %w", err)
 	}
@@ -2172,6 +2175,10 @@ func (d *DBStore) migrationSQL() []string {
 			base_url TEXT NOT NULL DEFAULT '',
 			platform_user_id TEXT NOT NULL DEFAULT '',
 			shared_identity INTEGER NOT NULL DEFAULT 0,
+			bound_user_id TEXT NOT NULL DEFAULT '',
+			bound_user_name TEXT NOT NULL DEFAULT '',
+			pair_code TEXT NOT NULL DEFAULT '',
+			pair_code_expires_at BIGINT NOT NULL DEFAULT 0,
 			data TEXT NOT NULL DEFAULT '{}',
 			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -3940,7 +3947,7 @@ func scanConfigs(rows *sql.Rows) ([]ConfigRecord, error) {
 
 // --- Channels (IM bot bindings) ---
 
-const channelSelectCols = `id, user_id, agent_id, type, account_id, enabled, bot_token, base_url, platform_user_id, shared_identity, data, created_at, updated_at`
+const channelSelectCols = `id, user_id, agent_id, type, account_id, enabled, bot_token, base_url, platform_user_id, shared_identity, bound_user_id, bound_user_name, pair_code, pair_code_expires_at, data, created_at, updated_at`
 
 func (d *DBStore) ListChannels(ctx context.Context, userID, agentID string) ([]ChannelRecord, error) {
 	rows, err := d.db.QueryContext(ctx,
@@ -3999,7 +4006,8 @@ func (d *DBStore) SaveChannel(ctx context.Context, ch *ChannelRecord) error {
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 				ON CONFLICT (type, account_id) DO UPDATE SET
 				  user_id=$2, agent_id=$3, enabled=$6, bot_token=$7, base_url=$8,
-				  platform_user_id=$9, shared_identity=$10, data=$11, updated_at=$13`,
+				  platform_user_id=$9, shared_identity=$10, data=$11, updated_at=$13,
+				  `+channelPairingResetSQL,
 			ch.ID, ch.UserID, ch.AgentID, ch.Type, ch.AccountID, enabledInt, ch.BotToken, ch.BaseURL, ch.PlatformUserID, sharedIdent, string(dataBytes), ch.CreatedAt, ch.UpdatedAt)
 		return err
 	}
@@ -4010,8 +4018,40 @@ func (d *DBStore) SaveChannel(ctx context.Context, ch *ChannelRecord) error {
 			  user_id=excluded.user_id, agent_id=excluded.agent_id, enabled=excluded.enabled,
 			  bot_token=excluded.bot_token, base_url=excluded.base_url,
 			  platform_user_id=excluded.platform_user_id, shared_identity=excluded.shared_identity,
-			  data=excluded.data, updated_at=excluded.updated_at`,
+			  data=excluded.data, updated_at=excluded.updated_at,
+			  `+channelPairingResetSQL,
 		ch.ID, ch.UserID, ch.AgentID, ch.Type, ch.AccountID, enabledInt, ch.BotToken, ch.BaseURL, ch.PlatformUserID, sharedIdent, string(dataBytes), ch.CreatedAt, ch.UpdatedAt)
+	return err
+}
+
+// channelPairingResetSQL is the ON CONFLICT tail SaveChannel appends:
+// re-saving a channel (reconnect, credential refresh, settings toggle)
+// keeps its pairing, but a different binder taking over the same bot
+// starts unpaired — the old owner's platform account must not carry
+// over to someone else's row. RHS columns read the pre-update row in
+// both SQLite and Postgres.
+const channelPairingResetSQL = `bound_user_id = CASE WHEN channels.user_id = excluded.user_id THEN channels.bound_user_id ELSE '' END,
+			  bound_user_name = CASE WHEN channels.user_id = excluded.user_id THEN channels.bound_user_name ELSE '' END,
+			  pair_code = CASE WHEN channels.user_id = excluded.user_id THEN channels.pair_code ELSE '' END,
+			  pair_code_expires_at = CASE WHEN channels.user_id = excluded.user_id THEN channels.pair_code_expires_at ELSE 0 END`
+
+func (d *DBStore) SetChannelBinding(ctx context.Context, id, boundUserID, boundUserName string) error {
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE channels SET bound_user_id = %s, bound_user_name = %s, pair_code = '', pair_code_expires_at = 0, updated_at = %s WHERE id = %s`,
+			d.ph(1), d.ph(2), d.ph(3), d.ph(4)),
+		boundUserID, boundUserName, time.Now().UTC(), id)
+	return err
+}
+
+func (d *DBStore) SetChannelPairCode(ctx context.Context, id, code string, expiresAt time.Time) error {
+	var exp int64
+	if code != "" {
+		exp = expiresAt.Unix()
+	}
+	_, err := d.db.ExecContext(ctx,
+		fmt.Sprintf(`UPDATE channels SET pair_code = %s, pair_code_expires_at = %s WHERE id = %s`,
+			d.ph(1), d.ph(2), d.ph(3)),
+		code, exp, id)
 	return err
 }
 
@@ -4045,11 +4085,15 @@ func scanChannelRow(row rowScanner) (*ChannelRecord, error) {
 	var c ChannelRecord
 	var dataStr string
 	var enabledInt, sharedIdent int
-	if err := row.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &enabledInt, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	var pairExp int64
+	if err := row.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &enabledInt, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &c.BoundUserID, &c.BoundUserName, &c.PairCode, &pairExp, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, scanErr(err)
 	}
 	c.Enabled = enabledInt != 0
 	c.SharedIdentity = sharedIdent != 0
+	if pairExp > 0 {
+		c.PairCodeExpiresAt = time.Unix(pairExp, 0).UTC()
+	}
 	json.Unmarshal([]byte(dataStr), &c.Data)
 	return &c, nil
 }
@@ -4060,11 +4104,15 @@ func scanChannels(rows *sql.Rows) ([]ChannelRecord, error) {
 		var c ChannelRecord
 		var dataStr string
 		var enabledInt, sharedIdent int
-		if err := rows.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &enabledInt, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		var pairExp int64
+		if err := rows.Scan(&c.ID, &c.UserID, &c.AgentID, &c.Type, &c.AccountID, &enabledInt, &c.BotToken, &c.BaseURL, &c.PlatformUserID, &sharedIdent, &c.BoundUserID, &c.BoundUserName, &c.PairCode, &pairExp, &dataStr, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		c.Enabled = enabledInt != 0
 		c.SharedIdentity = sharedIdent != 0
+		if pairExp > 0 {
+			c.PairCodeExpiresAt = time.Unix(pairExp, 0).UTC()
+		}
 		json.Unmarshal([]byte(dataStr), &c.Data)
 		out = append(out, c)
 	}
@@ -4273,6 +4321,35 @@ func (d *DBStore) migrateChannelsAddSharedIdentity(ctx context.Context) error {
 	_, err = d.db.ExecContext(ctx,
 		`ALTER TABLE channels ADD COLUMN shared_identity INTEGER NOT NULL DEFAULT 0`)
 	return err
+}
+
+// migrateChannelsAddPairing retrofits the pairing columns (bound sender +
+// outstanding /pair code) onto the channels table. Existing WeChat rows
+// are pre-paired with the iLink account that scanned the login QR —
+// that scan already proved who the owner is on WeChat. Every other
+// existing channel starts unpaired and its owner pairs it once from
+// the console.
+func (d *DBStore) migrateChannelsAddPairing(ctx context.Context) error {
+	has, err := d.tableHasColumn(ctx, "channels", "bound_user_id")
+	if err != nil {
+		return err
+	}
+	if has {
+		return nil
+	}
+	stmts := []string{
+		`ALTER TABLE channels ADD COLUMN bound_user_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE channels ADD COLUMN bound_user_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE channels ADD COLUMN pair_code TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE channels ADD COLUMN pair_code_expires_at BIGINT NOT NULL DEFAULT 0`,
+		`UPDATE channels SET bound_user_id = platform_user_id WHERE type = 'wechat' AND platform_user_id != ''`,
+	}
+	for _, q := range stmts {
+		if _, err := d.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("%w\nSQL: %s", err, q)
+		}
+	}
+	return nil
 }
 
 // --- Cron jobs ---

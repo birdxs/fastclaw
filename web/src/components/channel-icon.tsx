@@ -6,6 +6,7 @@ const ASSETS: Record<string, string> = {
   discord: "/channels/discord.svg",
   slack: "/channels/slack.svg",
   line: "/channels/line.png",
+  imessage: "/channels/imessage.svg",
   feishu: "/channels/feishu.png",
   wechat: "/channels/wechat.svg",
   wecom: "/channels/wecom.png",
@@ -56,6 +57,8 @@ export function channelLabel(channel?: string): string {
       return "WeChat";
     case "line":
       return "LINE";
+    case "imessage":
+      return "iMessage";
     case "discord":
       return "Discord";
     case "slack":

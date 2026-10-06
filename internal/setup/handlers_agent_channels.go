@@ -40,6 +40,12 @@ type channelOut struct {
 	SharedIdentity bool   `json:"sharedIdentity"`
 	UpdatedAt      string `json:"updatedAt,omitempty"`
 	Source         string `json:"source,omitempty"`
+	// Pairing state — see handlers_channel_pairing.go.
+	Paired            bool   `json:"paired"`
+	PairedName        string `json:"pairedName,omitempty"`
+	HostAccess        bool   `json:"hostAccess"`
+	PairCommand       string `json:"pairCommand,omitempty"`
+	PairCodeExpiresAt string `json:"pairCodeExpiresAt,omitempty"`
 }
 
 // resolveChannelBindingScope authorizes a connect/disconnect call and
@@ -128,18 +134,17 @@ func (s *Server) handleListAgentChannels(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	caller := s.effectiveUserID(r)
-	_ = rec // kept around in case future logic gates on agent ownership again
 
 	// Try the new channels table first. If it has rows for this agent,
 	// use them exclusively; otherwise fall back to the configs table.
 	out := make([]channelOut, 0)
 	if caller != "" {
 		if chRows, err := s.dataStore.ListChannels(r.Context(), caller, id); err == nil && len(chRows) > 0 {
-			out = append(out, flattenChannelRecords(chRows, "agent")...)
+			out = append(out, flattenChannelRecords(chRows, "agent", rec.UserID, true)...)
 		}
 	}
 	if chRows, err := s.dataStore.ListChannels(r.Context(), "", id); err == nil && len(chRows) > 0 {
-		out = append(out, flattenChannelRecords(chRows, "agent")...)
+		out = append(out, flattenChannelRecords(chRows, "agent", rec.UserID, false)...)
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"channels": out})
 }
@@ -198,7 +203,8 @@ func flattenChannelRows(rows []store.ConfigRecord, source string, _, _ string, f
 }
 
 // flattenChannelRecords builds channelOut entries from ChannelRecord rows.
-func flattenChannelRecords(rows []store.ChannelRecord, source string) []channelOut {
+// agentOwnerID and exposePairCode feed applyChannelPairing.
+func flattenChannelRecords(rows []store.ChannelRecord, source, agentOwnerID string, exposePairCode bool) []channelOut {
 	out := make([]channelOut, 0, len(rows))
 	for _, rec := range rows {
 		cc := config.ChannelConfig{}
@@ -215,6 +221,7 @@ func flattenChannelRecords(rows []store.ChannelRecord, source string) []channelO
 				UpdatedAt:      rec.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 				Source:         source,
 			})
+			applyChannelPairing(&out[len(out)-1], rec, agentOwnerID, exposePairCode)
 			continue
 		}
 		for accountID, acct := range cc.Accounts {
@@ -232,6 +239,7 @@ func flattenChannelRecords(rows []store.ChannelRecord, source string) []channelO
 				UpdatedAt:      rec.UpdatedAt.Format("2006-01-02T15:04:05Z07:00"),
 				Source:         source,
 			})
+			applyChannelPairing(&out[len(out)-1], rec, agentOwnerID, exposePairCode)
 		}
 	}
 	return out
@@ -897,6 +905,7 @@ func (s *Server) handleAgentWeChatLoginStatus(w http.ResponseWriter, r *http.Req
 			jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
 			return
 		}
+		s.pairChannelToScanner(r.Context(), "wechat", creds.ILinkBotID, creds.ILinkUserID)
 		wechatLogins.delete(sessionID)
 		jsonResponse(w, http.StatusOK, map[string]any{
 			"status":    "confirmed",
@@ -1091,36 +1100,9 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	cc := config.ChannelConfig{
-		Enabled: true,
-		Accounts: map[string]config.AccountConfig{
-			appID: {
-				BotToken:    appSecret,
-				UserID:      verificationToken, // see channels/feishu.go field-mapping note
-				EncryptKey:  encryptKey,
-				UseLongConn: useLongConn,
-			},
-		},
-	}
-	credKey := appID
-	if err := s.assertChannelCredentialUniqueOpt(r, "feishu", credKey, "", uid, aid, true); err != nil {
-		jsonResponse(w, http.StatusConflict, map[string]any{"error": err.Error()})
+	if status, err := s.persistFeishuAccount(r, uid, aid, id, appID, appSecret, verificationToken, encryptKey, useLongConn); err != nil {
+		jsonResponse(w, status, map[string]any{"error": err.Error()})
 		return
-	}
-	if err := s.saveChannelRecord(r.Context(), uid, aid, "feishu", appID, true, cc); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	if err := s.appendBinding(r, "", "", config.Binding{
-		AgentID: id,
-		Match:   config.Match{Channel: "feishu", AccountID: appID},
-	}); err != nil {
-		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
-		return
-	}
-	s.invalidateOwner(uid, aid)
-	if ch, err := s.dataStore.LookupChannel(r.Context(), "feishu", credKey); err == nil && ch != nil {
-		s.hotRegisterChannelRecord(*ch)
 	}
 	resp := map[string]any{
 		"ok":          true,
@@ -1137,6 +1119,41 @@ func (s *Server) handleConnectAgentFeishu(w http.ResponseWriter, r *http.Request
 		resp["webhookUrl"] = feishuWebhookPathFor(r, appID)
 	}
 	jsonResponse(w, http.StatusOK, resp)
+}
+
+// persistFeishuAccount writes the kind=channel row + binding for a
+// Feishu app and hot-registers the adapter. Shared by the manual
+// connect handler and the QR one-click registration flow. Returns the
+// HTTP status the caller should surface on error.
+func (s *Server) persistFeishuAccount(r *http.Request, userID, agentIDArg, agentID, appID, appSecret, verificationToken, encryptKey string, useLongConn bool) (int, error) {
+	cc := config.ChannelConfig{
+		Enabled: true,
+		Accounts: map[string]config.AccountConfig{
+			appID: {
+				BotToken:    appSecret,
+				UserID:      verificationToken, // see channels/feishu.go field-mapping note
+				EncryptKey:  encryptKey,
+				UseLongConn: useLongConn,
+			},
+		},
+	}
+	if err := s.assertChannelCredentialUniqueOpt(r, "feishu", appID, "", userID, agentIDArg, true); err != nil {
+		return http.StatusConflict, err
+	}
+	if err := s.saveChannelRecord(r.Context(), userID, agentIDArg, "feishu", appID, true, cc); err != nil {
+		return http.StatusInternalServerError, err
+	}
+	if err := s.appendBinding(r, "", "", config.Binding{
+		AgentID: agentID,
+		Match:   config.Match{Channel: "feishu", AccountID: appID},
+	}); err != nil {
+		return http.StatusInternalServerError, err
+	}
+	s.invalidateOwner(userID, agentIDArg)
+	if ch, err := s.dataStore.LookupChannel(r.Context(), "feishu", appID); err == nil && ch != nil {
+		s.hotRegisterChannelRecord(*ch)
+	}
+	return http.StatusOK, nil
 }
 
 // feishuWebhookPathFor builds the URL the user should paste into the
