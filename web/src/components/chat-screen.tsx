@@ -1496,7 +1496,7 @@ export function ChatScreen() {
         <button
           type="button"
           onClick={openBotSettings}
-          className="group flex min-w-0 max-w-[min(60vw,32rem)] items-center gap-1.5 rounded-xl px-1.5 py-1 transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring"
+          className="group flex min-w-0 max-w-[min(60vw,32rem)] cursor-pointer items-center gap-1.5 rounded-xl px-1.5 py-1 transition-colors hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring"
           title={tr("Open settings for {{agent}}", "打开 {{agent}} 的设置", { agent: agentName || selectedAgent })}
           aria-label={tr("Open settings for {{agent}}", "打开 {{agent}} 的设置", { agent: agentName || selectedAgent })}
         >
