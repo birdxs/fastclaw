@@ -60,14 +60,22 @@ test:
 
 # dev runs the Go gateway under air (Go-only rebuilds) and the web UI under
 # `next dev` on WEB_PORT. The gateway proxies page requests to it, so keep
-# using http://localhost:18953 and web edits hot-reload. The embedded export
-# is only built once so the binary compiles; `make build-web` refreshes it.
+# using http://localhost:$(DEV_PORT) and web edits hot-reload. The embedded
+# export is only built once so the binary compiles; `make build-web` refreshes it.
+#
+# Dev data is isolated from the release install: its own FASTCLAW_HOME
+# (sqlite db, workspaces, skills, pid, logs) and port, so both can run
+# side by side. Point the CLI at it with the same two env vars, e.g.
+#   FASTCLAW_HOME=~/.fastclaw-dev FASTCLAW_PORT=18955 fastclaw chat
 WEB_PORT ?= 18954
+DEV_PORT ?= 18955
+DEV_HOME ?= $(HOME)/.fastclaw-dev
 dev:
 	@test -f internal/setup/web/index.html || $(MAKE) build-web
 	@cd web && pnpm install --frozen-lockfile --silent
 	@trap 'kill 0' EXIT INT TERM; \
 	(cd web && pnpm exec next dev --hostname 127.0.0.1 --port $(WEB_PORT)) & \
+	FASTCLAW_HOME=$(DEV_HOME) FASTCLAW_PORT=$(DEV_PORT) \
 	FASTCLAW_DEV_SKIP_WEB=1 FASTCLAW_DEV_WEB_URL=http://127.0.0.1:$(WEB_PORT) air
 
 clean:

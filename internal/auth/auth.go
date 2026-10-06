@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -25,7 +26,18 @@ import (
 )
 
 // SessionCookieName is the cookie that backs the web UI's login state.
-const SessionCookieName = "fastclaw_session"
+// Browsers scope cookies by host, not port, so an instance on a
+// non-default FASTCLAW_PORT (e.g. `make dev`) suffixes the name with its
+// port; otherwise logging into one instance would clobber the other's
+// session on the same localhost.
+var SessionCookieName = sessionCookieName(os.Getenv("FASTCLAW_PORT"))
+
+func sessionCookieName(port string) string {
+	if port == "" || port == "18953" {
+		return "fastclaw_session"
+	}
+	return "fastclaw_session_" + port
+}
 
 // SessionTTL is how long a freshly-issued login cookie is valid.
 const SessionTTL = 30 * 24 * time.Hour

@@ -194,6 +194,10 @@ func runGateway(port int) error {
 		port = env.Gateway.Port
 	}
 
+	if home, err := config.HomeDir(); err == nil {
+		slog.Info("fastclaw instance", "home", home, "port", port)
+	}
+
 	agent.InstallBundledSkills()
 
 	if err := daemon.WritePIDFile(); err != nil {
