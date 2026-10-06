@@ -83,7 +83,7 @@ const CATALOG: { type: string; label: string; description: string; available: bo
   {
     type: "line",
     label: "LINE",
-    description: "Connect a LINE Messaging API channel via webhook (channel access token + channel secret).",
+    description: "Connect a LINE Messaging API channel via webhook — needs a public HTTPS address.",
     available: true,
   },
   {
@@ -315,7 +315,7 @@ function CatalogCard({
       telegram: "连接 Telegram 机器人，将消息转发给此 Agent。",
       discord: "连接 Discord 机器人，支持私信和已邀请的服务器。",
       slack: "通过 Socket Mode 连接 Slack 应用。",
-      line: "通过 Webhook 连接 LINE Messaging API 渠道。",
+      line: "通过 Webhook 连接 LINE Messaging API 渠道，需要公网 HTTPS 地址。",
       wechat: "使用微信手机客户端扫码，将消息转发给此 Agent。",
       feishu: "通过长连接或 Webhook 连接飞书自建应用机器人。",
       wecom: "扫码一键创建企业微信智能机器人，或手动连接已有的机器人。",
@@ -1124,8 +1124,19 @@ function ConnectLINEDialog({
     }
   }, [open]);
 
+  // LINE delivers webhooks (and fetches outbound images) only over public
+  // HTTPS, and the webhook URL is built from the address this console is
+  // open at — so a localhost / plain-http console can't work as-is.
+  const [unreachableOrigin, setUnreachableOrigin] = useState("");
+  useEffect(() => {
+    if (!open) return;
+    const { protocol, hostname, origin } = window.location;
+    const local = /^(localhost|127\.|0\.0\.0\.0$|\[::1\]$|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(hostname) || hostname.endsWith(".local");
+    setUnreachableOrigin(local || protocol !== "https:" ? origin : "");
+  }, [open]);
+
   const submit = async () => {
-    if (!channelToken.trim() || !agentId) return;
+    if (!channelToken.trim() || !channelSecret.trim() || !agentId) return;
     setSubmitting(true);
     setError("");
     const res = await connectAgentLINE(
@@ -1167,6 +1178,16 @@ function ConnectLINEDialog({
             {tr(". Under Messaging API, issue a long-lived Channel access token and copy the Channel secret from the Basic settings tab. After saving the URL we generate, enable Use webhook.", "。在 Messaging API 中签发长期有效的 Channel access token，并从 Basic settings 标签页复制 Channel secret。保存我们生成的 URL 后，请启用 Use webhook。")}
           </DialogDescription>
         </DialogHeader>
+
+        {unreachableOrigin && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-400">
+            {tr(
+              "LINE can only reach a public HTTPS address, but this console is open at {{origin}}. Expose FastClaw on a public HTTPS URL (for example with a Cloudflare Tunnel) and open the console from there before connecting — the webhook URL is generated from that address.",
+              "LINE 只能访问公网 HTTPS 地址，而当前控制台的地址是 {{origin}}。请先通过公网 HTTPS 地址（例如 Cloudflare Tunnel）暴露 FastClaw，并从该地址打开控制台再连接——Webhook URL 会根据这个地址生成。",
+              { origin: unreachableOrigin },
+            )}
+          </div>
+        )}
 
         {connected ? (
           <div className="space-y-3 py-2">
@@ -1220,10 +1241,11 @@ function ConnectLINEDialog({
                 value={channelSecret}
                 onChange={(e) => setChannelSecret(e.target.value)}
                 placeholder={tr("from Basic settings", "来自 Basic settings")}
+                type="password"
                 className="font-mono text-sm"
               />
               <p className="text-xs text-muted-foreground">
-                {tr("Optional but strongly recommended — fastclaw uses this secret to verify inbound webhook payloads with HMAC-SHA256.", "可选但强烈建议填写——fastclaw 会使用此密钥通过 HMAC-SHA256 验证传入的 Webhook 请求。")}
+                {tr("Required — fastclaw verifies every webhook request with this secret (HMAC-SHA256) and rejects requests it can't verify.", "必填——fastclaw 会用此密钥（HMAC-SHA256）校验每个 Webhook 请求，无法校验的请求会被拒绝。")}
               </p>
             </div>
             {error && <p className="text-xs text-destructive">{error}</p>}
@@ -1244,7 +1266,7 @@ function ConnectLINEDialog({
               </Button>
               <Button
                 onClick={submit}
-                disabled={submitting || !channelToken.trim()}
+                disabled={submitting || !channelToken.trim() || !channelSecret.trim()}
               >
                 {submitting ? tr("Validating…", "正在验证…") : tr("Connect", "连接")}
               </Button>

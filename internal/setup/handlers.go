@@ -2122,14 +2122,14 @@ func (s *Server) handleLINEWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	signature := r.Header.Get("x-line-signature")
 	type lineDispatcher interface {
-		DispatchLINEWebhook(accountID string, body []byte, signature string) ([]byte, int, error)
+		DispatchLINEWebhook(accountID string, body []byte, signature, publicBase string) ([]byte, int, error)
 	}
 	d, ok := s.userResolver.(lineDispatcher)
 	if !ok {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "line webhook dispatch not available"})
 		return
 	}
-	respBody, status, derr := d.DispatchLINEWebhook(accountID, body, signature)
+	respBody, status, derr := d.DispatchLINEWebhook(accountID, body, signature, requestBaseURL(r))
 	if derr != nil {
 		slog.Warn("line webhook dispatch error", "accountId", accountID, "status", status, "error", derr)
 		if respBody == nil {
@@ -2139,6 +2139,30 @@ func (s *Server) handleLINEWebhook(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(respBody)
+}
+
+// handleLINEMedia serves outbound media the LINE adapter stored for LINE
+// to fetch (image messages carry URLs, not bytes). Public like the
+// webhook: LINE's servers fetch without credentials, so the random
+// token in the name is the access check.
+func (s *Server) handleLINEMedia(w http.ResponseWriter, r *http.Request) {
+	type lineMediaServer interface {
+		ServeLINEMedia(accountID, name string) ([]byte, string, error)
+	}
+	srv, ok := s.userResolver.(lineMediaServer)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	data, contentType, err := srv.ServeLINEMedia(r.PathValue("accountId"), r.PathValue("name"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=2592000, immutable")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(data)
 }
 
 // --- Helpers ---

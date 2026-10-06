@@ -1194,8 +1194,10 @@ func (s *Server) handleConnectAgentLINE(w http.ResponseWriter, r *http.Request) 
 	}
 	channelToken := strings.TrimSpace(req.ChannelToken)
 	channelSecret := strings.TrimSpace(req.ChannelSecret)
-	if channelToken == "" {
-		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "channelToken required"})
+	// The secret is what authenticates the public webhook (HMAC); without
+	// it the adapter rejects every event, so refuse to connect.
+	if channelToken == "" || channelSecret == "" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "channelToken and channelSecret required"})
 		return
 	}
 
@@ -1248,6 +1250,12 @@ func (s *Server) handleConnectAgentLINE(w http.ResponseWriter, r *http.Request) 
 // as feishuWebhookPathFor — surfaces the public-facing host via the
 // usual reverse-proxy headers.
 func lineWebhookPathFor(r *http.Request, userID string) string {
+	return requestBaseURL(r) + "/api/line/webhook/" + userID
+}
+
+// requestBaseURL is the scheme://host a request was addressed to,
+// honoring X-Forwarded-Proto / X-Forwarded-Host from a reverse proxy.
+func requestBaseURL(r *http.Request) string {
 	scheme := "https"
 	if r.TLS == nil && r.Header.Get("X-Forwarded-Proto") == "" {
 		scheme = "http"
@@ -1259,7 +1267,7 @@ func lineWebhookPathFor(r *http.Request, userID string) string {
 	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
 		host = h
 	}
-	return scheme + "://" + host + "/api/line/webhook/" + userID
+	return scheme + "://" + host
 }
 
 // saveChannelRecord writes a ChannelRecord to the channels table.

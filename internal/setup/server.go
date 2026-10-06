@@ -392,6 +392,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// The {accountId} path segment is the bot's userId, scoping the
 	// receive to one registered channel.
 	mux.HandleFunc("POST /api/line/webhook/{accountId}", s.handleLINEWebhook)
+	mux.HandleFunc("GET /api/line/media/{accountId}/{name}", s.handleLINEMedia)
 
 	// Skills
 	mux.HandleFunc("GET /api/skills", auth(s.handleListSkills))
