@@ -83,6 +83,12 @@ const CATALOG: { type: string; label: string; description: string; available: bo
     available: true,
   },
   {
+    type: "whatsapp",
+    label: "WhatsApp",
+    description: "Link a WhatsApp number by scanning a QR code, like WhatsApp Web.",
+    available: true,
+  },
+  {
     type: "line",
     label: "LINE",
     description: "Connect a LINE Messaging API channel via webhook — needs a public HTTPS address.",
@@ -104,12 +110,6 @@ const CATALOG: { type: string; label: string; description: string; available: bo
     type: "wecom",
     label: "WeCom",
     description: "Scan a QR code to create a WeCom smart bot in one step, or connect an existing one.",
-    available: true,
-  },
-  {
-    type: "whatsapp",
-    label: "WhatsApp",
-    description: "Link a WhatsApp number by scanning a QR code, like WhatsApp Web.",
     available: true,
   },
 ];
