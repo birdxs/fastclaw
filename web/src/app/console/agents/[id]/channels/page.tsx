@@ -43,6 +43,8 @@ import {
   connectAgentLINE,
   connectAgentFeishu,
   connectAgentWeCom,
+  startAgentWeComRegister,
+  pollAgentWeComRegisterStatus,
   startAgentWeChatLogin,
   pollAgentWeChatLoginStatus,
   disconnectAgentChannel,
@@ -99,7 +101,7 @@ const CATALOG: { type: string; label: string; description: string; available: bo
   {
     type: "wecom",
     label: "WeCom",
-    description: "Connect a WeCom smart bot over a long connection — no public URL needed.",
+    description: "Scan a QR code to create a WeCom smart bot in one step, or connect an existing one.",
     available: true,
   },
 ];
@@ -316,7 +318,7 @@ function CatalogCard({
       line: "通过 Webhook 连接 LINE Messaging API 渠道。",
       wechat: "使用微信手机客户端扫码，将消息转发给此 Agent。",
       feishu: "通过长连接或 Webhook 连接飞书自建应用机器人。",
-      wecom: "通过长连接接入企业微信智能机器人，无需公网 URL。",
+      wecom: "扫码一键创建企业微信智能机器人，或手动连接已有的机器人。",
     } as Record<string, string>)[type] || description;
   return (
     <div className="rounded-lg border border-border bg-card p-4 flex flex-col gap-3">
@@ -810,9 +812,12 @@ function ConnectSlackDialog({
   );
 }
 
-// WeCom smart-bot connect dialog. Bot ID + Secret from the WeCom admin
-// console (智能机器人 → API 模式 → 长连接); the server verifies them by
-// completing one subscribe handshake before saving.
+// WeCom smart-bot connect dialog. Defaults to one-click QR creation:
+// the server starts WeCom's bot-creation QR flow, the user scans it in
+// the WeCom app, and the poll endpoint persists the new bot (long
+// connection) as soon as WeCom hands back its Bot ID + Secret. Manual
+// mode keeps the paste-credentials path; the server verifies those with
+// one subscribe handshake before saving.
 function ConnectWeComDialog({
   open,
   onOpenChange,
@@ -829,17 +834,105 @@ function ConnectWeComDialog({
   const [secret, setSecret] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected] = useState<{ viaQR: boolean } | null>(null);
+
+  type RegisterStatus = "pending" | "expired" | "";
+  const [mode, setMode] = useState<"qr" | "manual">("qr");
+  const [qrUrl, setQrUrl] = useState("");
+  const [qrStatus, setQrStatus] = useState<RegisterStatus>("");
+  const [qrLoading, setQrLoading] = useState(false);
+  const [qrError, setQrError] = useState("");
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped on every new QR / close so a poll already in flight for a
+  // stale session can't reschedule itself.
+  const genRef = useRef(0);
+
+  const stopPolling = useCallback(() => {
+    genRef.current++;
+    if (pollRef.current) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  const startRegister = useCallback(async () => {
+    if (!agentId) return;
+    stopPolling();
+    const gen = genRef.current;
+    setQrLoading(true);
+    setQrError("");
+    setQrStatus("");
+    setQrUrl("");
+    const res = await startAgentWeComRegister(agentId);
+    if (gen !== genRef.current) return;
+    setQrLoading(false);
+    if (res.error || !res.sessionId || !res.qrUrl) {
+      setQrError(res.error || tr("Failed to fetch QR code", "获取二维码失败"));
+      return;
+    }
+    setQrUrl(res.qrUrl);
+    setQrStatus("pending");
+    const sessionId = res.sessionId;
+    const intervalMs = Math.max(res.interval || 3, 2) * 1000;
+    const tick = async () => {
+      const r = await pollAgentWeComRegisterStatus(agentId, sessionId);
+      if (gen !== genRef.current) return;
+      if (r.connected) {
+        setConnected({ viaQR: true });
+        onConnected();
+        return;
+      }
+      if (r.status === "expired") {
+        setQrStatus("expired");
+        return;
+      }
+      if (r.status === "error") {
+        setQrError(r.error || tr("Failed to create bot", "创建机器人失败"));
+        setQrStatus("expired");
+        return;
+      }
+      // Transient upstream errors surface as a banner; keep polling.
+      setQrError(r.error || "");
+      pollRef.current = setTimeout(tick, intervalMs);
+    };
+    pollRef.current = setTimeout(tick, intervalMs);
+  }, [agentId, onConnected, stopPolling, tr]);
+
+  useEffect(() => {
+    if (open && mode === "qr" && !connected && !qrUrl && !qrLoading && !qrError) {
+      startRegister();
+    }
+  }, [open, mode, connected, qrUrl, qrLoading, qrError, startRegister]);
 
   useEffect(() => {
     if (!open) {
+      stopPolling();
+      setMode("qr");
+      setQrUrl("");
+      setQrStatus("");
+      setQrLoading(false);
+      setQrError("");
       setBotId("");
       setSecret("");
       setError("");
       setSubmitting(false);
-      setConnected(false);
+      setConnected(null);
     }
-  }, [open]);
+  }, [open, stopPolling]);
+
+  const switchMode = (next: "qr" | "manual") => {
+    if (next === "manual") {
+      stopPolling();
+      setQrUrl("");
+      setQrStatus("");
+      setQrLoading(false);
+      setQrError("");
+    }
+    setError("");
+    setMode(next);
+  };
 
   const submit = async () => {
     if (!botId.trim() || !secret.trim() || !agentId) return;
@@ -851,7 +944,7 @@ function ConnectWeComDialog({
       setError(res.error || tr("Failed to connect", "连接失败"));
       return;
     }
-    setConnected(true);
+    setConnected({ viaQR: false });
     onConnected();
   };
 
@@ -863,28 +956,39 @@ function ConnectWeComDialog({
             <img src="/channels/wecom.png" alt="WeCom" className="h-5 w-5 object-contain" />
             {tr("Connect WeCom bot", "连接企业微信机器人")}
           </DialogTitle>
-          <DialogDescription>
-            {tr("In the", "在")}{" "}
-            <a
-              href="https://work.weixin.qq.com/wework_admin/frame"
-              target="_blank"
-              rel="noreferrer"
-              className="underline"
-            >
-              {tr("WeCom admin console", "企业微信管理后台")}
-            </a>
-            {tr(
-              ", create a smart bot, choose API mode with a long connection, then copy its Bot ID and Secret. No public URL is needed.",
-              "中创建智能机器人，选择 API 模式并使用长连接，然后复制 Bot ID 和 Secret。无需配置公网 URL。",
-            )}
-          </DialogDescription>
+          {mode === "qr" ? (
+            <DialogDescription>
+              {tr(
+                "Scan the QR code with the WeCom mobile app to create a smart bot. It is connected to this agent automatically — no admin console setup needed.",
+                "使用企业微信手机客户端扫描二维码，即可创建智能机器人并自动接入此 Agent，无需在管理后台做任何配置。",
+              )}
+            </DialogDescription>
+          ) : (
+            <DialogDescription>
+              {tr("In the", "在")}{" "}
+              <a
+                href="https://work.weixin.qq.com/wework_admin/frame"
+                target="_blank"
+                rel="noreferrer"
+                className="underline"
+              >
+                {tr("WeCom admin console", "企业微信管理后台")}
+              </a>
+              {tr(
+                ", create a smart bot, choose API mode with a long connection, then copy its Bot ID and Secret. No public URL is needed.",
+                "中创建智能机器人，选择 API 模式并使用长连接，然后复制 Bot ID 和 Secret。无需配置公网 URL。",
+              )}
+            </DialogDescription>
+          )}
         </DialogHeader>
 
         {connected ? (
           <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
             <div className="flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-              <span className="text-sm font-medium">{tr("Connected", "已连接")}</span>
+              <span className="text-sm font-medium">
+                {connected.viaQR ? tr("Bot created and connected", "机器人已创建并接入") : tr("Connected", "已连接")}
+              </span>
             </div>
             <p className="text-sm">
               {tr(
@@ -892,6 +996,36 @@ function ConnectWeComDialog({
                 "机器人已上线。可在企业微信中直接私聊它，或将其加入群聊后 @ 它进行测试。",
               )}
             </p>
+          </div>
+        ) : mode === "qr" ? (
+          <div className="flex flex-col items-center gap-4 py-2">
+            {qrLoading ? (
+              <div className="flex h-56 w-56 items-center justify-center">
+                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : qrUrl && qrStatus === "pending" ? (
+              <div className="rounded-lg border bg-white p-4">
+                <QRCodeSVG value={qrUrl} size={224} level="M" />
+              </div>
+            ) : (
+              <div className="flex h-56 w-56 items-center justify-center text-sm text-muted-foreground">
+                <QrCode className="h-8 w-8 opacity-50" />
+              </div>
+            )}
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              {qrStatus === "pending" && <>{tr("Waiting for scan…", "等待扫码…")}</>}
+              {qrStatus === "expired" && !qrError && (
+                <span className="text-destructive">{tr("QR code expired.", "二维码已过期。")}</span>
+              )}
+            </div>
+            {qrError && <p className="text-xs text-destructive">{qrError}</p>}
+            <button
+              type="button"
+              className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              onClick={() => switchMode("manual")}
+            >
+              {tr("Already have a WeCom bot? Enter credentials manually", "已有企业微信机器人？手动填写参数")}
+            </button>
           </div>
         ) : (
           <div className="space-y-3 py-2">
@@ -916,19 +1050,37 @@ function ConnectWeComDialog({
               />
             </div>
             {error && <p className="text-xs text-destructive">{error}</p>}
+            <button
+              type="button"
+              className="text-xs text-muted-foreground underline underline-offset-4 hover:text-foreground"
+              onClick={() => switchMode("qr")}
+            >
+              {tr("Create a new bot by scanning a QR code instead", "改用扫码一键创建机器人")}
+            </button>
           </div>
         )}
 
         <DialogFooter>
           {connected ? (
             <Button onClick={() => onOpenChange(false)}>{tr("Done", "完成")}</Button>
+          ) : mode === "qr" ? (
+            <>
+              {(qrStatus === "expired" || (qrError && !qrUrl)) && (
+                <Button onClick={startRegister} disabled={qrLoading}>
+                  {qrLoading ? tr("Refreshing…", "正在刷新…") : tr("Refresh QR", "刷新二维码")}
+                </Button>
+              )}
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
+                {tr("Cancel", "取消")}
+              </Button>
+            </>
           ) : (
             <>
               <Button variant="outline" onClick={() => onOpenChange(false)} disabled={submitting}>
                 {tr("Cancel", "取消")}
               </Button>
               <Button onClick={submit} disabled={submitting || !botId.trim() || !secret.trim()}>
-                {submitting ? tr("Connecting…", "正在连接…") : tr("Connect", "连接")}
+                {submitting ? tr("Validating…", "正在验证…") : tr("Connect", "连接")}
               </Button>
             </>
           )}

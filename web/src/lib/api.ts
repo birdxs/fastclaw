@@ -2150,6 +2150,32 @@ export async function connectAgentWeCom(
   return res.json();
 }
 
+export async function startAgentWeComRegister(
+  agentId: string,
+): Promise<{ sessionId?: string; qrUrl?: string; interval?: number; expiresIn?: number; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/wecom/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function pollAgentWeComRegisterStatus(
+  agentId: string,
+  sessionId: string,
+): Promise<{
+  status?: "pending" | "confirmed" | "expired" | "error";
+  connected?: boolean;
+  botId?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/wecom/register/status?session=${encodeURIComponent(sessionId)}`,
+  );
+  return res.json();
+}
+
 export async function disconnectAgentChannel(
   agentId: string,
   type: string,
