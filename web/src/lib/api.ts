@@ -2176,6 +2176,33 @@ export async function pollAgentWeComRegisterStatus(
   return res.json();
 }
 
+export async function startAgentWhatsAppLogin(
+  agentId: string,
+): Promise<{ sessionId?: string; qrCode?: string; status?: string; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/whatsapp/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function pollAgentWhatsAppLoginStatus(
+  agentId: string,
+  sessionId: string,
+): Promise<{
+  status?: "wait" | "confirmed" | "expired" | "error";
+  connected?: boolean;
+  qrCode?: string;
+  accountId?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/whatsapp/login/status?session=${encodeURIComponent(sessionId)}`,
+  );
+  return res.json();
+}
+
 export async function disconnectAgentChannel(
   agentId: string,
   type: string,

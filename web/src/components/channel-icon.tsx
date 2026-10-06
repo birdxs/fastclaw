@@ -9,6 +9,7 @@ const ASSETS: Record<string, string> = {
   feishu: "/channels/feishu.png",
   wechat: "/channels/wechat.svg",
   wecom: "/channels/wecom.png",
+  whatsapp: "/channels/whatsapp.svg",
 };
 
 // ChannelIcon renders the per-channel brand mark next to a chat title.
@@ -63,6 +64,8 @@ export function channelLabel(channel?: string): string {
       return "Feishu";
     case "wecom":
       return "WeCom";
+    case "whatsapp":
+      return "WhatsApp";
     case "api":
       return "API";
     case "acp":

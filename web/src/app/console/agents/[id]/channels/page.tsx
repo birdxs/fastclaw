@@ -45,6 +45,8 @@ import {
   connectAgentWeCom,
   startAgentWeComRegister,
   pollAgentWeComRegisterStatus,
+  startAgentWhatsAppLogin,
+  pollAgentWhatsAppLoginStatus,
   startAgentWeChatLogin,
   pollAgentWeChatLoginStatus,
   disconnectAgentChannel,
@@ -104,6 +106,12 @@ const CATALOG: { type: string; label: string; description: string; available: bo
     description: "Scan a QR code to create a WeCom smart bot in one step, or connect an existing one.",
     available: true,
   },
+  {
+    type: "whatsapp",
+    label: "WhatsApp",
+    description: "Link a WhatsApp number by scanning a QR code, like WhatsApp Web.",
+    available: true,
+  },
 ];
 
 export default function AgentChannelsPage() {
@@ -122,6 +130,7 @@ export default function AgentChannelsPage() {
   const [wechatOpen, setWechatOpen] = useState(false);
   const [feishuOpen, setFeishuOpen] = useState(false);
   const [wecomOpen, setWecomOpen] = useState(false);
+  const [whatsappOpen, setWhatsappOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentChannel | null>(null);
 
   const refresh = useCallback(() => {
@@ -213,6 +222,7 @@ export default function AgentChannelsPage() {
                   else if (entry.type === "wechat") setWechatOpen(true);
                   else if (entry.type === "feishu") setFeishuOpen(true);
                   else if (entry.type === "wecom") setWecomOpen(true);
+                  else if (entry.type === "whatsapp") setWhatsappOpen(true);
                 }}
               />
             );
@@ -269,6 +279,13 @@ export default function AgentChannelsPage() {
         onConnected={refresh}
       />
 
+      <ConnectWhatsAppDialog
+        open={whatsappOpen}
+        onOpenChange={setWhatsappOpen}
+        agentId={agentId}
+        onConnected={refresh}
+      />
+
       <AlertDialog open={!!deleteTarget} onOpenChange={(v) => !v && setDeleteTarget(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -319,6 +336,7 @@ function CatalogCard({
       wechat: "使用微信手机客户端扫码，将消息转发给此 Agent。",
       feishu: "通过长连接或 Webhook 连接飞书自建应用机器人。",
       wecom: "扫码一键创建企业微信智能机器人，或手动连接已有的机器人。",
+      whatsapp: "像 WhatsApp Web 一样扫码关联一个 WhatsApp 号码。",
     } as Record<string, string>)[type] || description;
   return (
     <div className="rounded-lg border border-border bg-card p-4 flex flex-col gap-3">
@@ -424,6 +442,7 @@ function ChannelIcon({ type }: { type: string }) {
     feishu: "/channels/feishu.png",
     wechat: "/channels/wechat.svg",
     wecom: "/channels/wecom.png",
+    whatsapp: "/channels/whatsapp.svg",
   };
   if (asset[type]) {
     // WeChat's artwork is non-square (50×40) — object-contain letterboxes
@@ -1081,6 +1100,186 @@ function ConnectWeComDialog({
               </Button>
               <Button onClick={submit} disabled={submitting || !botId.trim() || !secret.trim()}>
                 {submitting ? tr("Validating…", "正在验证…") : tr("Connect", "连接")}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// WhatsApp connect dialog: links the number as a companion device, the
+// same way WhatsApp Web does. The server starts pairing and the poll
+// endpoint returns the current QR (WhatsApp rotates it every ~20s) until
+// the phone confirms, at which point the number is saved and connected.
+// It is an unofficial integration, so the dialog states the risk upfront.
+function ConnectWhatsAppDialog({
+  open,
+  onOpenChange,
+  agentId,
+  onConnected,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  agentId: string;
+  onConnected: () => void;
+}) {
+  const { tr } = useLocale();
+  const [qrCode, setQrCode] = useState("");
+  const [status, setStatus] = useState<"" | "wait" | "expired">("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [connected, setConnected] = useState("");
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped on every new QR / close so a poll already in flight for a
+  // stale session can't reschedule itself.
+  const genRef = useRef(0);
+
+  const stopPolling = useCallback(() => {
+    genRef.current++;
+    if (pollRef.current) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => stopPolling(), [stopPolling]);
+
+  const start = useCallback(async () => {
+    if (!agentId) return;
+    stopPolling();
+    const gen = genRef.current;
+    setLoading(true);
+    setError("");
+    setStatus("");
+    setQrCode("");
+    const res = await startAgentWhatsAppLogin(agentId);
+    if (gen !== genRef.current) return;
+    setLoading(false);
+    if (!res.sessionId || !res.qrCode) {
+      setError(res.error || tr("Failed to fetch QR code", "获取二维码失败"));
+      return;
+    }
+    setQrCode(res.qrCode);
+    setStatus("wait");
+    const sessionId = res.sessionId;
+    const tick = async () => {
+      const r = await pollAgentWhatsAppLoginStatus(agentId, sessionId);
+      if (gen !== genRef.current) return;
+      if (r.connected) {
+        setConnected(r.accountId || "");
+        onConnected();
+        return;
+      }
+      if (r.status === "expired") {
+        setStatus("expired");
+        return;
+      }
+      if (r.status === "error") {
+        setError(r.error || tr("Failed to link WhatsApp", "关联 WhatsApp 失败"));
+        setStatus("expired");
+        return;
+      }
+      if (r.qrCode) setQrCode(r.qrCode);
+      // Transient errors surface as a banner; keep polling.
+      setError(r.error || "");
+      pollRef.current = setTimeout(tick, 2000);
+    };
+    pollRef.current = setTimeout(tick, 2000);
+  }, [agentId, onConnected, stopPolling, tr]);
+
+  useEffect(() => {
+    if (open && !connected && !qrCode && !loading && !error) {
+      start();
+    }
+  }, [open, connected, qrCode, loading, error, start]);
+
+  useEffect(() => {
+    if (!open) {
+      stopPolling();
+      setQrCode("");
+      setStatus("");
+      setLoading(false);
+      setError("");
+      setConnected("");
+    }
+  }, [open, stopPolling]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <img src="/channels/whatsapp.svg" alt="WhatsApp" className="h-5 w-5 object-contain" />
+            {tr("Link WhatsApp", "关联 WhatsApp")}
+          </DialogTitle>
+          <DialogDescription>
+            {tr(
+              "On your phone, open WhatsApp → Settings → Linked devices → Link a device, then scan this code. The agent will reply from this number.",
+              "在手机上打开 WhatsApp →「设置」→「已关联的设备」→「关联新设备」，扫描此二维码。Agent 会以这个号码的身份回复消息。",
+            )}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-400">
+          {tr(
+            "This uses WhatsApp's linked-device protocol, not the official Business API. Automated use may get the number banned — use a dedicated number, and avoid bulk or unsolicited messages.",
+            "此方式使用 WhatsApp 的关联设备协议，而非官方 Business API。自动化使用可能导致号码被封——建议使用专门的号码，避免群发或主动给陌生人发消息。",
+          )}
+        </div>
+
+        {connected ? (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 space-y-2">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+              <span className="text-sm font-medium">{tr("Linked", "已关联")}</span>
+            </div>
+            <p className="text-sm">
+              {tr("Number", "号码")} <strong>+{connected}</strong>{" "}
+              {tr(
+                "is linked. Message it from another phone, or @mention it in a group, to test.",
+                "已关联。用另一部手机给它发消息，或在群里 @ 它进行测试。",
+              )}
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-4 py-2">
+            {loading ? (
+              <div className="flex h-56 w-56 items-center justify-center">
+                <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              </div>
+            ) : qrCode && status === "wait" ? (
+              <div className="rounded-lg border bg-white p-4">
+                <QRCodeSVG value={qrCode} size={224} level="L" />
+              </div>
+            ) : (
+              <div className="flex h-56 w-56 items-center justify-center text-sm text-muted-foreground">
+                <QrCode className="h-8 w-8 opacity-50" />
+              </div>
+            )}
+            <div className="text-sm text-muted-foreground">
+              {status === "wait" && tr("Waiting for scan…", "等待扫码…")}
+              {status === "expired" && !error && (
+                <span className="text-destructive">{tr("QR code expired.", "二维码已过期。")}</span>
+              )}
+            </div>
+            {error && <p className="text-xs text-destructive">{error}</p>}
+          </div>
+        )}
+
+        <DialogFooter>
+          {connected ? (
+            <Button onClick={() => onOpenChange(false)}>{tr("Done", "完成")}</Button>
+          ) : (
+            <>
+              {(status === "expired" || (error && !qrCode)) && (
+                <Button onClick={start} disabled={loading}>
+                  {loading ? tr("Refreshing…", "正在刷新…") : tr("Refresh QR", "刷新二维码")}
+                </Button>
+              )}
+              <Button variant="outline" onClick={() => onOpenChange(false)}>
+                {tr("Cancel", "取消")}
               </Button>
             </>
           )}

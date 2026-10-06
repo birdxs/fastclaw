@@ -131,6 +131,11 @@ func (g *Gateway) UnregisterChannel(channelType, accountID string) {
 	if g.chanMgr == nil {
 		return
 	}
+	// Adapters bound to a linked device (WhatsApp) unlink it, so it
+	// doesn't linger under the phone's linked devices.
+	if u, ok := g.chanMgr.Get(channelType, accountID).(interface{ Unlink() }); ok {
+		go u.Unlink()
+	}
 	g.chanMgr.Unregister(channelType, accountID)
 }
 
