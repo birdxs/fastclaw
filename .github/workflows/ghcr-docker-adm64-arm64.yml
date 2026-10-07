@@ -1,0 +1,194 @@
+name: build-and-push ghcr-dockerhub 原生arm64系统编译
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '镜像版本标签（例如 v1.1.0）'
+        required: true
+        default: 'v1.1.0'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GHCR_REGISTRY: ghcr.io
+  DOCKERHUB_REGISTRY: docker.io
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha7: ${{ steps.meta.outputs.sha7 }}
+      date: ${{ steps.meta.outputs.date }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Derive version and commit
+        id: meta
+        run: |
+          echo "version=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+          echo "sha7=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+
+  build:
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    env:
+      DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            slug: linux-amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (native single arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}-${{ matrix.slug }}
+            ${{ env.GHCR_IMAGE }}:latest-${{ matrix.slug }}
+            ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}-${{ matrix.slug }}
+            ${{ env.DOCKERHUB_IMAGE }}:latest-${{ matrix.slug }}
+          build-args: |
+            VERSION=${{ needs.meta.outputs.version }}
+            COMMIT=${{ needs.meta.outputs.sha7 }}
+            DATE=${{ needs.meta.outputs.date }}
+          cache-from: type=gha,scope=${{ matrix.slug }}
+          cache-to: type=gha,scope=${{ matrix.slug }},mode=max
+
+  merge:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.GHCR_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Create and push multi-arch manifests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }} \
+            -t ${{ env.GHCR_IMAGE }}:latest \
+            ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}-linux-amd64 \
+            ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}-linux-arm64
+
+          docker buildx imagetools create \
+            -t ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }} \
+            -t ${{ env.DOCKERHUB_IMAGE }}:latest \
+            ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}-linux-amd64 \
+            ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}-linux-arm64
+
+      # ---------- 删除 GHCR 的中间标签 ----------
+      - name: Delete intermediate tags from GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          PKG_LC=$(echo "${{ github.event.repository.name }}" | tr '[:upper:]' '[:lower:]')
+
+          # 优先尝试用户级端点，失败则回退到组织级端点
+          LIST_CMD="gh api /users/${OWNER_LC}/packages/container/${PKG_LC}/versions --paginate"
+          if ! $LIST_CMD --jq '.[0].id' >/dev/null 2>&1; then
+            LIST_CMD="gh api /orgs/${OWNER_LC}/packages/container/${PKG_LC}/versions --paginate"
+          fi
+
+          # 找出任何 tag 以 -linux-amd64 或 -linux-arm64 结尾的版本，整个版本删除
+          IDS=$($LIST_CMD --jq '.[] | select(.metadata.container.tags | any(endswith("-linux-amd64") or endswith("-linux-arm64"))) | .id' 2>/dev/null || true)
+
+          for ID in $IDS; do
+            echo "Deleting GHCR package version: $ID"
+            gh api -X DELETE "/users/${OWNER_LC}/packages/container/${PKG_LC}/versions/${ID}" \
+              || gh api -X DELETE "/orgs/${OWNER_LC}/packages/container/${PKG_LC}/versions/${ID}" \
+              || true
+          done
+
+      # ---------- 删除 Docker Hub 的中间标签 ----------
+      - name: Delete intermediate tags from Docker Hub
+        run: |
+          set -e
+          JWT=$(curl -sf -X POST "https://hub.docker.com/v2/users/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\": \"${{ secrets.DOCKERHUB_USERNAME }}\", \"password\": \"${{ secrets.DOCKERHUB_TOKEN }}\"}" \
+            | jq -r .token)
+
+          VERSION="${{ needs.meta.outputs.version }}"
+          NS="${{ secrets.DOCKERHUB_USERNAME }}"
+          REPO="${{ github.event.repository.name }}"
+
+          for TAG in \
+            "${VERSION}-linux-amd64" "${VERSION}-linux-arm64" \
+            "latest-linux-amd64" "latest-linux-arm64"; do
+            echo "Deleting Docker Hub tag: $TAG"
+            curl -s -o /dev/null -w "%{http_code}\n" -X DELETE \
+              "https://hub.docker.com/v2/repositories/${NS}/${REPO}/tags/${TAG}/" \
+              -H "Authorization: Bearer ${JWT}"
+          done
+
+      - name: Update Docker Hub repository description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          repository: ${{ secrets.DOCKERHUB_USERNAME }}/${{ github.event.repository.name }}
+          readme-filepath: ./README.md
+
+      - name: Generate summary
+        run: |
+          echo "### Docker Images Built and Pushed Successfully" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**GHCR:** \`${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}\` and \`${{ env.GHCR_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Docker Hub:** \`${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}\` and \`${{ env.DOCKERHUB_IMAGE }}:latest\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Platforms:** linux/amd64 (native amd64), linux/arm64 (native arm64)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Pull Commands:" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.GHCR_IMAGE }}:${{ needs.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.DOCKERHUB_IMAGE }}:${{ needs.meta.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
