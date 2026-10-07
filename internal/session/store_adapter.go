@@ -323,6 +323,12 @@ func (a *StoreAdapter) BuildWebSession(ctx context.Context, m store.SessionMeta)
 		break
 	}
 	if preview == "" {
+		// Agent-initiated sessions (a group chat's private message to the
+		// human) have no user turn; their first reply stands in so they
+		// still list and can be reopened.
+		preview = firstAssistantPreview(source)
+	}
+	if preview == "" {
 		return nil
 	}
 	lastMessage, lastMessageAt := latestMessagePreview(source)
@@ -348,6 +354,20 @@ func (a *StoreAdapter) BuildWebSession(ctx context.Context, m store.SessionMeta)
 		UpdatedAt:     m.UpdatedAt.UnixMilli(),
 		ChatterUserID: m.ChatterUserID,
 	}
+}
+
+// firstAssistantPreview returns the first user-visible assistant message,
+// compacted for a listing.
+func firstAssistantPreview(source []store.SessionMessage) string {
+	for _, msg := range source {
+		if msg.Origin != provider.OriginUser || msg.Role != "assistant" {
+			continue
+		}
+		if text := compactMessagePreview(msg.Content); text != "" {
+			return text
+		}
+	}
+	return ""
 }
 
 // latestMessagePreview returns the newest user-visible message in a session

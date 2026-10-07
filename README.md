@@ -149,7 +149,10 @@ table and is edited through the dashboard or `fastclaw agents config`.
 
 ### API
 - OpenAI-compatible `/v1/chat/completions` (streaming)
-- Upstream app integration contract: [`docs/upstream-api.md`](docs/upstream-api.md)
+- Agent Communication Protocol (ACP) 0.2 at `/acp` — agent discovery,
+  manifests, sync/async/stream runs, events, cancellation, and sessions
+- App integration guide (also served at `/skills/agent-integration/SKILL.md`): [`skills/agent-integration/SKILL.md`](skills/agent-integration/SKILL.md)
+- ACP integration guide: [`docs/acp.md`](docs/acp.md)
 - Web chat `/api/chat/stream` (SSE)
 - Live agent push via `/api/chat/subscribe` (SSE) — surfaces cron-fired and other async replies into the open chat panel without a refresh
 - Session management `/api/chat/sessions`

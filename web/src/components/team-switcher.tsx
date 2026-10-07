@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import { agentChatHref } from "@/lib/chat-route";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -80,6 +81,7 @@ export interface AgentSwitcherItem {
   model?: string;
   description?: string;
   avatarUrl?: string;
+  createdAt?: string;
 }
 
 // AgentSwitcher renders the sidebar header.
@@ -119,7 +121,7 @@ export function AgentSwitcher({
   const goto = React.useCallback(
     (id: string) => {
       if (onSelect) onSelect(id);
-      else router.push(`/agents/${id}/chat/`);
+      else router.push(agentChatHref(id));
     },
     [onSelect, router],
   );
@@ -188,7 +190,7 @@ export function AgentSwitcher({
             <DropdownMenuGroup>
               <DropdownMenuItem
                 className="gap-2 p-2"
-                onClick={() => router.push("/agents/?manage=1")}
+                onClick={() => router.push("/console/agents/")}
               >
                 <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
                   <PlusIcon className="size-4" />

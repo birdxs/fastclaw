@@ -189,6 +189,9 @@ function SidebarProvider({
               ? `min(${width}px, max(${resizeMinWidth}px, calc(100vw - ${resizeViewportReserve}px)))`
               : `${width}px`,
             "--sidebar-width-icon": SIDEBAR_WIDTH_ICON,
+            // Room left of a left-side sidebar (e.g. an app rail); the
+            // fixed sidebar container starts after it.
+            "--sidebar-offset": "0px",
             ...style,
           } as React.CSSProperties
         }
@@ -286,7 +289,7 @@ function Sidebar({
         data-slot="sidebar-container"
         data-side={side}
         className={cn(
-          "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear in-data-[resizing=true]:transition-none data-[side=left]:left-0 data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-width)*-1)] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
+          "fixed inset-y-0 z-10 hidden h-svh w-(--sidebar-width) transition-[left,right,width] duration-200 ease-linear in-data-[resizing=true]:transition-none data-[side=left]:left-(--sidebar-offset) data-[side=left]:group-data-[collapsible=offcanvas]:left-[calc(var(--sidebar-offset)-var(--sidebar-width))] data-[side=right]:right-0 data-[side=right]:group-data-[collapsible=offcanvas]:right-[calc(var(--sidebar-width)*-1)] md:flex",
           // Adjust the padding for floating and inset variants.
           variant === "floating" || variant === "inset"
             ? "p-2 group-data-[collapsible=icon]:w-[calc(var(--sidebar-width-icon)+(--spacing(4))+2px)]"
@@ -342,7 +345,8 @@ function SidebarRail({
   const { toggleSidebar, setWidth, resetWidth, state } = useSidebar()
   const { tr } = useLocale()
   // Distinguish a drag (resize) from a click (toggle): the rail straddles the
-  // sidebar's right edge, so the new width is simply the pointer's X. Only an
+  // sidebar's right edge, so the new width is the pointer's X minus the
+  // sidebar's left edge. Only an
   // actual move counts as a resize; a clean click still toggles.
   const movedRef = React.useRef(false)
 
@@ -353,9 +357,13 @@ function SidebarRail({
     const wrapper = e.currentTarget.closest<HTMLElement>('[data-slot="sidebar-wrapper"]')
     wrapper?.setAttribute("data-resizing", "true")
     const startX = e.clientX
+    // The sidebar may not start at the viewport edge (--sidebar-offset),
+    // so measure the width from its own left edge.
+    const container = e.currentTarget.closest<HTMLElement>('[data-slot="sidebar-container"]')
+    const left = container?.getBoundingClientRect().left ?? 0
     const onMove = (ev: MouseEvent) => {
       if (Math.abs(ev.clientX - startX) > 3) movedRef.current = true
-      setWidth(ev.clientX)
+      setWidth(ev.clientX - left)
     }
     const onUp = () => {
       document.removeEventListener("mousemove", onMove)

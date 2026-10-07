@@ -1,8 +1,8 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import { ChevronDown, ChevronsLeft, ChevronsRight, ImagePlus, Plus, Search } from "lucide-react";
+import { useRouter, usePathname } from "next/navigation";
+import { Bot, Check, ChevronDown, ImagePlus, Plus, Search, UsersRound } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
@@ -12,7 +12,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
-  useSidebar,
+  useSidebarOptional,
 } from "@/components/ui/sidebar";
 import { Button } from "@/components/ui/button";
 import {
@@ -26,10 +26,20 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { BotAvatar } from "@/components/bot-avatar";
+import { TeamAvatarStack } from "@/components/team-avatar-stack";
 import { NavUser } from "@/components/nav-user";
+import { SidebarTitle } from "@/components/sidebar-title";
+import { ChatSearchDialog } from "@/components/chat-search-dialog";
 import { useLocale, type Locale } from "@/components/locale-provider";
-import { apiFetch, createAgent, type MeResponse } from "@/lib/api";
+import { agentChatHref, chatHref, rememberChatTarget } from "@/lib/chat-route";
+import { apiFetch, createAgent, updateConfig, getTeamInbox, type TeamInboxNotice, type MeResponse, type TeamEntry } from "@/lib/api";
 import { rememberAgentAccess } from "@/lib/agent-access-cache";
 
 export interface ConsumerAgentItem {
@@ -39,6 +49,14 @@ export interface ConsumerAgentItem {
   preview?: string;
   avatarUrl?: string;
   sessionId?: string;
+  updatedAt?: number;
+}
+
+export interface ConsumerTeamItem extends TeamEntry {
+  id: string;
+  name: string;
+  // Latest message in the group's most recent session.
+  preview?: string;
   updatedAt?: number;
 }
 
@@ -99,40 +117,94 @@ function relativeSessionTime(updatedAt: number | undefined, locale: Locale) {
   return date.toLocaleDateString(locale, { month: "short", day: "numeric" });
 }
 
+// Chat list rows: a small avatar on the name line, preview full width
+// underneath, flush with the avatar.
+const SIDEBAR_ROW_CLASS =
+  "h-auto rounded-lg px-2.5 py-2 data-active:font-normal hover:bg-black/[0.05] dark:hover:bg-white/[0.07]";
+
 export function ConsumerChatSidebar({
   activeAgentId,
+  activeTeamId,
   agents,
+  teams = [],
   loading = false,
   me,
 }: {
-  activeAgentId: string;
+  activeAgentId?: string;
+  activeTeamId?: string;
   agents: ConsumerAgentItem[];
+  teams?: ConsumerTeamItem[];
   loading?: boolean;
   me: MeResponse | null;
 }) {
   const router = useRouter();
-  const { state: sidebarState, toggleSidebar } = useSidebar();
+  const pathname = usePathname();
+  const [inbox, setInbox] = React.useState<TeamInboxNotice[]>([]);
+  React.useEffect(() => {
+    const uid = me?.user?.id;
+    if (!uid) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      try {
+        const { messages } = await getTeamInbox();
+        if (cancelled) return;
+        const unread = (messages || []).filter((notice) => {
+          const key = `fastclaw:group-inbox-read:${uid}:${notice.agentId}:${notice.sessionId}`;
+          if (pathname === chatHref(notice.sessionId) || pathname === `/agents/${encodeURIComponent(notice.agentId)}/chat/${encodeURIComponent(notice.sessionId)}/`) {
+            localStorage.setItem(key, String(Math.max(Number(localStorage.getItem(key) || 0), notice.timestamp)));
+            return false;
+          }
+          return notice.timestamp > Number(localStorage.getItem(key) || 0);
+        });
+        setInbox(unread);
+      } catch { /* Retry on the next poll. */ }
+      finally { if (!cancelled) timer = setTimeout(refresh, 3000); }
+    };
+    void refresh();
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [me?.user?.id, pathname]);
   const { locale, t, tr } = useLocale();
-  const [query, setQuery] = React.useState("");
+  const [searchOpen, setSearchOpen] = React.useState(false);
   const [visibleCount, setVisibleCount] = React.useState(AGENT_PAGE_SIZE);
   const [createOpen, setCreateOpen] = React.useState(false);
+  const [createTeamOpen, setCreateTeamOpen] = React.useState(false);
 
-  const filtered = React.useMemo(() => {
-    const q = query.trim().toLocaleLowerCase();
-    if (!q) return agents;
-    return agents.filter((agent) =>
-      `${agent.name} ${agent.description || ""} ${agent.preview || ""}`.toLocaleLowerCase().includes(q),
-    );
-  }, [query, agents]);
-  const visibleAgents = React.useMemo(
-    () => filtered.slice(0, visibleCount),
-    [filtered, visibleCount],
+  // ⌘K / Ctrl+K opens the search dialog.
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setSearchOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  const filtered = agents;
+  const filteredTeams = teams;
+  const entries = React.useMemo(
+    () => [
+      ...filteredTeams.map((team) => ({ kind: "team" as const, id: `team-${team.id}`, updatedAt: team.updatedAt || 0, team })),
+      ...agents.map((agent) => ({ kind: "agent" as const, id: agent.id, updatedAt: agent.updatedAt || 0, agent })),
+    ].sort((a, b) => b.updatedAt - a.updatedAt),
+    [agents, filteredTeams],
   );
-  const hasMoreAgents = visibleAgents.length < filtered.length;
+  const visibleEntries = React.useMemo(
+    () => entries.slice(0, visibleCount),
+    [entries, visibleCount],
+  );
+  const hasMoreAgents = visibleEntries.length < entries.length;
+  const unreadAgentIds = React.useMemo(() => new Set(inbox.map((notice) => notice.agentId)), [inbox]);
 
+  // On phones the list is a sheet over the chat; close it on selection.
+  const sidebar = useSidebarOptional();
   const openAgent = (agent: ConsumerAgentItem) => {
-    const base = `/agents/${encodeURIComponent(agent.id)}/chat/`;
-    const target = agent.sessionId ? `${base}${encodeURIComponent(agent.sessionId)}/` : base;
+    sidebar?.setOpenMobile(false);
+    const latestPrivate = inbox.filter((notice) => notice.agentId === agent.id).sort((a, b) => b.timestamp - a.timestamp)[0];
+    // No conversation yet: open a new session right away, like a group.
+    const target = agentChatHref(agent.id, latestPrivate?.sessionId || agent.sessionId);
     // This row came from the caller's authenticated agent list, so the access
     // gate can safely keep the current shell visible during the route swap.
     rememberAgentAccess(agent.id);
@@ -144,92 +216,172 @@ export function ConsumerChatSidebar({
     window.history.pushState(null, "", target);
   };
 
+  const openTeam = (team: ConsumerTeamItem) => {
+    sidebar?.setOpenMobile(false);
+    const sessionId = team.sessionId || `team-${team.id}`;
+    rememberAgentAccess(team.agents);
+    rememberChatTarget(sessionId, { kind: "team", teamId: team.id });
+    window.history.pushState(null, "", chatHref(sessionId));
+  };
+
+  // Groups and Agents share one list, newest activity first — a group
+  // isn't pinned above private chats.
+  const renderTeamRow = (team: ConsumerTeamItem) => {
+        const members = team.agents
+          .map((id) => agents.find((agent) => agent.id === id))
+          .filter((agent): agent is ConsumerAgentItem => !!agent);
+        const memberLabel = members.map((member) => member.name).join("、");
+        return (
+          <SidebarMenuItem key={`team-${team.id}`}>
+            <SidebarMenuButton
+              isActive={activeTeamId === team.id}
+              onClick={() => openTeam(team)}
+              tooltip={team.name}
+              className={SIDEBAR_ROW_CLASS + " data-active:bg-[#e9e3ec] dark:data-active:bg-[#3a303d]"}
+            >
+              <span className="grid min-w-0 flex-1 gap-1">
+                <span className="flex min-w-0 items-center gap-2">
+                  <TeamAvatarStack members={members} avatarUrl={team.avatarUrl} size={20} />
+                  <span className="min-w-0 truncate text-[15px] font-semibold leading-5 text-foreground">
+                    {team.name}
+                  </span>
+                  <span className="shrink-0 rounded-full bg-[#e8e1eb] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[#756878] dark:bg-white/10 dark:text-[#c9bdcc]">
+                    {tr("Group", "群聊")}
+                  </span>
+                  <span className="ml-auto shrink-0 text-[11px] font-normal text-muted-foreground/80">
+                    {relativeSessionTime(team.updatedAt, locale)}
+                  </span>
+                </span>
+                <span className="truncate text-[13px] font-normal leading-5 text-muted-foreground">
+                  {team.preview
+                    ? renderInlineMarkdown(team.preview)
+                    : memberLabel || tr("No Agents", "暂无 Agent")}
+                </span>
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        );
+      
+  };
+
+  const renderAgentRow = (agent: ConsumerAgentItem) => {
+        const active = !activeTeamId && activeAgentId === agent.id;
+        // Previews are the raw last reply, so fold multi-bubble split
+        // markers back into spaces.
+        const summary = (agent.preview || agent.description || t("sidebar.greeting", { name: agent.name }))
+          .replace(/\s*<\|split\|>\s*/g, " ");
+        const unreadCount = inbox.filter((notice) => notice.agentId === agent.id).length;
+        return (
+          <SidebarMenuItem key={agent.id}>
+            <SidebarMenuButton
+              isActive={active}
+              onClick={() => openAgent(agent)}
+              tooltip={agent.name}
+              className={SIDEBAR_ROW_CLASS + " data-active:bg-black/[0.075] dark:data-active:bg-white/[0.11]"}
+            >
+              <span className="grid min-w-0 flex-1 gap-1">
+                <span className="flex min-w-0 items-center gap-2">
+                  <BotAvatar
+                    agentId={agent.id}
+                    avatarUrl={agent.avatarUrl}
+                    seed={agent.id}
+                    size={20}
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[15px] font-semibold leading-5 text-foreground">
+                    {agent.name || t("sidebar.untitledBot")}
+                  </span>
+                  <span className="shrink-0 text-[11px] font-normal text-muted-foreground/80">
+                    {relativeSessionTime(agent.updatedAt, locale)}
+                  </span>
+                </span>
+                {/* Unread count sits at the end of the preview line, under
+                    the time, like a messaging app's chat list. */}
+                <span className="flex min-w-0 items-center gap-2">
+                  <span className="min-w-0 flex-1 truncate text-[13px] font-normal leading-5 text-muted-foreground">
+                    {renderInlineMarkdown(summary)}
+                  </span>
+                  {unreadCount > 0 && (
+                    <span
+                      aria-label={tr("{{count}} unread private messages", "{{count}} 条未读私信", { count: unreadCount })}
+                      className="inline-flex h-[18px] min-w-[18px] shrink-0 items-center justify-center rounded-full bg-red-500 px-1.5 text-[11px] font-medium tabular-nums leading-none text-white"
+                    >
+                      {unreadCount > 99 ? "99+" : unreadCount}
+                    </span>
+                  )}
+                </span>
+              </span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        );
+      
+  };
+
   return (
     <>
       <Sidebar
-        collapsible="icon"
+        collapsible="offcanvas"
         className="border-r border-black/8 bg-[#f7f7f7] dark:border-white/8 dark:bg-[#171717]"
       >
-      <SidebarHeader className="gap-2 px-2 pb-5 pt-0 group-data-[collapsible=icon]:px-2 group-data-[collapsible=icon]:pb-2">
-        <div className="-mx-2 flex h-14 items-center gap-2 px-2 group-data-[collapsible=icon]:justify-center">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/logo.png"
-            alt=""
-            width={36}
-            height={36}
-            draggable={false}
-            className="size-9 shrink-0 select-none object-contain group-data-[collapsible=icon]:hidden"
-          />
-          <span className="truncate text-[18px] font-bold tracking-[-0.025em] text-foreground group-data-[collapsible=icon]:hidden">
-            FastClaw
-          </span>
+      {/* Same header box as the Console / Admin sidebars (SidebarHeader's
+          p-2 + SidebarTitle); search and create sit right of the title.
+          56px title + 8px bottom puts the first row at 64px, level with the
+          AppRail's first area button (8 + 40 logo + 12 + 4 gap). */}
+      <SidebarHeader className="pt-0 pb-2">
+        <SidebarTitle
+          title={tr("Chat", "对话")}
+          className="group-data-[collapsible=icon]:justify-center"
+        >
           <button
             type="button"
-            onClick={toggleSidebar}
-            className="group/sidebar-toggle relative ml-auto inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:ml-0 group-data-[collapsible=icon]:size-10 dark:hover:bg-white/8"
-            aria-label={sidebarState === "collapsed" ? t("sidebar.expandContacts") : t("sidebar.collapseContacts")}
-            title={sidebarState === "collapsed" ? t("sidebar.expandContacts") : t("sidebar.collapseContacts")}
+            onClick={() => setSearchOpen(true)}
+            className="ml-auto inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:ml-0 group-data-[collapsible=icon]:size-10 dark:hover:bg-white/8"
+            aria-label={t("sidebar.searchBots")}
+            title={`${tr("Search", "搜索")} (${/Mac|iPhone|iPad/.test(typeof navigator === "undefined" ? "" : navigator.platform) ? "⌘K" : "Ctrl+K"})`}
           >
-            {sidebarState === "collapsed" ? (
-              <>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src="/logo.png"
-                  alt=""
-                  width={36}
-                  height={36}
-                  draggable={false}
-                  className="size-9 select-none object-contain transition-opacity group-hover/sidebar-toggle:opacity-0 group-focus-visible/sidebar-toggle:opacity-0"
-                />
-                <ChevronsRight className="absolute size-4 opacity-0 transition-opacity group-hover/sidebar-toggle:opacity-100 group-focus-visible/sidebar-toggle:opacity-100" />
-              </>
-            ) : (
-              <ChevronsLeft className="size-4" />
-            )}
+            <Search className="size-4" />
           </button>
-        </div>
-        <div className="flex items-center gap-1.5 group-data-[collapsible=icon]:hidden">
-          <div className="relative min-w-0 flex-1">
-            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-[15px] -translate-y-1/2 text-muted-foreground" />
-            <input
-              value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                setVisibleCount(AGENT_PAGE_SIZE);
-              }}
-              placeholder={t("sidebar.searchBots")}
-              aria-label={t("sidebar.searchBots")}
-              className="h-8 w-full rounded-md border border-black/7 bg-black/[0.035] pl-8 pr-2.5 text-sm outline-none transition focus:border-black/15 focus:bg-white focus:ring-2 focus:ring-black/5 dark:border-white/8 dark:bg-white/[0.055] dark:focus:border-white/15 dark:focus:bg-white/[0.08]"
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={
+                <button
+                  type="button"
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:hidden dark:hover:bg-white/8"
+                  aria-label={tr("Create", "新建")}
+                  title={tr("Create", "新建")}
+                >
+                  <Plus className="size-4" />
+                </button>
+              }
             />
-          </div>
-          <button
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            className="inline-flex size-8 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-white/8"
-            aria-label={t("sidebar.createBot")}
-            title={t("sidebar.createBot")}
-          >
-            <Plus className="size-4" />
-          </button>
-        </div>
+            <DropdownMenuContent align="end" sideOffset={7} className="w-52 rounded-xl p-1.5">
+              <DropdownMenuItem onClick={() => setCreateOpen(true)} className="h-10 gap-2 rounded-lg px-2.5">
+                <Bot className="size-4" />
+                {t("sidebar.createBot")}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setCreateTeamOpen(true)} className="h-10 gap-2 rounded-lg px-2.5">
+                <UsersRound className="size-4" />
+                {tr("Create group chat", "创建群聊")}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </SidebarTitle>
       </SidebarHeader>
 
       <SidebarContent
         aria-busy={loading}
-        className="px-1.5 pb-3 group-data-[collapsible=icon]:overflow-x-hidden! group-data-[collapsible=icon]:overflow-y-auto! group-data-[collapsible=icon]:px-2"
+        className="px-3 pb-3 group-data-[collapsible=icon]:overflow-x-hidden! group-data-[collapsible=icon]:overflow-y-auto! group-data-[collapsible=icon]:px-2"
       >
         <SidebarMenu className="gap-1 group-data-[collapsible=icon]:gap-2">
           {loading && filtered.length === 0 && (
             <>
               {[0, 1, 2].map((item) => (
                 <SidebarMenuItem key={`agent-loading-${item}`}>
-                  <div className="flex h-[58px] items-center gap-3 rounded-lg px-2.5 py-2 group-data-[collapsible=icon]:size-12! group-data-[collapsible=icon]:justify-center group-data-[collapsible=icon]:rounded-xl group-data-[collapsible=icon]:p-[7px]!">
-                    <div className="size-[34px] shrink-0 animate-pulse rounded-full bg-black/[0.075] motion-reduce:animate-none dark:bg-white/[0.1]" />
-                    <div className="min-w-0 flex-1 space-y-2 group-data-[collapsible=icon]:hidden">
+                  <div className="space-y-2 rounded-lg px-2.5 py-2.5">
+                    <div className="flex items-center gap-2">
+                      <div className="size-5 shrink-0 animate-pulse rounded-full bg-black/[0.075] motion-reduce:animate-none dark:bg-white/[0.1]" />
                       <div className="h-3 w-2/5 animate-pulse rounded-full bg-black/[0.08] motion-reduce:animate-none dark:bg-white/[0.11]" />
-                      <div className="h-2.5 w-4/5 animate-pulse rounded-full bg-black/[0.055] motion-reduce:animate-none dark:bg-white/[0.075]" />
                     </div>
+                    <div className="h-2.5 w-3/5 animate-pulse rounded-full bg-black/[0.055] motion-reduce:animate-none dark:bg-white/[0.075]" />
                   </div>
                 </SidebarMenuItem>
               ))}
@@ -238,40 +390,7 @@ export function ConsumerChatSidebar({
               </span>
             </>
           )}
-          {visibleAgents.map((agent) => {
-            const active = activeAgentId === agent.id;
-            const summary = agent.preview || agent.description || t("sidebar.greeting", { name: agent.name });
-            return (
-              <SidebarMenuItem key={agent.id}>
-                <SidebarMenuButton
-                  isActive={active}
-                  onClick={() => openAgent(agent)}
-                  tooltip={agent.name}
-                  className="h-[58px] gap-3 rounded-lg px-2.5 py-2 data-active:bg-black/[0.075] data-active:font-normal hover:bg-black/[0.05] group-data-[collapsible=icon]:size-12! group-data-[collapsible=icon]:rounded-xl group-data-[collapsible=icon]:p-[7px]! dark:data-active:bg-white/[0.11] dark:hover:bg-white/[0.07]"
-                >
-                  <BotAvatar
-                    agentId={agent.id}
-                    avatarUrl={agent.avatarUrl}
-                    seed={agent.id}
-                    size={34}
-                  />
-                  <span className="grid min-w-0 flex-1 gap-0.5 group-data-[collapsible=icon]:hidden">
-                    <span className="flex min-w-0 items-baseline justify-between gap-2">
-                      <span className="truncate text-[15px] font-semibold leading-5 text-foreground">
-                        {agent.name || t("sidebar.untitledBot")}
-                      </span>
-                      <span className="shrink-0 text-[11px] font-normal text-muted-foreground/80">
-                        {relativeSessionTime(agent.updatedAt, locale)}
-                      </span>
-                    </span>
-                    <span className="truncate text-[13px] font-normal leading-5 text-muted-foreground">
-                      {renderInlineMarkdown(summary)}
-                    </span>
-                  </span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            );
-          })}
+          {visibleEntries.map((entry) => entry.kind === "team" ? renderTeamRow(entry.team) : renderAgentRow(entry.agent))}
           {hasMoreAgents && (
             <SidebarMenuItem>
               <SidebarMenuButton
@@ -288,24 +407,39 @@ export function ConsumerChatSidebar({
           )}
         </SidebarMenu>
 
-        <button
-          type="button"
-          onClick={() => setCreateOpen(true)}
-          className="mx-auto mt-2 hidden size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:flex dark:hover:bg-white/8"
-          aria-label={t("sidebar.createBot")}
-          title={t("sidebar.createBot")}
-        >
-          <Plus className="size-4" />
-        </button>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <button
+                type="button"
+                className="mx-auto mt-2 hidden size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-black/5 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring group-data-[collapsible=icon]:flex dark:hover:bg-white/8"
+                aria-label={tr("Create", "新建")}
+                title={tr("Create", "新建")}
+              >
+                <Plus className="size-4" />
+              </button>
+            }
+          />
+          <DropdownMenuContent side="right" align="start" sideOffset={8} className="w-48 rounded-xl p-1.5">
+            <DropdownMenuItem onClick={() => setCreateOpen(true)} className="h-9 gap-2 rounded-lg px-2.5">
+              <Bot className="size-4" />
+              {t("sidebar.createBot")}
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => setCreateTeamOpen(true)} className="h-9 gap-2 rounded-lg px-2.5">
+              <UsersRound className="size-4" />
+              {tr("Create group chat", "创建群聊")}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
 
-        {!loading && filtered.length === 0 && (
+        {!loading && filtered.length === 0 && filteredTeams.length === 0 && (
           <div className="mx-2 mt-4 rounded-lg border border-dashed border-black/10 px-4 py-8 text-center group-data-[collapsible=icon]:hidden dark:border-white/10">
             <p className="text-sm font-medium">
-              {query ? t("sidebar.noMatches") : t("sidebar.noBots")}
+              {t("sidebar.noBots")}
             </p>
             <button
               type="button"
-              onClick={() => router.push("/agents/?manage=1")}
+              onClick={() => router.push("/console/agents/")}
               className="mt-2 text-sm text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
             >
               {t("sidebar.manageBots")}
@@ -314,22 +448,222 @@ export function ConsumerChatSidebar({
         )}
       </SidebarContent>
 
-      <SidebarFooter className="px-2 pb-3 pt-2 group-data-[collapsible=icon]:px-4">
+      {/* The account lives in the AppRail on desktop; the rail is hidden
+          on mobile, so the sheet keeps it here. */}
+      <SidebarFooter className="px-2 pb-3 pt-2 group-data-[collapsible=icon]:px-4 md:hidden">
         <NavUser
           name={me?.user?.displayName || me?.user?.username || tr("User", "用户")}
           subtitle={me?.user?.role || tr("user", "用户")}
         />
       </SidebarFooter>
-      <SidebarRail toggleOnClick={false} />
+      {/* Resize-only handle: nothing to drag once the list is collapsed,
+          and offcanvas would leave it peeking out past the app rail. */}
+      <SidebarRail toggleOnClick={false} className="group-data-[collapsible=offcanvas]:hidden!" />
       </Sidebar>
+      <ChatSearchDialog
+        open={searchOpen}
+        onOpenChange={setSearchOpen}
+        agents={agents}
+        teams={teams}
+        unreadAgentIds={unreadAgentIds}
+        onPickAgent={openAgent}
+        onPickTeam={openTeam}
+      />
       <CreateBotDialog
         open={createOpen}
         onOpenChange={setCreateOpen}
         onCreated={(agentId) => {
-          router.push(`/agents/${encodeURIComponent(agentId)}/chat/`);
+          router.push(agentChatHref(agentId));
+        }}
+      />
+      <CreateTeamDialog
+        open={createTeamOpen}
+        onOpenChange={setCreateTeamOpen}
+        agents={agents}
+        onCreated={(team) => {
+          window.dispatchEvent(new CustomEvent("fastclaw:teams-changed"));
+          openTeam(team);
         }}
       />
     </>
+  );
+}
+
+function CreateTeamDialog({
+  open,
+  onOpenChange,
+  agents,
+  onCreated,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  agents: ConsumerAgentItem[];
+  onCreated: (team: ConsumerTeamItem) => void;
+}) {
+  const { tr } = useLocale();
+  const [name, setName] = React.useState("");
+  const [query, setQuery] = React.useState("");
+  const [selected, setSelected] = React.useState<string[]>([]);
+  const [saving, setSaving] = React.useState(false);
+  const [error, setError] = React.useState("");
+
+  const reset = () => {
+    setName("");
+    setQuery("");
+    setSelected([]);
+    setSaving(false);
+    setError("");
+  };
+  const close = () => {
+    onOpenChange(false);
+    reset();
+  };
+  const visibleAgents = agents.filter((agent) =>
+    `${agent.name} ${agent.description || ""}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
+
+  const createTeam = async () => {
+    const teamName = name.trim();
+    if (!teamName || selected.length < 2 || saving) return;
+    setSaving(true);
+    setError("");
+    const id = `tm-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const sessionId = `tc-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const entry: TeamEntry = {
+      name: teamName,
+      agents: selected,
+      defaultAgent: selected[0],
+      sessionId,
+      groupBehavior: "coordinated",
+      createdAt: Date.now(),
+    };
+    try {
+      const response = await updateConfig({ teams: { [id]: entry } }, "user");
+      if (!response?.ok) {
+        setError(response?.error || tr("Failed to create group chat", "创建群聊失败"));
+        return;
+      }
+      close();
+      onCreated({ id, ...entry, name: teamName });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : tr("Failed to create group chat", "创建群聊失败"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (nextOpen) onOpenChange(true);
+        else close();
+      }}
+    >
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{tr("Create group chat", "创建群聊")}</DialogTitle>
+          <DialogDescription>
+            {tr(
+              "Choose at least two Agents. Mention one by name, or use @all when everyone should answer.",
+              "选择至少两个 Agent。对话中可以 @某个 Agent，或用 @all 让所有成员回复。",
+            )}
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4 py-1">
+          <div className="space-y-2">
+            <Label htmlFor="team-name">{tr("Group name", "群聊名称")}</Label>
+            <Input
+              id="team-name"
+              value={name}
+              onChange={(event) => {
+                setName(event.target.value);
+                setError("");
+              }}
+              placeholder={tr("Launch crew", "项目讨论组")}
+              autoFocus
+            />
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="team-agent-search">{tr("Members", "群成员")}</Label>
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                id="team-agent-search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={tr("Search Agents", "搜索 Agent")}
+                className="pl-9"
+              />
+            </div>
+            <div className="max-h-64 space-y-1 overflow-y-auto rounded-xl border p-1.5">
+              {visibleAgents.map((agent) => {
+                const checked = selected.includes(agent.id);
+                return (
+                  <button
+                    key={agent.id}
+                    type="button"
+                    onClick={() => {
+                      setSelected((current) => checked
+                        ? current.filter((id) => id !== agent.id)
+                        : [...current, agent.id]);
+                      setError("");
+                    }}
+                    className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-2 text-left transition ${
+                      checked ? "bg-[#eee9f0] dark:bg-[#342d36]" : "hover:bg-muted/70"
+                    }`}
+                  >
+                    <BotAvatar agentId={agent.id} avatarUrl={agent.avatarUrl} seed={agent.id} size={34} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-semibold">{agent.name}</span>
+                      {agent.description && (
+                        <span className="block truncate text-xs text-muted-foreground">{renderInlineMarkdown(agent.description, `team-${agent.id}`)}</span>
+                      )}
+                    </span>
+                    <span className={`flex size-5 items-center justify-center rounded-full border transition ${
+                      checked
+                        ? "border-[#79677f] bg-[#79677f] text-white"
+                        : "border-border text-transparent"
+                    }`}>
+                      <Check className="size-3" />
+                    </span>
+                  </button>
+                );
+              })}
+              {visibleAgents.length === 0 && (
+                <p className="px-3 py-8 text-center text-sm text-muted-foreground">
+                  {tr("No matching Agents", "没有匹配的 Agent")}
+                </p>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {tr("{{count}} selected", "已选择 {{count}} 个", { count: selected.length })}
+            </p>
+          </div>
+          {agents.length < 2 && (
+            <p className="text-sm text-amber-700 dark:text-amber-300">
+              {tr("Create at least two Agents before starting a group chat.", "至少创建两个 Agent 后才能发起群聊。")}
+            </p>
+          )}
+          {error && <p className="text-sm text-destructive">{error}</p>}
+        </div>
+
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={close}>
+            {tr("Cancel", "取消")}
+          </Button>
+          <Button
+            type="button"
+            onClick={() => void createTeam()}
+            disabled={!name.trim() || selected.length < 2 || saving}
+          >
+            {saving ? tr("Creating…", "正在创建…") : tr("Create group", "创建群聊")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

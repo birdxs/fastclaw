@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -11,16 +12,17 @@ import (
 	"github.com/fastclaw-ai/fastclaw/internal/agent"
 	"github.com/fastclaw-ai/fastclaw/internal/auth"
 	"github.com/fastclaw-ai/fastclaw/internal/bus"
+	"github.com/fastclaw-ai/fastclaw/internal/usage"
 )
 
 // chatCompletionRequest mirrors the OpenAI chat completion request.
 //
-// User is OpenAI's standard "end-user identifier" field. When the
-// request authenticates with an api_key, a non-empty value triggers
-// rebinding the request identity to a fastclaw app_user keyed on
-// (apikey_id, user) so sessions and agent_files partition per
-// end-user. Clients that prefer a header-only contract can use
-// X-Fastclaw-End-User instead — both arrive at the same code path.
+// User is OpenAI's standard "end-user identifier" field. On an api_key
+// request it names the app's end-user, exactly like the
+// X-Fastclaw-End-User header: the end-user is a data namespace only.
+// The agent is still resolved from the app; the end-user decides where
+// the session history, USER.md and personal memory live. It never
+// changes which agents the request may use.
 type chatCompletionRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
@@ -67,6 +69,14 @@ type chatCompletionRequest struct {
 	// breadcrumb. Use Images / ImageURLs (not Attachments) when you
 	// want the bytes shown directly to a vision model.
 	Attachments []attachmentRequest `json:"attachments,omitempty"`
+	// ProjectID optionally files the conversation under one of the
+	// agent's projects (in the caller's namespace) so it shares that
+	// project's workspace. Omit for a loose chat.
+	ProjectID string `json:"project_id,omitempty"`
+	// ReturnFiles "inline" adds each returned file's bytes as a data URL
+	// (small files only). Files the agent produced always come back in
+	// `files` with a download URL.
+	ReturnFiles string `json:"return_files,omitempty"`
 }
 
 // attachmentRequest is the wire form of a single attachment.
@@ -114,8 +124,90 @@ func (r chatCompletionRequest) inlineImageURLs() []string {
 }
 
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string         `json:"role"`
+	Content messageContent `json:"content"`
+}
+
+// messageContent is a chat message's content. Requests may send a plain
+// string or an array of parts, as OpenAI-compatible and Anthropic clients
+// do for images:
+//
+//	[{"type": "text", "text": "..."},
+//	 {"type": "image_url", "image_url": {"url": "https://… or data:…"}},
+//	 {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "…"}}]
+//
+// Text parts are joined; images are collected so the last user message's
+// images are treated like the `images` field. Responses always write the
+// content as a plain string.
+type messageContent struct {
+	Text   string
+	Images []string
+}
+
+func (c messageContent) MarshalJSON() ([]byte, error) { return json.Marshal(c.Text) }
+
+func (c *messageContent) UnmarshalJSON(data []byte) error {
+	*c = messageContent{}
+	trimmed := strings.TrimSpace(string(data))
+	if trimmed == "" || trimmed == "null" {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		return json.Unmarshal(data, &c.Text)
+	}
+	var parts []struct {
+		Type     string          `json:"type"`
+		Text     string          `json:"text"`
+		ImageURL json.RawMessage `json:"image_url"`
+		Source   *struct {
+			Type      string `json:"type"`
+			MediaType string `json:"media_type"`
+			Data      string `json:"data"`
+			URL       string `json:"url"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal(data, &parts); err != nil {
+		return fmt.Errorf("content must be a string or an array of parts: %w", err)
+	}
+	var texts []string
+	for _, p := range parts {
+		switch p.Type {
+		case "text", "input_text":
+			if p.Text != "" {
+				texts = append(texts, p.Text)
+			}
+		case "image_url", "input_image":
+			// image_url is {"url": "..."} (OpenAI) or a bare string.
+			var obj struct {
+				URL string `json:"url"`
+			}
+			var u string
+			if json.Unmarshal(p.ImageURL, &obj) == nil && obj.URL != "" {
+				u = obj.URL
+			} else {
+				_ = json.Unmarshal(p.ImageURL, &u)
+			}
+			if u != "" {
+				c.Images = append(c.Images, u)
+			}
+		case "image":
+			if p.Source == nil {
+				continue
+			}
+			switch {
+			case p.Source.Type == "base64" && p.Source.Data != "":
+				mt := p.Source.MediaType
+				if mt == "" {
+					mt = "image/png"
+				}
+				c.Images = append(c.Images, "data:"+mt+";base64,"+p.Source.Data)
+			case p.Source.URL != "":
+				c.Images = append(c.Images, p.Source.URL)
+			}
+		}
+	}
+	c.Text = strings.Join(texts, "\n\n")
+	return nil
 }
 
 // chatCompletionChunk is a single SSE chunk in streaming mode.
@@ -125,6 +217,16 @@ type chatCompletionChunk struct {
 	Created int64         `json:"created"`
 	Model   string        `json:"model"`
 	Choices []chunkChoice `json:"choices"`
+	// Usage and Files (FastClaw extension) ride on the final chunk: the
+	// turn's model usage and the files the agent produced.
+	Usage *completionUsage `json:"usage,omitempty"`
+	Files []turnFile       `json:"files,omitempty"`
+}
+
+// chunkExtras is what only the final chunk carries.
+type chunkExtras struct {
+	Usage *completionUsage
+	Files []turnFile
 }
 
 type chunkChoice struct {
@@ -146,6 +248,8 @@ type chatCompletionResponse struct {
 	Model   string             `json:"model"`
 	Choices []completionChoice `json:"choices"`
 	Usage   completionUsage    `json:"usage"`
+	// Files (FastClaw extension): files the agent produced this turn.
+	Files []turnFile `json:"files,omitempty"`
 }
 
 type completionChoice struct {
@@ -154,36 +258,58 @@ type completionChoice struct {
 	FinishReason string      `json:"finish_reason"`
 }
 
+// completionUsage is the turn's model usage: every model call the agent
+// made to answer, tool loops included. prompt_tokens follows OpenAI and
+// counts cached input too; the FastClaw fields split input into uncached
+// / cache read / cache write — what per-token prices differ on.
 type completionUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                  `json:"prompt_tokens"`
+	CompletionTokens    int                  `json:"completion_tokens"`
+	TotalTokens         int                  `json:"total_tokens"`
+	PromptTokensDetails *promptTokensDetails `json:"prompt_tokens_details,omitempty"`
+	InputTokens         int                  `json:"input_tokens"`
+	CacheReadTokens     int                  `json:"cache_read_tokens"`
+	CacheCreationTokens int                  `json:"cache_creation_tokens"`
+	ModelCalls          int                  `json:"model_calls"`
+}
+
+type promptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
+}
+
+func usageFromCollector(c *usage.Collector) completionUsage {
+	t, calls := c.Totals()
+	prompt := t.Input + t.CacheRead + t.CacheCreation
+	return completionUsage{
+		PromptTokens:        prompt,
+		CompletionTokens:    t.Output,
+		TotalTokens:         prompt + t.Output,
+		PromptTokensDetails: &promptTokensDetails{CachedTokens: t.CacheRead},
+		InputTokens:         t.Input,
+		CacheReadTokens:     t.CacheRead,
+		CacheCreationTokens: t.CacheCreation,
+		ModelCalls:          calls,
+	}
 }
 
 // HandleChatCompletions handles POST /v1/chat/completions.
 func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	var req chatCompletionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": "invalid request body", "type": "invalid_request_error"},
-		})
+		writeBadRequest(w, "invalid request body")
 		return
 	}
 
 	if len(req.Messages) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": "messages is required", "type": "invalid_request_error"},
-		})
+		writeBadRequest(w, "messages is required")
 		return
 	}
 
-	// OpenAI's `user` body field, when present on an api_key call,
-	// rebinds the identity to the corresponding app_user (lazy mint).
-	// Header X-Fastclaw-End-User does the same job pre-handler in the
-	// auth middleware; we run this *after* the middleware so the body
-	// value wins iff both are present (the body field is more
-	// specific to this call than a static header). Errors here are
-	// non-fatal — request continues under the unswitched identity.
+	// OpenAI's `user` body field names the end-user, like the
+	// X-Fastclaw-End-User header the auth middleware already applied.
+	// The body is more specific to this call, so it wins when both are
+	// present. Errors are non-fatal — the request continues in the
+	// app's own namespace.
 	if req.User != "" && s.authResolver != nil {
 		if ident, ok := auth.FromContext(r.Context()); ok {
 			if next, swErr := s.authResolver.SwitchToAppUser(r.Context(), ident, req.User); swErr == nil {
@@ -191,44 +317,37 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
-	// Resolve the caller's user space (set by authMiddleware) and pick an
-	// agent out of it.
-	space, err := s.userSpaceFor(r)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"error": map[string]string{"message": err.Error(), "type": "authentication_error"},
-		})
+	ident, ok := auth.FromContext(r.Context())
+	if !ok {
+		writeUnauth(w, "unauthorized")
 		return
+	}
+	// An account on billing hold (its balance ran out in an external
+	// billing system) can't start turns; say so in a machine-readable way.
+	if s.store != nil {
+		if hold, _, err := s.store.GetBillingHold(r.Context(), ident.AccountID()); err == nil && hold {
+			writeAPIError(w, http.StatusPaymentRequired, "billing_error", codePaymentRequired,
+				"this account is on billing hold; top up its balance to continue")
+			return
+		}
 	}
 
 	// Body field beats header — same precedence as `user`. Lets app
 	// callers send everything in one JSON without juggling headers.
-	agentID := r.Header.Get("x-fastclaw-agent-id")
+	agentID := strings.TrimSpace(r.Header.Get("x-fastclaw-agent-id"))
 	if req.AgentID != "" {
-		agentID = req.AgentID
+		agentID = strings.TrimSpace(req.AgentID)
 	}
-	ag := resolveAgent(space, agentID)
-	if ag == nil {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"error": map[string]string{"message": "agent not found", "type": "not_found_error"},
-		})
-		return
-	}
-	// Apikey ACL gate. UserSpaceFor loads every agent the owner has,
-	// regardless of which subset this particular apikey is scoped to.
-	// Without this check a type=agent apikey scoped to one agent
-	// could pass `x-fastclaw-agent-id: <sibling>` (or omit it and
-	// fall back to default / all[0]) and talk to any of the owner's
-	// agents. The /v1/agents listing already filters by
-	// CanAccessAgent — mirror that here so apikey scope is enforced
-	// uniformly. Use 404 (not 403) so the response is identical to
-	// the genuine "no such agent" case and the ACL doesn't leak the
-	// existence of out-of-scope agents.
-	if ident, ok := auth.FromContext(r.Context()); ok && !ident.CanAccessAgent(ag.Name()) {
-		writeJSON(w, http.StatusNotFound, map[string]any{
-			"error": map[string]string{"message": "agent not found", "type": "not_found_error"},
-		})
+	// Strict: a named agent that isn't in this app is a 404 — never a
+	// silent fallback to the default agent. Agents outside the api key's
+	// ACL get the same 404 so their existence isn't revealed.
+	ag, err := s.resolveChatAgent(r, agentID)
+	if err != nil {
+		if errors.Is(err, errAgentNotFound) {
+			writeAgentNotFound(w)
+			return
+		}
+		writeUnauth(w, err.Error())
 		return
 	}
 
@@ -238,18 +357,32 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		sessionKey = "api-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	}
 
-	// Extract the last user message
+	projectID := strings.TrimSpace(req.ProjectID)
+	if projectID != "" {
+		if s.store == nil {
+			writeAPIError(w, http.StatusNotFound, errTypeNotFound, codeProjectNotFound, "project not found")
+			return
+		}
+		if p, perr := s.store.GetProject(r.Context(), ident.EffectiveUserID(), ag.Name(), projectID); perr != nil || p == nil {
+			writeAPIError(w, http.StatusNotFound, errTypeNotFound, codeProjectNotFound, "project not found")
+			return
+		}
+	}
+
+	// Extract the last user message. Images in its content parts join
+	// the `images` field (workspace + vision).
 	var userText string
+	found := false
 	for i := len(req.Messages) - 1; i >= 0; i-- {
 		if req.Messages[i].Role == "user" {
-			userText = req.Messages[i].Content
+			userText = req.Messages[i].Content.Text
+			req.Images = append(req.Images, req.Messages[i].Content.Images...)
+			found = true
 			break
 		}
 	}
-	if userText == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"error": map[string]string{"message": "no user message found", "type": "invalid_request_error"},
-		})
+	if !found || (userText == "" && len(req.allAttachments()) == 0) {
+		writeBadRequest(w, "no user message found")
 		return
 	}
 
@@ -260,12 +393,13 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// probe" notes here actively backfire — models reflexively run
 	// which/ls/file to "verify" the path when the prompt foregrounds it.
 	// PhotoURLs is preserved so vision LLMs still see the image inline.
-	// API clients can't address a project today — chat completions only
-	// know session_key — so attachments always land in the loose-chat
-	// scope. When/if we expose project addressing here, look up the
-	// session row and pass its project_id instead of "".
+	// Attachments land in the project's workspace when the request names
+	// a project, otherwise in the loose-chat scope.
+	// Snapshot the conversation's workspace before this turn touches it,
+	// so the reply can return the files the agent produced.
+	wsBefore := s.snapshotWorkspace(r.Context(), ag.Name(), projectID, sessionKey)
 	atts := req.allAttachments()
-	attachmentPaths := ag.WriteSessionAttachments(r.Context(), sessionKey, "", atts)
+	attachmentPaths := ag.WriteSessionAttachments(r.Context(), sessionKey, projectID, atts)
 	if len(attachmentPaths) > 0 {
 		var b strings.Builder
 		for _, p := range attachmentPaths {
@@ -285,19 +419,28 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if channel == "" {
 		channel = "api"
 	}
+	// The chatter decides whose USER.md and personal memory the turn
+	// reads and writes. With an end-user it's that end-user's app_user;
+	// without one, every call shares the agent's own "api-user" memory.
+	chatter := "api-user"
+	if ident.EndUser != "" {
+		chatter = ident.EffectiveUserID()
+	}
 	msg := bus.InboundMessage{
 		Channel:   channel,
 		ChatID:    sessionKey,
-		UserID:    "api-user",
+		UserID:    chatter,
 		Text:      userText,
 		PeerKind:  "dm",
-		Params:    req.Params,
+		Params:    turnParams(req.Params),
 		PhotoURLs: req.inlineImageURLs(),
+		ProjectID: projectID,
 	}
 
 	slog.Info("chat completion request",
 		"agent", ag.Name(),
 		"session", sessionKey,
+		"end_user", ident.EndUser,
 		"stream", req.Stream != nil && *req.Stream,
 	)
 
@@ -308,17 +451,24 @@ func (s *Server) HandleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	chatID := fmt.Sprintf("chatcmpl-%d", time.Now().UnixNano())
 	now := time.Now().Unix()
 
+	// Sum every model call of this turn for the response's usage.
+	collector := &usage.Collector{}
+	r = r.WithContext(usage.WithCollector(r.Context(), collector))
+	inline := req.ReturnFiles == "inline"
+	files := func(reply string) []turnFile {
+		return s.turnFiles(r.Context(), r, ag.Name(), projectID, sessionKey, wsBefore, reply, attachmentPaths, inline)
+	}
 	isStream := req.Stream != nil && *req.Stream
 	if isStream {
-		s.streamResponseFromAgent(w, r, ag, msg, chatID, model, now)
+		s.streamResponseFromAgent(w, r, ag, msg, chatID, model, now, files, collector)
 	} else {
 		// Get reply from agent
 		reply := ag.HandleMessage(r.Context(), msg)
-		s.fullResponse(w, reply, chatID, model, now)
+		s.fullResponse(w, reply, chatID, model, now, files(reply), usageFromCollector(collector))
 	}
 }
 
-func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request, ag *agent.Agent, msg bus.InboundMessage, chatID, model string, created int64) {
+func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request, ag *agent.Agent, msg bus.InboundMessage, chatID, model string, created int64, files func(reply string) []turnFile, collector *usage.Collector) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -328,9 +478,10 @@ func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request,
 	flusher, ok := w.(http.Flusher)
 
 	sr := ag.HandleMessageStream(r.Context(), msg)
+	var reply strings.Builder
 
 	// Send role chunk
-	s.writeSSEChunk(w, chatID, model, created, "assistant", "", nil)
+	s.writeSSEChunk(w, chatID, model, created, "assistant", "", nil, nil)
 	if ok {
 		flusher.Flush()
 	}
@@ -339,7 +490,8 @@ func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request,
 	for {
 		chunk, more := sr.Next()
 		if chunk.Content != "" {
-			s.writeSSEChunk(w, chatID, model, created, "", chunk.Content, nil)
+			reply.WriteString(chunk.Content)
+			s.writeSSEChunk(w, chatID, model, created, "", chunk.Content, nil, nil)
 			if ok {
 				flusher.Flush()
 			}
@@ -351,14 +503,15 @@ func (s *Server) streamResponseFromAgent(w http.ResponseWriter, r *http.Request,
 
 	// Send finish chunk
 	done := "stop"
-	s.writeSSEChunk(w, chatID, model, created, "", "", &done)
+	u := usageFromCollector(collector)
+	s.writeSSEChunk(w, chatID, model, created, "", "", &done, &chunkExtras{Usage: &u, Files: files(reply.String())})
 	fmt.Fprint(w, "data: [DONE]\n\n")
 	if ok {
 		flusher.Flush()
 	}
 }
 
-func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created int64, role, content string, finishReason *string) {
+func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created int64, role, content string, finishReason *string, extras *chunkExtras) {
 	chunk := chatCompletionChunk{
 		ID:      id,
 		Object:  "chat.completion.chunk",
@@ -375,11 +528,15 @@ func (s *Server) writeSSEChunk(w http.ResponseWriter, id, model string, created 
 			},
 		},
 	}
+	if extras != nil {
+		chunk.Usage = extras.Usage
+		chunk.Files = extras.Files
+	}
 	data, _ := json.Marshal(chunk)
 	fmt.Fprintf(w, "data: %s\n\n", data)
 }
 
-func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string, created int64) {
+func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string, created int64, files []turnFile, u completionUsage) {
 	resp := chatCompletionResponse{
 		ID:      chatID,
 		Object:  "chat.completion",
@@ -388,36 +545,32 @@ func (s *Server) fullResponse(w http.ResponseWriter, reply, chatID, model string
 		Choices: []completionChoice{
 			{
 				Index:        0,
-				Message:      chatMessage{Role: "assistant", Content: reply},
+				Message:      chatMessage{Role: "assistant", Content: messageContent{Text: reply}},
 				FinishReason: "stop",
 			},
 		},
-		Usage: completionUsage{
-			PromptTokens:     0,
-			CompletionTokens: 0,
-			TotalTokens:      0,
-		},
+		Usage: u,
+		Files: files,
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// resolveAgent picks an agent out of the caller's user space, preferring an
-// explicit agent ID from the x-fastclaw-agent-id header and falling back to
-// the default / first agent.
-func resolveAgent(space *UserSpaceView, agentID string) *agent.Agent {
-	mgr := space.Agents
-	if agentID != "" {
-		if ag := mgr.AgentByID(agentID); ag != nil {
-			return ag
+// turnParams prepares the caller's params for the agent turn. A group
+// chat's `speaker` ({"id", "name"}) moves to the internal
+// __fastclawSpeaker key: the agent renders it as per-turn context so it
+// can tell group members apart, it is never persisted, and it isn't
+// echoed back as a tool parameter.
+func turnParams(params map[string]any) map[string]any {
+	speaker, ok := params["speaker"]
+	if !ok {
+		return params
+	}
+	out := make(map[string]any, len(params))
+	for k, v := range params {
+		if k != "speaker" {
+			out[k] = v
 		}
 	}
-	if def := mgr.DefaultAgent(); def != nil {
-		return def
-	}
-	all := mgr.All()
-	if len(all) > 0 {
-		return all[0]
-	}
-	return nil
+	out[agent.SpeakerParamKey] = speaker
+	return out
 }
-

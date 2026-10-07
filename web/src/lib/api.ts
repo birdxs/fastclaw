@@ -14,6 +14,8 @@ export interface StatusResponse {
   userId?: string;
   isAdmin?: boolean;
   users?: number;
+  // Every agent in the deployment; super_admin only.
+  totalAgents?: number;
 }
 
 export interface RegisterRequest {
@@ -127,6 +129,7 @@ export interface AgentDetail {
   soul?: string;
   skills?: string[];
   tools?: string[];
+  createdAt?: string;
 }
 
 export interface SkillEnvSpec {
@@ -263,6 +266,7 @@ export interface ConfigResponse {
     // first, falling back to the global entries map.
     agentEntries?: Record<string, Record<string, SkillEntryCfg>>;
   };
+  teams?: Record<string, TeamEntry>;
   // Presentation hints the dashboard needs to render inheritance state
   // without re-resolving the scope chain client-side. systemDefaultModel
   // is the value `agents.defaults.model` would resolve to from system
@@ -272,6 +276,20 @@ export interface ConfigResponse {
     systemDefaultModel?: string;
     serverTimezone?: string;
   };
+}
+
+export interface TeamEntry {
+  description?: string;
+  humanName?: string;
+  name?: string;
+  agents: string[];
+  defaultAgent?: string;
+  sessionId?: string;
+  groupBehavior?: string;
+  createdAt?: number;
+  // The group's own picture (a small image data URL); empty shows the
+  // members' avatars.
+  avatarUrl?: string;
 }
 
 // Auth token for cloud mode. Set via setAuthToken() on login; empty in local mode.
@@ -698,6 +716,14 @@ export interface WorkspaceFile {
   modTime: number;
 }
 
+// revealLogs opens the gateway's log directory in the operator's file
+// browser. Super_admin and self-hosted only.
+export async function revealLogs(): Promise<{ ok: boolean; path?: string; error?: string }> {
+  const res = await apiFetch("/api/admin/logs/reveal", { method: "POST" });
+  const data = await res.json().catch(() => ({}));
+  return res.ok ? { ok: true, path: data.path } : { ok: false, error: data.error || `HTTP ${res.status}` };
+}
+
 // revealAgentWorkspace opens the workspace folder for this scope in
 // the operator's native file browser (Finder/Explorer/xdg-open).
 // Self-hosted only — hosted deployments 403; the UI hides the
@@ -840,6 +866,7 @@ export interface ChatHistoryMessage {
   // attachments. The chat UI renders these as inline thumbnails on
   // bubbles loaded from history.
   imageUrls?: string[];
+  attachments?: Array<{ url: string; name: string }>;
   // Populated for user turns that arrived via an IM bridge (Discord,
   // Telegram, ...). The chat panel renders an avatar + nickname header
   // on each such bubble so the agent owner can see who they're looking
@@ -849,6 +876,20 @@ export interface ChatHistoryMessage {
   senderAvatarUrl?: string;
   senderId?: string;
   senderChannel?: string;
+  timestamp?: number;
+  groupTurnId?: string;
+  // A private message from another agent (message_agent) that started
+  // this turn; rendered as a "received privately from …" card.
+  privateFrom?: PrivateSource;
+}
+
+// PrivateSource is where a private message came from: a group chat that
+// sent it to the human, or another agent (with its original request).
+export interface PrivateSource {
+  kind: "group" | "agent";
+  id: string;
+  name: string;
+  content?: string;
 }
 
 export interface TodoItem {
@@ -924,6 +965,7 @@ export async function getChatHistoryWithCursor(
 }
 
 export interface ChatSessionEntry {
+  status?: "running" | "completed" | "stopped" | "failed";
   id: string;
   // channel/accountId/chatId let the sidebar render a per-channel icon
   // and the chats page tell apart "the same agent's wechat thread vs
@@ -1114,6 +1156,8 @@ export async function steerChat(
 
 export interface ToolResultMetadata {
   sandbox?: boolean;
+  // Assistant message delivered privately to the human from a group.
+  privateFrom?: PrivateSource;
   knowledgeSources?: KnowledgeSource[];
   // Stamped on the forced-final-delivery assistant message that the
   // backend emits when the per-turn tool-iteration cap was hit. Lets the
@@ -1164,6 +1208,7 @@ export interface ChatStreamEvent {
     name?: string;
     arguments?: string;
     result?: string;
+    code?: string;
     message?: string;
     metadata?: ToolResultMetadata;
     // subagent_progress payload — only populated when type === "subagent_progress".
@@ -1172,6 +1217,10 @@ export interface ChatStreamEvent {
     phase?: "thinking" | "running" | "final-delivery" | "done";
     tools?: string[];
   };
+}
+
+export interface TeamChatStreamEvent extends ChatStreamEvent {
+  agentId?: string;
 }
 
 export async function sendChatStream(
@@ -1269,6 +1318,126 @@ export async function sendChatStream(
   }
 }
 
+export interface TeamMessage {
+  id: string;
+  role: "user" | "agent" | "status" | "tool";
+  imageUrls?: string[];
+  attachments?: Array<{ url: string; name: string }>;
+  content: string;
+  timestamp: number;
+  agentId?: string;
+  groupTurnId?: string;
+  // Envelopes of private messages the member sent with this message; the
+  // body reaches only the recipient (or the human's direct chat).
+  deliveries?: TeamDelivery[];
+}
+
+export interface TeamDelivery {
+  id: string;
+  recipientId: string;
+  recipientName: string;
+  intent?: string;
+  session?: string;
+}
+
+export interface TeamTopic {
+  phase?: string;
+  phaseDetail?: { kind: string; name?: string; attempt?: number; total?: number };
+  rounds?: number;
+  limited?: boolean;
+  sessionId: string;
+  turnId?: string;
+  title: string;
+  // Latest message ("Name: text"); only on topic listings.
+  preview?: string;
+  status: "idle" | "running" | "completed" | "stopped" | "failed";
+  updatedAt: number;
+  activeAgents: string[];
+}
+
+export interface TeamRun extends TeamTopic { messages: TeamMessage[]; completeHistory?: boolean }
+
+async function teamRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await apiFetch(path, init);
+  const body = await response.json();
+  if (!response.ok) throw new Error(body.error || `Group request failed: ${response.status}`);
+  return body as T;
+}
+
+export function getTeamTopics(teamId: string) {
+  return teamRequest<{ topics: TeamTopic[] }>(`/api/chat/team/topics?${new URLSearchParams({ teamId })}`);
+}
+export async function getTeamRun(teamId: string, sessionId: string): Promise<{ run: TeamRun | null; deleted?: boolean }> {
+  const response = await apiFetch(`/api/chat/team/run?${new URLSearchParams({ teamId, sessionId })}`);
+  const body = await response.json();
+  if (response.status === 410 && body.code === "team_topic_deleted") return { run: null, deleted: true };
+  if (!response.ok) throw new Error(body.error || `Group request failed: ${response.status}`);
+  return body;
+}
+export function startTeamRun(teamId: string, sessionId: string, message: string, imageUrls: string[] = [], attachments: Array<{ url: string; name: string }> = []) {
+  return teamRequest<TeamRun>("/api/chat/team/run", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ teamId, sessionId, message, imageUrls, attachments }),
+  });
+}
+export function stopTeamRun(teamId: string, sessionId: string) {
+  return teamRequest<{ ok: boolean }>(`/api/chat/team/stop?${new URLSearchParams({ teamId, sessionId })}`, { method: "POST" });
+}
+
+// Team chat uses the same SSE event vocabulary as one-to-one chat, with
+// agentId on each member event so the UI can keep simultaneous identities
+// visually separate. The final team-level done event has no agentId.
+export async function sendTeamChatStream(
+  teamId: string,
+  sessionId: string,
+  members: Array<{ agentId: string; sessionId?: string }>,
+  message: string,
+  onEvent: (evt: TeamChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await apiFetch("/api/chat/team/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ teamId, sessionId, members, message }),
+    signal,
+  });
+  if (!res.ok) {
+    let msg = `team stream failed: ${res.status}`;
+    try {
+      const data = await res.json();
+      if (data?.error) msg = String(data.error);
+    } catch { /* keep the status fallback */ }
+    throw new Error(msg);
+  }
+  if (!res.body) throw new Error("team stream failed: no body");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let sawEvent = false;
+  let finished = false;
+  while (!finished) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      try {
+        const event = JSON.parse(line.slice(6)) as TeamChatStreamEvent;
+        sawEvent = true;
+        onEvent(event);
+        if (event.type === "done" && !event.agentId) finished = true;
+      } catch {
+        throw new Error("team stream failed: malformed event from server");
+      }
+    }
+  }
+  try { await reader.cancel(); } catch { /* ignore */ }
+  if (!sawEvent) throw new Error("team stream ended without a response");
+}
+
 export interface UploadedFile {
   path: string;
   size: number;
@@ -1278,10 +1447,16 @@ export async function uploadAgentFiles(
   agentId: string,
   sessionId: string,
   files: File[],
+  // projectId places the first upload of a new chat started in a project
+  // (the session doesn't exist yet, so the server can't look it up).
+  projectId?: string,
 ): Promise<UploadedFile[]> {
   const fd = new FormData();
   for (const f of files) fd.append("file", f, f.name);
-  const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
+  const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
+  if (projectId) params.set("projectId", projectId);
+  const qs = params.toString() ? `?${params}` : "";
   const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/files${qs}`, {
     method: "POST",
     body: fd,
@@ -1492,13 +1667,16 @@ export async function deleteAgent(id: string) {
 }
 
 // Skills
-export async function getSkills(): Promise<SkillInfo[]> {
-  const res = await apiFetch("/api/skills");
+// getSkills lists the global skills, or with scope "user" the caller's
+// own skills (loaded in all their conversations).
+export async function getSkills(scope?: "user"): Promise<SkillInfo[]> {
+  const res = await apiFetch(scope === "user" ? "/api/skills?scope=user" : "/api/skills");
   return res.json();
 }
 
-export async function deleteSkill(name: string) {
-  const res = await apiFetch(`/api/skills/${name}`, {
+export async function deleteSkill(name: string, scope?: "user") {
+  const qs = scope === "user" ? "?scope=user" : "";
+  const res = await apiFetch(`/api/skills/${encodeURIComponent(name)}${qs}`, {
     method: "DELETE",
   });
   return res.json();
@@ -1543,6 +1721,7 @@ export interface InstallSkillRequest {
   source?: "skillssh" | "clawhub" | "github" | "auto";
   repo?: string;
   agent?: string;  // omit for global install (admin only)
+  scope?: "user";  // install into the caller's own skills instead
 }
 
 export interface InstallSkillResponse {
@@ -1573,11 +1752,16 @@ export async function uploadSkill(
   file: File,
   agentId?: string,
   name?: string,
+  scope?: "user",
 ): Promise<InstallSkillResponse> {
   const fd = new FormData();
   fd.append("file", file, file.name);
   if (name) fd.append("name", name);
-  const qs = agentId ? `?agent=${encodeURIComponent(agentId)}` : "";
+  const qs = agentId
+    ? `?agent=${encodeURIComponent(agentId)}`
+    : scope === "user"
+      ? "?scope=user"
+      : "";
   const res = await apiFetch(`/api/skills/upload${qs}`, {
     method: "POST",
     body: fd,
@@ -1775,6 +1959,15 @@ export interface AgentChannel {
   enabled: boolean;
   sharedIdentity: boolean;
   updatedAt?: string;
+  // Pairing: an unpaired channel answers every message with a "not
+  // paired" notice until its binder sends `pairCommand` to the bot.
+  paired: boolean;
+  pairedName?: string;
+  // The paired account may act on the host (self-hosted, agent owner's
+  // own channel only).
+  hostAccess: boolean;
+  pairCommand?: string;       // outstanding "/pair XXXXXXXX", binder only
+  pairCodeExpiresAt?: string; // RFC3339
 }
 
 // AgentCronJob mirrors store.CronJobRecord. Returned by GET
@@ -1903,6 +2096,32 @@ export async function pollAgentWeChatLoginStatus(
   return res.json();
 }
 
+export type IMessageStatus = {
+  available: boolean;
+  fullDiskAccess?: boolean;
+  binaryPath?: string;
+  error?: string;
+};
+
+// iMessage is only offered when fastclaw runs on macOS and the caller is
+// a platform admin; the UI hides the card otherwise.
+export async function getAgentIMessageStatus(agentId: string): Promise<IMessageStatus> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/imessage/status`);
+  if (!res.ok) return { available: false };
+  return res.json();
+}
+
+export async function connectAgentIMessage(
+  agentId: string,
+): Promise<{ ok?: boolean; accountId?: string; error?: string; code?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/imessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
 export async function connectAgentLINE(
   agentId: string,
   channelToken: string,
@@ -1920,6 +2139,33 @@ export async function connectAgentLINE(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ channelToken, channelSecret }),
   });
+  return res.json();
+}
+
+export async function startAgentFeishuRegister(
+  agentId: string,
+): Promise<{ sessionId?: string; qrUrl?: string; interval?: number; expiresIn?: number; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/feishu/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function pollAgentFeishuRegisterStatus(
+  agentId: string,
+  sessionId: string,
+): Promise<{
+  status?: "pending" | "confirmed" | "denied" | "expired" | "error";
+  connected?: boolean;
+  appId?: string;
+  botName?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/feishu/register/status?session=${encodeURIComponent(sessionId)}`,
+  );
   return res.json();
 }
 
@@ -1953,6 +2199,72 @@ export async function connectAgentFeishu(
   return res.json();
 }
 
+export async function connectAgentWeCom(
+  agentId: string,
+  botId: string,
+  secret: string,
+): Promise<{ ok: boolean; botId?: string; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/wecom`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ botId, secret }),
+  });
+  return res.json();
+}
+
+export async function startAgentWeComRegister(
+  agentId: string,
+): Promise<{ sessionId?: string; qrUrl?: string; interval?: number; expiresIn?: number; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/wecom/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function pollAgentWeComRegisterStatus(
+  agentId: string,
+  sessionId: string,
+): Promise<{
+  status?: "pending" | "confirmed" | "expired" | "error";
+  connected?: boolean;
+  botId?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/wecom/register/status?session=${encodeURIComponent(sessionId)}`,
+  );
+  return res.json();
+}
+
+export async function startAgentWhatsAppLogin(
+  agentId: string,
+): Promise<{ sessionId?: string; qrCode?: string; status?: string; error?: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/channels/whatsapp/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  return res.json();
+}
+
+export async function pollAgentWhatsAppLoginStatus(
+  agentId: string,
+  sessionId: string,
+): Promise<{
+  status?: "wait" | "confirmed" | "expired" | "error";
+  connected?: boolean;
+  qrCode?: string;
+  accountId?: string;
+  error?: string;
+}> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/whatsapp/login/status?session=${encodeURIComponent(sessionId)}`,
+  );
+  return res.json();
+}
+
 export async function disconnectAgentChannel(
   agentId: string,
   type: string,
@@ -1960,6 +2272,30 @@ export async function disconnectAgentChannel(
 ): Promise<{ ok: boolean; error?: string }> {
   const res = await apiFetch(
     `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}`,
+    { method: "DELETE" },
+  );
+  return res.json();
+}
+
+export async function createChannelPairCode(
+  agentId: string,
+  type: string,
+  accountId: string,
+): Promise<{ code?: string; command?: string; expiresAt?: string; error?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}/pair-code`,
+    { method: "POST" },
+  );
+  return res.json();
+}
+
+export async function deleteChannelPairing(
+  agentId: string,
+  type: string,
+  accountId: string,
+): Promise<{ ok?: boolean; error?: string }> {
+  const res = await apiFetch(
+    `/api/agents/${agentId}/channels/${encodeURIComponent(type)}/${encodeURIComponent(accountId)}/pairing`,
     { method: "DELETE" },
   );
   return res.json();
@@ -2080,4 +2416,49 @@ export async function restoreSessionHistory(
     },
   );
   if (!res.ok) throw new Error(`restore failed: ${res.status}`);
+}
+
+// Folder-addressed history for the owner's agent-wide file view, where a
+// previewed file is known by its chat folder ("sessions/<chat>" or
+// "projects/<pid>/<chat>") rather than a session id.
+export async function getFolderHistory(
+  agentId: string,
+  dir: string,
+): Promise<WorkspaceHistoryEntry[]> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/workspace/history?dir=${encodeURIComponent(dir)}`,
+  );
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.history || []) as WorkspaceHistoryEntry[];
+}
+
+export async function restoreFolderHistory(
+  agentId: string,
+  dir: string,
+  commit: string,
+): Promise<void> {
+  const res = await apiFetch(
+    `/api/agents/${encodeURIComponent(agentId)}/workspace/history/restore`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dir, commit }),
+    },
+  );
+  if (!res.ok) throw new Error(`restore failed: ${res.status}`);
+}
+
+export function renameTeamTopic(teamId: string, sessionId: string, title: string) {
+  return teamRequest<{ ok: boolean }>(`/api/chat/team/topic?${new URLSearchParams({ teamId, sessionId })}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ title }),
+  });
+}
+export function deleteTeamTopic(teamId: string, sessionId: string) {
+  return teamRequest<{ ok: boolean }>(`/api/chat/team/topic?${new URLSearchParams({ teamId, sessionId })}`, { method: "DELETE" });
+}
+
+export interface TeamInboxNotice { id: string; agentId: string; sessionId: string; timestamp: number }
+export function getTeamInbox() {
+  return teamRequest<{ messages: TeamInboxNotice[] }>("/api/chat/team/inbox");
 }

@@ -657,28 +657,44 @@ func (r *Registry) deleteForPatchSandbox(ctx context.Context, ex sandbox.Executo
 
 func registerApplyPatch(r *Registry) {
 	r.Register("apply_patch", applyPatchDescription, applyPatchSchema, func(ctx context.Context, raw json.RawMessage) (string, error) {
+		r := r.forContext(ctx)
+
 		var args applyPatchArgs
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return "", fmt.Errorf("apply_patch: parse args: %w", err)
 		}
 		return runApplyPatch(ctx, args.Input,
-			func(ctx context.Context, p string) (string, error) { return r.readForPatch(ctx, p) },
-			func(ctx context.Context, p, c string) error { return r.writeForPatch(ctx, p, c) },
-			func(ctx context.Context, p string) error { return r.deleteForPatch(ctx, p) },
+			func(ctx context.Context, p string) (string, error) {
+				return r.readForPatch(ctx, p)
+			},
+			func(ctx context.Context, p, c string) error {
+				return r.writeForPatch(ctx, p, c)
+			},
+			func(ctx context.Context, p string) error {
+				return r.deleteForPatch(ctx, p)
+			},
 		)
 	})
 }
 
 func registerSandboxedApplyPatch(r *Registry, ex sandbox.Executor) {
 	r.Register("apply_patch", applyPatchDescription, applyPatchSchema, func(ctx context.Context, raw json.RawMessage) (string, error) {
+		r := r.forContext(ctx)
+
 		var args applyPatchArgs
 		if err := json.Unmarshal(raw, &args); err != nil {
 			return "", fmt.Errorf("apply_patch: parse args: %w", err)
 		}
 		out, err := runApplyPatch(ctx, args.Input,
-			func(ctx context.Context, p string) (string, error) { return r.readForPatchSandbox(ctx, ex, p) },
-			func(ctx context.Context, p, c string) error { return r.writeForPatchSandbox(ctx, ex, p, c) },
-			func(ctx context.Context, p string) error { return r.deleteForPatchSandbox(ctx, ex, p) },
+			func(ctx context.Context, p string) (string, error) {
+				return r.readForPatchSandbox(ctx, ex, p)
+			},
+			func(ctx context.Context, p, c string) error {
+				return r.writeForPatchSandbox(ctx, ex, p, c)
+			},
+			func(ctx context.Context, p string) error {
+				return r.deleteForPatchSandbox(ctx, ex, p)
+			},
 		)
 		if err != nil {
 			return "", err

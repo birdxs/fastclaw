@@ -293,7 +293,7 @@ func (p *OpenAIProvider) buildRequest(ctx context.Context, messages []Message, t
 	}
 
 	url := p.apiBase + "/chat/completions"
-	slog.Info("openai request", "url", url, "model", req.Model)
+	slog.Info("openai request", "url", url, "model", req.Model, "request_bytes", len(body))
 	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)

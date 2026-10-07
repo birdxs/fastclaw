@@ -6,8 +6,11 @@ const ASSETS: Record<string, string> = {
   discord: "/channels/discord.svg",
   slack: "/channels/slack.svg",
   line: "/channels/line.png",
+  imessage: "/channels/imessage.svg",
   feishu: "/channels/feishu.png",
   wechat: "/channels/wechat.svg",
+  wecom: "/channels/wecom.png",
+  whatsapp: "/channels/whatsapp.svg",
 };
 
 // ChannelIcon renders the per-channel brand mark next to a chat title.
@@ -39,6 +42,12 @@ export function ChannelIcon({
   );
 }
 
+// hasChannelIcon reports whether ChannelIcon renders anything, so callers
+// can skip the slot (and its spacing) for web / unknown channels.
+export function hasChannelIcon(channel?: string): boolean {
+  return Boolean(channel && ASSETS[channel]);
+}
+
 // channelLabel returns a human-readable name suitable for tooltips.
 export function channelLabel(channel?: string): string {
   switch (channel) {
@@ -48,12 +57,22 @@ export function channelLabel(channel?: string): string {
       return "WeChat";
     case "line":
       return "LINE";
+    case "imessage":
+      return "iMessage";
     case "discord":
       return "Discord";
     case "slack":
       return "Slack";
     case "feishu":
       return "Feishu";
+    case "wecom":
+      return "WeCom";
+    case "whatsapp":
+      return "WhatsApp";
+    case "api":
+      return "API";
+    case "acp":
+      return "ACP";
     case "web":
     case "":
     case undefined:

@@ -88,6 +88,13 @@ type InboundMessage struct {
 	// sessions by owner identity instead of by channel triple, so
 	// conversations are shared across all channels.
 	SharedIdentity bool
+	// FromChannelOwner is set by the gateway when the sender's
+	// platform-side ID matches the account paired to the receiving IM
+	// channel (channels.bound_user_id) — i.e. this is the person who
+	// connected the bot, not just anyone who found it. The agent combines
+	// it with "the channel's binder owns this agent" to decide whether
+	// the turn may touch the host.
+	FromChannelOwner bool
 }
 
 // SessionTriple returns the (channel, accountID, chatID) used for session

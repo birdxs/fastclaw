@@ -125,7 +125,7 @@ export default function OnboardPage() {
     let cancelled = false;
     getStatus()
       .then((s) => {
-        if (!cancelled && s?.configured) router.replace("/overview/");
+        if (!cancelled && s?.configured) router.replace("/console/");
       })
       .catch(() => {});
     return () => {
@@ -155,7 +155,7 @@ export default function OnboardPage() {
   const [testError, setTestError] = useState("");
 
   // Agent
-  const [agentName, setAgentName] = useState("default");
+  const [agentName, setAgentName] = useState("FastClaw");
 
   // Sandbox (optional — disabled by default; user can flip and configure)
   const [sandboxEnabled, setSandboxEnabled] = useState(false);
@@ -468,7 +468,7 @@ function WelcomeStep() {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 text-sm text-muted-foreground">
-        <p>{tr("You will become the super administrator when setup is complete. You can add more users from the admin panel later.", "初始化完成后，你将成为超级管理员，之后可从管理后台添加更多用户。")}</p>
+        <p>{tr("You will become the super administrator when setup is complete. You can add more users from System later.", "初始化完成后，你将成为超级管理员，之后可在「系统」中添加更多用户。")}</p>
         <p>
           {tr("All user-facing configuration, including providers, channels, agents, and settings, is stored in the database and can be changed in the UI later.", "提供商、渠道、Agent 和设置等用户配置都会存储在数据库中，之后可随时通过界面修改。")}
         </p>
@@ -658,15 +658,6 @@ function ProviderStep(props: {
         </div>
 
         <div className="space-y-1.5">
-          <Label>{tr("Default Model", "默认模型")}</Label>
-          <Input
-            value={props.model}
-            onChange={(e) => props.setModel(e.target.value)}
-            placeholder={preset?.models[0] || "model-id"}
-            className="font-mono text-sm"
-          />
-        </div>
-        <div className="space-y-1.5">
           <Label>{tr("API Base URL", "API 基础 URL")}</Label>
           <Input
             value={props.apiBase}
@@ -713,6 +704,16 @@ function ProviderStep(props: {
               </SelectContent>
             </Select>
           </div>
+        </div>
+
+        <div className="space-y-1.5">
+          <Label>{tr("Default Model", "默认模型")}</Label>
+          <Input
+            value={props.model}
+            onChange={(e) => props.setModel(e.target.value)}
+            placeholder={preset?.models[0] || "model-id"}
+            className="font-mono text-sm"
+          />
         </div>
 
         <div className="flex items-center gap-3 pt-2">
@@ -770,7 +771,7 @@ function AgentStep(props: {
             id="ob-agent"
             value={props.agentName}
             onChange={(e) => props.setAgentName(e.target.value)}
-            placeholder="default"
+            placeholder="FastClaw"
           />
           <p className="text-xs text-muted-foreground">
             {tr("The agent receives a globally unique ID (for example", "Agent 会获得全局唯一 ID（例如")} {" "}

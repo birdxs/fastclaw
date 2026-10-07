@@ -108,6 +108,8 @@ func makeExecTool(sbCfg *SandboxConfig) ToolFunc {
 // host shell.
 func makeExecToolFull(r *Registry, sbCfg *SandboxConfig, envProvider SkillEnvProvider, skillDirs []string) ToolFunc {
 	return func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+		r := r.forContext(ctx)
+
 		var args execArgs
 		if err := json.Unmarshal(rawArgs, &args); err != nil {
 			return "", fmt.Errorf("parse args: %w", err)
@@ -356,6 +358,8 @@ func registerHostExec(r *Registry, envProvider SkillEnvProvider, skillDirs []str
 			"required": []string{"command"},
 		},
 		func(ctx context.Context, rawArgs json.RawMessage) (string, error) {
+			r := r.forContext(ctx)
+
 			var args execArgs
 			if err := json.Unmarshal(rawArgs, &args); err != nil {
 				return "", fmt.Errorf("parse args: %w", err)

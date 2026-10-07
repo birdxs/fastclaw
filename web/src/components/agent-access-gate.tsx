@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { Bot } from "lucide-react";
 import { getAgentStatus } from "@/lib/api";
 import { useLocale } from "@/components/locale-provider";
+import { useChatRoute } from "@/lib/chat-route";
 import {
   hasRememberedAgentAccess,
   rememberAgentAccess,
@@ -20,7 +21,7 @@ function agentIdFromPath(pathname: string | null | undefined): string {
   if (!pathname) return "";
   // Match /agents/<id>(/...)? — strict on the prefix so we don't
   // accidentally pull an id off some other route.
-  const m = pathname.match(/^\/agents\/([^/]+)/);
+  const m = pathname.match(/^\/(?:console\/)?agents\/([^/]+)/);
   return m ? m[1] : "";
 }
 
@@ -45,7 +46,11 @@ export default function AgentAccessGate({
 }) {
   const { tr } = useLocale();
   const pathname = usePathname();
-  const agentId = agentIdFromPath(pathname);
+  const chatRoute = useChatRoute();
+  // /chat/<sessionId> doesn't name the agent; AppShell resolved it.
+  const agentId = chatRoute.status === "ready" && chatRoute.target.kind === "agent"
+    ? chatRoute.target.agentId
+    : agentIdFromPath(pathname);
   const [results, setResults] = useState<Partial<Record<string, "ok" | "denied">>>({});
   const state: "checking" | "ok" | "denied" =
     !agentId || agentId === "default" || hasRememberedAgentAccess(agentId)

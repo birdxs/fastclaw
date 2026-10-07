@@ -14,6 +14,7 @@ import { moveChatSessionToProject } from "@/lib/api";
 import { ChannelIcon, channelLabel } from "@/components/channel-icon";
 import { ChatRowActions } from "@/components/chat-row-actions";
 import { useLocale } from "@/components/locale-provider";
+import { chatHref, rememberChatTarget } from "@/lib/chat-route";
 
 // MIME type carried in dataTransfer for chat-session drags. Custom
 // type so we don't react to unrelated drops (text dragged in from
@@ -160,18 +161,22 @@ export function NavSessions({
               under their project in NavProjectsList instead, so the flat
               "Chats" section keeps showing only loose chats. */}
           {looseSessions.slice(0, MAX_SIDEBAR_SESSIONS).map((s) => {
-            const href = `${chatBase}${encodeURIComponent(s.id)}/`;
-            // Path form: /agents/<aid>/chat/<sid>/. Match exactly so a
-            // sibling chat doesn't light up just because pathname
-            // shares the chat base.
-            const active = pathname === href || pathname === href.replace(/\/$/, "");
+            const href = chatHref(s.id);
+            // Path form: /chat/<sid>/ (old /agents/<aid>/chat/<sid>/ links
+            // too). Match exactly so a sibling chat doesn't light up just
+            // because pathname shares the chat base.
+            const oldHref = `${chatBase}${encodeURIComponent(s.id)}/`;
+            const active = [href, oldHref].some((h) => pathname === h || pathname === h.replace(/\/$/, ""));
             return (
               <SessionRow
                 key={s.id}
                 agentId={agentId}
                 session={s}
                 active={active}
-                onOpen={() => navigateOnce(href)}
+                onOpen={() => {
+                  rememberChatTarget(s.id, { kind: "agent", agentId });
+                  navigateOnce(href);
+                }}
                 onChanged={broadcastChange}
               />
             );

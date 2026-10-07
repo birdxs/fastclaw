@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -974,6 +975,54 @@ func (s *Server) workspaceSessionScope(ctx context.Context, agentID, urlToken st
 	return chatID
 }
 
+// newWebSessionKey matches the session ids the web client mints for a new
+// chat (`s-<unix ms>-<base36>`).
+var newWebSessionKey = regexp.MustCompile(`^s-[0-9]+-[a-z0-9]+$`)
+
+// newChatUploadScope places an upload for a chat that doesn't exist yet,
+// mirroring what the chat request will create: a new web session's chat id
+// is its session key (Agent.recoverWebTriple), and a new chat started in a
+// project lives in that project. Only for unclaimed web session keys — a
+// key some session of this agent already uses (any user's) gets no scope —
+// and only for the caller's own projects.
+func (s *Server) newChatUploadScope(r *http.Request, agentID, sessionKey, projectID string) (sessionID, projectOut string) {
+	if s.dataStore == nil || !newWebSessionKey.MatchString(sessionKey) {
+		return "", ""
+	}
+	if _, err := s.dataStore.LookupSessionOwner(r.Context(), agentID, sessionKey); !errors.Is(err, store.ErrNotFound) {
+		return "", ""
+	}
+	if projectID != "" {
+		ident, ok := auth.FromContext(r.Context())
+		if !ok || ident.EffectiveUserID() == "" {
+			return "", ""
+		}
+		if p, err := s.dataStore.GetProject(r.Context(), ident.EffectiveUserID(), agentID, projectID); err != nil || p == nil {
+			return "", ""
+		}
+		return "", projectID
+	}
+	return sessionKey, ""
+}
+
+// foreignSessionChatID resolves a session_key to its chat_id under the
+// session's own user. Only for callers already verified to own the agent.
+func (s *Server) foreignSessionChatID(ctx context.Context, agentID, sessionKey string) string {
+	tok := strings.TrimSpace(sessionKey)
+	if tok == "" || s.dataStore == nil {
+		return ""
+	}
+	owner, err := s.dataStore.LookupSessionOwner(ctx, agentID, tok)
+	if err != nil || owner == "" {
+		return ""
+	}
+	_, _, chatID, err := s.dataStore.LookupSessionTriple(ctx, owner, agentID, tok)
+	if err != nil {
+		return ""
+	}
+	return chatID
+}
+
 func (s *Server) handleAgentFileList(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if s.workspaceStore == nil {
@@ -1099,6 +1148,12 @@ func (s *Server) fileScopeForRequest(r *http.Request, agentID string) fileScope 
 		return rejectAllScope()
 	}
 	chatID := s.workspaceSessionScope(r.Context(), agentID, rawSession)
+	if chatID == "" && s.callerOwnsAgent(r, agentID) {
+		// The agent's owner may read any conversation of their agent —
+		// e.g. one an app's end-user had over the API, which lives under
+		// that end-user's user_id. Resolve it under its real owner.
+		chatID = s.foreignSessionChatID(r.Context(), agentID, rawSession)
+	}
 	if chatID == "" {
 		// sessionId didn't resolve to a chat THIS caller owns — either
 		// it doesn't exist or it belongs to another user. Either way,
@@ -1255,21 +1310,10 @@ func (s *Server) handleAgentWorkspaceReveal(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	rawSession := r.URL.Query().Get("sessionId")
-	rawProject := r.URL.Query().Get("projectId")
-
-	// Resolve to the same (project, chatID) the chat-side panel is
-	// scoped to. Empty rawSession + non-empty projectId means project
-	// landing — reveal the project root. Empty both means agent root
-	// (admin browser); we still allow it because requireAgentReadable
-	// has already gated access.
-	chatID := ""
-	projectID := rawProject
-	if rawSession != "" {
-		chatID = s.workspaceSessionScope(r.Context(), id, rawSession)
-		if pid := s.resolveSessionProject(r.Context(), r, id, rawSession); pid != "" {
-			projectID = pid
-		}
+	projectID, chatID, ok := s.workspaceFolderScope(r, id, r.URL.Query().Get("sessionId"), r.URL.Query().Get("projectId"))
+	if !ok {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+		return
 	}
 
 	dir, ok := scoper.LocalScopeDir(id, projectID, chatID)
@@ -1291,6 +1335,39 @@ func (s *Server) handleAgentWorkspaceReveal(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "path": dir})
+}
+
+// workspaceFolderScope resolves the (project, chat) folder a request's
+// sessionId / projectId refer to, the same way fileScopeForRequest scopes
+// the file list and zip, so "open folder" and version history act on
+// exactly the files the panel lists:
+//   - projectId alone: the project root (project landing page);
+//   - sessionId: that chat's folder — the caller's own session, or for the
+//     agent's owner any session of the agent (e.g. an API end-user's);
+//   - neither: the agent root, for the owner only.
+//
+// A session that doesn't resolve reports !ok rather than widening to the
+// agent root.
+func (s *Server) workspaceFolderScope(r *http.Request, agentID, rawSession, rawProject string) (projectID, chatID string, ok bool) {
+	if rawSession == "" {
+		if rawProject != "" {
+			return rawProject, "", true
+		}
+		return "", "", s.callerOwnsAgent(r, agentID)
+	}
+	if chatID = s.workspaceSessionScope(r.Context(), agentID, rawSession); chatID != "" {
+		return s.resolveSessionProject(r.Context(), r, agentID, rawSession), chatID, true
+	}
+	if !s.callerOwnsAgent(r, agentID) || s.dataStore == nil {
+		return "", "", false
+	}
+	if chatID = s.foreignSessionChatID(r.Context(), agentID, rawSession); chatID == "" {
+		return "", "", false
+	}
+	if owner, err := s.dataStore.LookupSessionOwner(r.Context(), agentID, rawSession); err == nil {
+		projectID, _ = s.dataStore.LookupSessionProject(r.Context(), owner, agentID, rawSession)
+	}
+	return projectID, chatID, true
 }
 
 // openInFileBrowser shells out to the platform-appropriate "open"
@@ -1436,6 +1513,11 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 	sessionKey := r.URL.Query().Get("sessionId")
 	sessionID := s.workspaceSessionScope(r.Context(), id, sessionKey)
 	projectID := s.resolveSessionProject(r.Context(), r, id, sessionKey)
+	if sessionID == "" && projectID == "" {
+		// The first message of a new chat uploads before the chat request
+		// creates the session; land the files where that chat will look.
+		sessionID, projectID = s.newChatUploadScope(r, id, sessionKey, r.URL.Query().Get("projectId"))
+	}
 	if projectID != "" {
 		// Project sessions don't use the per-chat subdir — clear it so
 		// the workspace store routes to projects/<pid>/.

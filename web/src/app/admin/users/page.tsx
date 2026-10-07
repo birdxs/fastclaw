@@ -81,7 +81,9 @@ export default function AdminUsersPage() {
   async function refresh() {
     setError("");
     const res = await adminListUsers();
-    if (res.users) setUsers(res.users);
+    // Only platform members: channel_user / app_user accounts are minted
+    // per IM sender or API caller and can't sign in here.
+    if (res.users) setUsers(res.users.filter((u: UserRow) => u.role === "super_admin" || u.role === "user"));
     if (res.error) setError(res.error);
   }
   useEffect(() => {

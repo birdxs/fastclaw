@@ -63,6 +63,10 @@ type Session struct {
 	// pending steer.
 	turnDepth int
 	steerBuf  []provider.Message
+	// turnTrusted is set while an in-flight turn runs with host access
+	// (MarkTurnTrusted). Steering from an untrusted sender is then
+	// refused so a group member can't inject into the owner's turn.
+	turnTrusted bool
 }
 
 // SessionKey returns the opaque session_key this Session is bound to.
@@ -527,6 +531,9 @@ func (s *Session) EndTurn() []provider.Message {
 	if s.turnDepth > 0 {
 		s.turnDepth--
 	}
+	if s.turnDepth == 0 {
+		s.turnTrusted = false
+	}
 	if s.turnDepth > 0 || len(s.steerBuf) == 0 {
 		return nil
 	}
@@ -544,6 +551,29 @@ func (s *Session) PushSteerIfActive(msg provider.Message) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.turnDepth == 0 {
+		return false
+	}
+	s.steerBuf = append(s.steerBuf, msg)
+	return true
+}
+
+// MarkTurnTrusted flags the in-flight turn as running with host access.
+// Call right after BeginTurn; cleared when the last turn ends.
+func (s *Session) MarkTurnTrusted() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnDepth > 0 {
+		s.turnTrusted = true
+	}
+}
+
+// PushSteerIfActiveFrom is PushSteerIfActive for a sender whose trust
+// level is known: an untrusted sender is not folded into a trusted turn
+// (returns false, so the caller queues it as its own turn instead).
+func (s *Session) PushSteerIfActiveFrom(msg provider.Message, trusted bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.turnDepth == 0 || (s.turnTrusted && !trusted) {
 		return false
 	}
 	s.steerBuf = append(s.steerBuf, msg)
@@ -673,6 +703,7 @@ func (s *Session) appendToFile(msg provider.Message) {
 // pointing at a chat_id still resolve via the agent-side fallback
 // (ResolveSessionKey) so existing bookmarks don't break.
 type WebSession struct {
+	Status    string `json:"status,omitempty"`
 	ID        string `json:"id"`
 	Channel   string `json:"channel,omitempty"`
 	AccountID string `json:"accountId,omitempty"`
@@ -731,6 +762,7 @@ func (m *Manager) ListWebSessions() []WebSession {
 		// Read the first user message as the conversation preview, while also
 		// tracking the latest user-visible message for contact-list summaries.
 		preview := ""
+		assistantPreview := ""
 		thumb := ""
 		lastMessage := ""
 		var lastMessageAt int64
@@ -795,9 +827,17 @@ func (m *Manager) ListWebSessions() []WebSession {
 				preview = messagePreview
 				thumb = img
 			}
+			if msg.Role == "assistant" && assistantPreview == "" {
+				assistantPreview = messagePreview
+			}
 		}
 		fh.Close()
 
+		if preview == "" {
+			// Agent-initiated sessions (a group chat's private message)
+			// have no user turn; list them by their first reply.
+			preview = assistantPreview
+		}
 		if preview == "" {
 			continue // skip empty sessions
 		}

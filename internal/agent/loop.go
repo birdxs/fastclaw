@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/codeany-ai/open-agent-sdk-go/costtracker"
@@ -59,7 +60,12 @@ type Agent struct {
 	homePath      string // agent's home: SOUL.md, sessions, memory, skills
 	workspacePath string // working dir where agent creates user files
 	homeDir       string // FastClaw root, ~/.fastclaw
-	ownerUserID   string // the user that owns this agent (for hook namespacing)
+	ownerUserID   string // the UserSpace user the agent runs for (hook / data namespacing)
+	// agentOwnerID is agents.user_id — the account that actually owns the
+	// agent. It differs from ownerUserID whenever the agent runs in another
+	// user's space (an app's end-user, a public-link visitor, an admin
+	// browsing). Owner/operator trust is decided against it.
+	agentOwnerID string
 	// admins is the per-channel allowlist of chatters who can run write-
 	// mode slash commands (/new /undo /retry /compact /model /personality).
 	// Keyed by channel name (e.g. "discord" → ["123...", "456..."]). Empty
@@ -79,7 +85,8 @@ type Agent struct {
 	// to the LLM (see renderChannelHints) AND stamps
 	// OutboundMessage.AllowSplit so the dispatcher splits the reply at
 	// the marker before handing each chunk to the channel adapter.
-	// Per-agent only — there's no system-level fallback.
+	// Per-agent only — there's no system-level fallback. On unless the
+	// agent explicitly opts out (see splitRepliesEnabled).
 	splitReplies bool
 	// memoryStore is the optional Store-backed source of identity files
 	// (SOUL.md, IDENTITY.md, ...). Kept on the Agent so ReloadWorkspaceFiles
@@ -104,6 +111,7 @@ type Agent struct {
 	workspaceStore workspace.Store
 	skillsLearner  *SkillsLearner
 	turnCount      int
+	turnCounter    *atomic.Int64
 	engine         *sdkEngine
 	costTracker    *costtracker.Tracker
 	agentID        string
@@ -185,9 +193,8 @@ func (a *Agent) SetSandboxPool(p sandbox.ExecutorPool) {
 // can stamp it onto persisted rows for later replay. Called at the top
 // of HandleMessage / HandleMessageStream before any tool runs.
 //
-// Mutating the shared registry across concurrent chats would race, but
-// the current invariant is one chat-in-flight per agent — the gateway
-// serializes per-agent turns. Documenting it here in case that changes.
+// HandleMessage and HandleMessageStream fork the registry before binding,
+// so concurrent topics never mutate each other's tool or workspace scope.
 func (a *Agent) bindSession(ctx context.Context, channel, accountID, sessionID, projectID string) {
 	a.registry.SetSessionID(sessionID)
 	a.registry.SetProjectID(projectID)
@@ -372,6 +379,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 
 	ag := &Agent{
 		name:                 rc.ID,
+		turnCounter:          &atomic.Int64{},
 		provider:             prov,
 		registry:             registry,
 		sessions:             session.NewManager(rc.Home + "/sessions"),
@@ -399,16 +407,14 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	// Multi-bubble split-replies: per-agent only — system-level toggle
 	// was removed since "every agent splits the same way" is rarely
 	// what an operator wants for a deployment running multiple personas.
-	// nil override = off (default); non-nil = explicit value. Plumbed at
+	// nil override = on (default); non-nil = explicit value. Plumbed at
 	// this layer (not just NewAgentWithFullCfg) so foreign-attached
 	// agents — chatters reaching an agent they don't own via a channel
 	// binding — also pick up the toggle. Without this the wechat
 	// dispatcher hint never reaches the LLM for non-owner chatters and
 	// the model falls back to markdown `---` separators that render as
 	// one bubble.
-	if rc.SplitReplies != nil {
-		ag.splitReplies = *rc.SplitReplies
-	}
+	ag.splitReplies = splitRepliesEnabled(rc.SplitReplies)
 	// Stamp the operator-given display name onto the context builder
 	// so an empty IDENTITY.md doesn't leak the base-model identity
 	// ("I am Claude") through to chatters — the system prompt's
@@ -599,12 +605,12 @@ func (a *Agent) SteerWeb(sessionId, projectIDHint, text string) bool {
 // turn is active so the caller falls back to taskQueue.Submit.
 func (a *Agent) SteerInbound(msg bus.InboundMessage, text string) bool {
 	sess := a.sessions.Get(sessionTriple(msg, msg.ProjectID))
-	return sess.PushSteerIfActive(provider.Message{
+	return sess.PushSteerIfActiveFrom(provider.Message{
 		Role:      "user",
 		Content:   text,
 		Metadata:  senderMetadata(msg),
 		Timestamp: time.Now().UnixMilli(),
-	})
+	}, a.isTrustedTurn(msg))
 }
 
 // recoverWebTriple maps a URL `?session=` token (which can be a
@@ -698,6 +704,19 @@ func (a *Agent) SetOwnerUserID(uid string) {
 	a.ownerUserID = uid
 }
 
+// SetAgentOwnerID records agents.user_id, the account that owns the agent.
+func (a *Agent) SetAgentOwnerID(uid string) { a.agentOwnerID = uid }
+
+// trustOwnerID is the user treated as the agent's owner for operator
+// trust: the real owner, or — on legacy installs without one — the
+// UserSpace user.
+func (a *Agent) trustOwnerID() string {
+	if a.agentOwnerID != "" {
+		return a.agentOwnerID
+	}
+	return a.ownerUserID
+}
+
 // OwnerUserID returns the agent's owning user ID — the user that
 // created / owns this agent. Exposed so callers that mint records
 // on the user's behalf (e.g. /goal slash) can stamp ownership
@@ -717,6 +736,16 @@ func (a *Agent) SetQuotaStore(qs usage.QuotaStore) { a.quotaStore = qs }
 // owner has exceeded their billing quota. Returns "" when the request
 // should proceed (no quota, unlimited, or still under limit).
 func (a *Agent) checkQuota(ctx context.Context) string {
+	// Billing hold: an external billing system (e.g. a hosted FastClaw
+	// Cloud) can hold the account that pays for this agent — its real
+	// owner — when its balance runs out. Every channel stops here.
+	if a.dataStore != nil {
+		// The hold's reason is the billing system's note; chatters only
+		// get the generic message.
+		if hold, _, err := a.dataStore.GetBillingHold(ctx, a.trustOwnerID()); err == nil && hold {
+			return "Sorry, this service is paused because the account's balance is used up. Please contact your service provider."
+		}
+	}
 	if a.quotaStore == nil || a.meter == nil {
 		return ""
 	}
@@ -739,16 +768,18 @@ func (a *Agent) checkQuota(ctx context.Context) string {
 // durationMs is the wall-clock time of the LLM call; pass 0 when not
 // measured (the daily bucket doesn't use it, only the log table).
 func (a *Agent) meterTokens(ctx context.Context, sessionKey string, u provider.Usage, durationMs int64) {
-	if a.meter == nil {
-		return
-	}
-	prov, mdl := provider.SplitProviderModel(a.model)
 	t := usage.Tokens{
 		Input:         u.InputTokens,
 		Output:        u.OutputTokens,
 		CacheRead:     u.CacheReadTokens,
 		CacheCreation: u.CacheCreationTokens,
 	}
+	// The API reports a turn's usage in its response.
+	usage.CollectorFrom(ctx).Add(t)
+	if a.meter == nil {
+		return
+	}
+	prov, mdl := provider.SplitProviderModel(a.model)
 	if err := a.meter.RecordTokens(ctx, a.ownerUserID, a.agentID, sessionKey, prov, mdl, t); err != nil {
 		slog.Warn("meter record failed", "agent", a.name, "error", err)
 	}
@@ -1054,7 +1085,11 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 	sess := a.sessions.GetByKey(resolved)
 	msgs := sess.ArchivedMessages()
 	var history []map[string]any
+	var groupTurnID string
 	for _, m := range msgs {
+		if value, ok := m.Metadata["groupTurnId"].(string); ok && value != "" {
+			groupTurnID = value
+		}
 		// Hide runtime-injected messages (currently only goal_context
 		// continuations). They live in the session for the LLM's
 		// benefit; surfacing them to the user would expose audit
@@ -1094,6 +1129,9 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 				continue
 			}
 			entry := map[string]any{"role": "user", "content": text}
+			if m.Timestamp > 0 {
+				entry["timestamp"] = m.Timestamp
+			}
 			if len(imageURLs) > 0 {
 				entry["imageUrls"] = imageURLs
 			}
@@ -1109,9 +1147,21 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 					entry["senderChannel"] = v
 				}
 			}
+			if value, ok := m.Metadata["groupTurnId"].(string); ok && value != "" {
+				entry["groupTurnId"] = value
+			}
+			if from, ok := m.Metadata["privateFrom"].(map[string]any); ok {
+				entry["privateFrom"] = from
+			}
 			history = append(history, entry)
 		case "assistant":
 			entry := map[string]any{"role": "assistant"}
+			if groupTurnID != "" {
+				entry["groupTurnId"] = groupTurnID
+			}
+			if m.Timestamp > 0 {
+				entry["timestamp"] = m.Timestamp
+			}
 			if m.Content != "" {
 				entry["content"] = m.Content
 			}
@@ -1143,6 +1193,9 @@ func (a *Agent) WebChatHistory(sessionId string) []map[string]any {
 				"content":    m.Content,
 				"name":       m.Name,
 				"toolCallId": m.ToolCallID,
+			}
+			if m.Timestamp > 0 {
+				entry["timestamp"] = m.Timestamp
 			}
 			if len(m.Metadata) > 0 {
 				entry["metadata"] = m.Metadata
@@ -1336,10 +1389,17 @@ func filepathDir(p string) string {
 // LLMs honor structured params framed as a separate document
 // section much more reliably than as inline prose.
 func renderClientParams(params map[string]any) string {
-	if len(params) == 0 {
+	publicParams := make(map[string]any, len(params))
+	for key, value := range params {
+		if strings.HasPrefix(key, "__fastclaw") {
+			continue
+		}
+		publicParams[key] = value
+	}
+	if len(publicParams) == 0 {
 		return ""
 	}
-	blob, err := json.MarshalIndent(params, "", "  ")
+	blob, err := json.MarshalIndent(publicParams, "", "  ")
 	if err != nil {
 		return ""
 	}
@@ -1357,6 +1417,43 @@ func renderClientParams(params map[string]any) string {
 		"The user's client app submitted these parameters alongside " +
 		"the message. Forward them to whichever tool / skill you call.\n\n" +
 		"```json\n" + string(blob) + "\n```"
+}
+
+func groupContextFromParams(params map[string]any) *GroupContext {
+	raw, ok := params["__fastclawGroupChat"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	botUsername, _ := raw["botUsername"].(string)
+	botUsername = strings.TrimSpace(botUsername)
+	if botUsername == "" {
+		return nil
+	}
+	var teammates []string
+	switch values := raw["teammates"].(type) {
+	case []string:
+		teammates = append(teammates, values...)
+	case []any:
+		for _, value := range values {
+			if name, ok := value.(string); ok && strings.TrimSpace(name) != "" {
+				teammates = append(teammates, strings.TrimSpace(name))
+			}
+		}
+	}
+	instruction, _ := raw["instruction"].(string)
+	return &GroupContext{BotUsername: botUsername, Teammates: teammates, Instruction: instruction}
+}
+
+func applyInternalMessageMetadata(message *provider.Message, params map[string]any) {
+	turnID, _ := params["__fastclawGroupTurnId"].(string)
+	turnID = strings.TrimSpace(turnID)
+	if turnID == "" {
+		return
+	}
+	if message.Metadata == nil {
+		message.Metadata = map[string]any{}
+	}
+	message.Metadata["groupTurnId"] = turnID
 }
 
 // stripSenderPrefix removes the leading "\[name\]: " (or unescaped
@@ -1393,6 +1490,11 @@ func stripSenderPrefix(text, senderName string) string {
 // LLM payload. The nickname is still funneled to the LLM via the
 // `\[nickname\]: ` prefix on Message.Content (set by callers).
 func senderMetadata(msg bus.InboundMessage) map[string]any {
+	// A private message from another agent (message_agent) keeps its
+	// source so the recipient's chat can label the turn.
+	if from, ok := msg.Params[PrivateFromParamKey].(map[string]any); ok && msg.SenderName == "" {
+		return map[string]any{"privateFrom": from}
+	}
 	if msg.SenderName == "" {
 		return nil
 	}
@@ -1533,7 +1635,7 @@ func renderChatbotPersistenceReminder(mode, displayName, userMD, memoryMD string
 // one place. IM adapters split during dispatch; the web client splits
 // the stored reply while rendering it.
 //
-// `splitEnabled` is the per-agent toggle. When false (the default) we
+// `splitEnabled` is the per-agent toggle (on by default). When false we
 // skip the hint so the LLM never learns the marker — and the dispatcher
 // collapses any stray marker back to a newline. The two branches must
 // stay in lockstep.
@@ -1545,18 +1647,21 @@ func renderChannelHints(msg bus.InboundMessage, splitEnabled bool) string {
 		return ""
 	}
 	return "## Reply Format\n\n" +
-		"Multi-bubble mode is ON. For conversational replies, default to 2–4 " +
-		"separate, concise chat bubbles instead of one long message. Put one " +
-		"natural thought in each bubble, usually no more than 1–2 short sentences.\n\n" +
+		"Reply like a capable person in a messaging app: answer directly, in " +
+		"the chatter's language, as plain conversational text.\n\n" +
+		"A simple answer is one compact message. A richer answer is usually 2–4 " +
+		"separate chat bubbles, never more than 4, instead of one long message. " +
+		"Each bubble carries one conversational beat in 1–2 short sentences.\n\n" +
 		"Write `" + channels.SplitMessageMarker + "` on its own line between " +
 		"bubbles. Each part is delivered as a distinct message in order, for " +
 		"example: \"有结果了。\\n" + channels.SplitMessageMarker +
 		"\\nidoubi 是一位独立开发者。\\n" + channels.SplitMessageMarker +
 		"\\n他主要在做 AI 应用。\"\n\n" +
-		"Do not add headings, lists, or repeated summaries just to create more " +
-		"bubbles. Keep code blocks, tables, long quotes, and tightly coupled " +
-		"structured content together; only split their conversational framing. " +
-		"A one-line acknowledgement may remain a single bubble."
+		"Avoid headings, nested lists, bold section labels, repeated " +
+		"introductions, and generic offers to do more — say the few things that " +
+		"matter instead of cataloguing everything. Keep code blocks, tables, " +
+		"long quotes, and tightly coupled structured content together in one " +
+		"bubble; only split their conversational framing."
 }
 
 // isIMChannel returns true for channels with single-message-per-bubble
@@ -1565,7 +1670,7 @@ func renderChannelHints(msg bus.InboundMessage, splitEnabled bool) string {
 // React renderer understands the same marker; API responses do not.
 func isIMChannel(channel string) bool {
 	switch channel {
-	case "wechat", "telegram", "discord", "slack", "line", "feishu":
+	case "wechat", "telegram", "discord", "slack", "line", "feishu", "wecom", "whatsapp", "imessage":
 		return true
 	}
 	return false
@@ -1586,6 +1691,9 @@ func isIMChannel(channel string) bool {
 // Returns "" for web chats and any other caller that doesn't populate
 // SenderName, so we don't waste tokens.
 func renderSender(msg bus.InboundMessage) string {
+	if speaker := renderSpeaker(msg.Params); speaker != "" {
+		return speaker
+	}
 	if msg.SenderName == "" {
 		return ""
 	}
@@ -1601,6 +1709,37 @@ func renderSender(msg bus.InboundMessage) string {
 	}
 	if msg.PeerKind != "" {
 		fmt.Fprintf(&b, "- peer_kind: %s\n", msg.PeerKind)
+	}
+	return b.String()
+}
+
+// SpeakerParamKey is the internal params key carrying the group-chat
+// speaker an API caller named in `params.speaker`. Like every
+// __fastclaw key it is hidden from the Client Parameters block.
+const SpeakerParamKey = "__fastclawSpeaker"
+
+// renderSpeaker renders the API caller's group-chat speaker
+// ({"id": "...", "name": "..."}) as per-turn context. It lives only in
+// this turn's prompt — never in session history — and grants nothing:
+// the id is the calling app's user id, not a FastClaw identity.
+func renderSpeaker(params map[string]any) string {
+	raw, ok := params[SpeakerParamKey].(map[string]any)
+	if !ok {
+		return ""
+	}
+	id, _ := raw["id"].(string)
+	name, _ := raw["name"].(string)
+	id, name = strings.TrimSpace(id), strings.TrimSpace(name)
+	if id == "" && name == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("## Current Speaker\n\nThis conversation has several participants. The latest user turn was sent by:\n")
+	if name != "" {
+		fmt.Fprintf(&b, "- name: %s\n", name)
+	}
+	if id != "" {
+		fmt.Fprintf(&b, "- id: %s\n", id)
 	}
 	return b.String()
 }
@@ -1734,6 +1873,9 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// the user's next turn — which matches the plan-mode contract
 	// (review the plan, then reply to execute).
 	sess.BeginTurn()
+	if a.isTrustedTurn(msg) {
+		sess.MarkTurnTrusted()
+	}
 	defer a.flushLeftoverSteer(sess)
 	defer padOrphanToolResults(sess)
 
@@ -1741,16 +1883,20 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	// + IM-bridge payloads (PhotoURL / PhotoURLs) land in session
 	// history the same way they would on a non-plan turn.
 	userMsg := buildUserMessage(msg)
+	applyInternalMessageMetadata(&userMsg, msg.Params)
 	sess.Append(userMsg)
 
 	if a.provider == nil {
 		noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
-		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
+		emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{
+			"code":    chatErrorCodeLLMProviderNotConfigured,
+			"message": noProviderMsg,
+		}})
 		emitEvent(ctx, ChatEvent{Type: "done"})
 		return noProviderMsg
 	}
 
-	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, a.memory.WithUserID(chatterUID), a.isTrustedTurn(msg))
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAsWithGroup(chatterUID, a.memory.WithUserID(chatterUID), a.isTrustedTurn(msg), groupContextFromParams(msg.Params))
 	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	// Tool catalog injection: plan mode passes tools=nil to the LLM so
@@ -1768,7 +1914,7 @@ func (a *Agent) handlePlanMode(ctx context.Context, msg bus.InboundMessage) stri
 	if catalog != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: catalog})
 	}
-	messages = append(messages, withConversationGapContext(sess.GetMessages())...)
+	messages = append(messages, withConversationGapContext(modelMessagesWithRecentImages(sess.GetMessages()))...)
 	if a.piiScrubEnabled {
 		messages = privacy.ScrubMessages(messages)
 	}
@@ -2182,6 +2328,8 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		return result.reply
 	}
 
+	a = a.forkTurn()
+
 	// Quota gate: reject the turn early when the agent owner has
 	// exceeded their billing ceiling. Checked before plan-mode and
 	// the main ReAct loop so no LLM tokens are burned.
@@ -2273,6 +2421,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// before padOrphanToolResults so it runs LAST (defers are LIFO) —
 	// orphan padding settles history first.
 	sess.BeginTurn()
+	if a.isTrustedTurn(msg) {
+		sess.MarkTurnTrusted()
+	}
 	defer a.flushLeftoverSteer(sess)
 
 	// Safety net for client-aborted turns: if the loop exits with a
@@ -2296,7 +2447,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 
 	chatterMem := a.memory.WithUserID(chatterUID)
-	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem, a.isTrustedTurn(msg))
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAsWithGroup(chatterUID, chatterMem, a.isTrustedTurn(msg), groupContextFromParams(msg.Params))
 	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 
@@ -2311,6 +2462,7 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	// `[SenderName]:` content-prefix policy lives there (group-only;
 	// DMs stay bare to avoid SOUL.md language-bias regressions).
 	userMsg := buildUserMessage(msg)
+	applyInternalMessageMetadata(&userMsg, msg.Params)
 	sess.Append(userMsg)
 
 	// Context compaction: check if session messages are too large
@@ -2345,9 +2497,9 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, withConversationGapContext(sessionMsgs)...)
+	messages = append(messages, withConversationGapContext(modelMessagesWithRecentImages(sessionMsgs))...)
 
-	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
+	toolDefs := withoutGroupSideChannels(a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode)), msg)
 
 	// Loop detection: track consecutive identical tool calls and results.
 	var loopDetector toolLoopDetector
@@ -2418,7 +2570,10 @@ func (a *Agent) HandleMessage(ctx context.Context, msg bus.InboundMessage) strin
 		if a.provider == nil {
 			slog.Error("agent has no provider configured", "agent", a.name, "model", a.model)
 			noProviderMsg := "Agent is not configured with a usable LLM provider. Check that cfg.Providers contains the prefix referenced by model `" + a.model + "`."
-			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{"message": noProviderMsg}})
+			emitEvent(ctx, ChatEvent{Type: "error", Data: map[string]any{
+				"code":    chatErrorCodeLLMProviderNotConfigured,
+				"message": noProviderMsg,
+			}})
 			emitEvent(ctx, ChatEvent{Type: "done"})
 			return noProviderMsg
 		}
@@ -2929,7 +3084,11 @@ func (a *Agent) runPostTurn(ctx context.Context, msg bus.InboundMessage, message
 	if chatterMem == nil {
 		chatterMem = a.memory
 	}
-	a.turnCount++
+	if a.turnCounter != nil {
+		a.turnCount = int(a.turnCounter.Add(1))
+	} else {
+		a.turnCount++
+	}
 
 	// Index user/assistant messages in FTS. Skip runtime-injected
 	// messages (e.g. goal_context continuations) — they're synthetic
@@ -3059,6 +3218,8 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 		return provider.NewStreamReader(ch)
 	}
 
+	a = a.forkTurn()
+
 	// Quota gate — mirrors the check in HandleMessage.
 	if rejection := a.checkQuota(ctx); rejection != "" {
 		return a.stringStream(rejection)
@@ -3102,7 +3263,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: BeforeSystemPrompt, UserID: a.ownerUserID})
 	chatterMem := a.memory.WithUserID(chatterUID)
-	systemPrompt := a.ctxBuilder.BuildSystemPromptAs(chatterUID, chatterMem, a.isTrustedTurn(msg))
+	systemPrompt := a.ctxBuilder.BuildSystemPromptAsWithGroup(chatterUID, chatterMem, a.isTrustedTurn(msg), groupContextFromParams(msg.Params))
 	knowledgeMeta := knowledgeMetadata(extractKnowledgeCitationSources(systemPrompt))
 	a.logSystemPromptFingerprint(msg.Channel, msg.ChatID, chatterUID, systemPrompt)
 	a.hooks.Run(ctx, &HookContext{AgentName: a.name, Point: AfterSystemPrompt, UserID: a.ownerUserID})
@@ -3111,6 +3272,7 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	// flatten + senderMetadata. Group msgs keep their `[SenderName]:`
 	// prefix (applied in buildUserMessage); DMs stay bare.
 	userMsg := buildUserMessage(msg)
+	applyInternalMessageMetadata(&userMsg, msg.Params)
 	sess.Append(userMsg)
 
 	sessionMsgs := sess.GetMessages()
@@ -3137,9 +3299,9 @@ func (a *Agent) HandleMessageStream(ctx context.Context, msg bus.InboundMessage)
 	if reminder := renderChatbotPersistenceReminder(a.promptMode, a.displayName, chatterMem.LoadUserFile(), chatterMem.LoadMemory()); reminder != "" {
 		messages = append(messages, provider.Message{Role: "system", Content: reminder})
 	}
-	messages = append(messages, withConversationGapContext(sessionMsgs)...)
+	messages = append(messages, withConversationGapContext(modelMessagesWithRecentImages(sessionMsgs))...)
 
-	toolDefs := a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode))
+	toolDefs := withoutGroupSideChannels(a.registry.DefinitionsForMode(builtinAllowForMode(a.promptMode)), msg)
 
 	var loopDetector toolLoopDetector
 	totalToolCalls := 0
@@ -3665,6 +3827,25 @@ var chatbotBuiltinAllowlist = []string{
 // given prompt mode. Plugin / MCP tools are always included regardless
 // — see Registry.DefinitionsForMode. nil means "all built-ins";
 // []string{} means "no built-ins"; a non-empty slice means "only these".
+// withoutGroupSideChannels drops the sending tools from a group-chat
+// turn. There, public text and [[private:…]] blocks are the only delivery
+// channels; `message` and `message_agent` would side-step the group's
+// privacy and scheduling (and `message` reported success for a made-up
+// "group" target).
+func withoutGroupSideChannels(defs []provider.Tool, msg bus.InboundMessage) []provider.Tool {
+	if _, group := msg.Params["__fastclawGroupChat"]; !group {
+		return defs
+	}
+	kept := defs[:0:0]
+	for _, def := range defs {
+		if def.Function.Name == "message" || def.Function.Name == "message_agent" {
+			continue
+		}
+		kept = append(kept, def)
+	}
+	return kept
+}
+
 func builtinAllowForMode(mode string) []string {
 	switch mode {
 	case config.PromptModeChatbot:
@@ -3786,12 +3967,16 @@ func (a *Agent) UpdateConfig(rc config.ResolvedAgent) {
 	// hook is needed for the tool surface.
 	a.promptMode = rc.PromptMode
 	a.ctxBuilder.SetPromptMode(rc.PromptMode)
-	// Per-agent WeChat split-replies. Nil override = keep whatever the
-	// system layer initialized at boot (don't reset to false). Non-nil
-	// = authoritative for this agent.
-	if rc.SplitReplies != nil {
-		a.splitReplies = *rc.SplitReplies
-	}
+	// Per-agent split-replies. Nil override (never set, or reset from
+	// the dashboard) falls back to the default.
+	a.splitReplies = splitRepliesEnabled(rc.SplitReplies)
+}
+
+// splitRepliesEnabled resolves the per-agent multi-bubble override.
+// Chat replies default to short messenger-style bubbles; an agent only
+// sends single long messages when it explicitly opts out.
+func splitRepliesEnabled(override *bool) bool {
+	return override == nil || *override
 }
 
 // chatterUserID picks the per-message chatter identity, falling back

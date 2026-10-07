@@ -34,6 +34,7 @@ type promptModuleFunc func(p *promptCtx) string
 // promptCtx carries shared state for a single BuildSystemPromptAs call.
 type promptCtx struct {
 	cb         *ContextBuilder
+	groupCtx   *GroupContext
 	chatterUID string
 	chatterMem *Memory
 	mode       string
@@ -652,6 +653,11 @@ When the user asks you to create a file (document, script, data, etc.):
   whatever channel the user is on (Telegram, web UI, etc.). Examples:
     ![generated logo](/workspace/logo.png)
     [download report.pdf](/workspace/report.pdf)
+- NEVER upload the user's files or your outputs to third-party services
+  (image hosts, paste sites, file-sharing or "temporary link" services) to
+  produce a link — they can contain private data, and the runtime already
+  delivers /workspace files on every channel, including the API. Only do it
+  when the user explicitly asks for that specific service.
 - Reference only the final deliverable files in your final reply. Do not
   reference drafts, conversion intermediates, temporary previews, or other
   process files; IM channels treat referenced workspace paths as files to send
@@ -766,15 +772,19 @@ func modSkills(p *promptCtx) string {
 
 // modGroupChat emits group-chat awareness when the agent is in a group.
 func modGroupChat(p *promptCtx) string {
-	gc := p.cb.groupCtx
+	gc := p.groupCtx
 	if gc == nil {
 		return ""
+	}
+	if gc.Instruction != "" {
+		return "# Group Chat\n" + gc.Instruction
 	}
 	return fmt.Sprintf(`# Group Chat
 You are in a group chat. Your bot username is @%s.
 Other agents in this group: %s.
-Only respond when directly mentioned with @%s, or when the conversation clearly needs your expertise.
+Only respond when directly mentioned with @%s, when the user says @all / everyone, or when the conversation clearly needs your expertise.
 Messages from other bots will appear as "[BotName]: message" in the conversation history.
+When explicitly scheduled, use their latest contributions to continue the task; do not restart work they already finished. To hand work to another member, write @TheirName followed by a concrete request in normal prose. Mention members only when you want them to act. Members may be scheduled again to review or consolidate new results. Avoid circular handoffs and repeated work.
 
 When you DO respond: your full skill catalog and tool registry above are still in scope — group coordination governs *when* to speak, not *what* you can do. If the user asks you to invoke a skill by name (e.g. "调用 X" / "use X to …"), check the <skill_catalog> first; "no such tool" is almost always a misread of a skill that's actually listed.`,
 		gc.BotUsername,

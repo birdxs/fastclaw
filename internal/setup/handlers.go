@@ -410,8 +410,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp["role"] = ident.Role
 	resp["isAdmin"] = ident.Role == "super_admin"
 	if resp["isAdmin"].(bool) && s.accounts != nil {
-		if n, err := s.accounts.Count(r.Context()); err == nil {
+		// Dashboard accounts only: channel / app end-users are created
+		// per IM sender or API caller and aren't platform members.
+		if list, err := s.accounts.List(r.Context()); err == nil {
+			n := 0
+			for _, account := range list {
+				if account.Role == users.RoleSuperAdmin || account.Role == users.RoleUser {
+					n++
+				}
+			}
 			resp["users"] = n
+		}
+	}
+	// Deployment-wide agent count for the System overview; "agents"
+	// below stays the caller's own list.
+	if resp["isAdmin"].(bool) && s.dataStore != nil {
+		if recs, err := s.dataStore.ListAllAgents(r.Context()); err == nil {
+			resp["totalAgents"] = len(recs)
 		}
 	}
 
@@ -462,23 +477,45 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			resp["channels"] = chs
 		}
 	}
-	allAgents := s.resolveAllAgents(r)
-	if len(allAgents) > 0 {
-		var agentList []map[string]string
-		for _, ag := range allAgents {
-			id := ag.Name() // AgentHandle.Name() returns the agent id
-			entry := map[string]string{"id": id}
-			// Surface the human-friendly name from the agents row so the
-			// dashboard list reads "default" / "ImgAny" instead of
-			// "agt_…". Look-up failures fall back to id-only so a
-			// transient store error doesn't black out the panel.
-			if s.dataStore != nil {
-				if rec, _ := s.dataStore.GetAgent(r.Context(), id); rec != nil && rec.Name != "" {
+	var agentList []map[string]string
+	listed := map[string]bool{}
+	// Owned agents come from the agents table: accounts with many agents
+	// load them on demand, so the runtime only holds the ones in use.
+	if ident, ok := auth.FromContext(r.Context()); ok && s.dataStore != nil {
+		if recs, err := s.dataStore.ListAgents(r.Context(), ident.EffectiveUserID()); err == nil {
+			for _, rec := range recs {
+				if !ident.CanAccessAgent(rec.ID) {
+					continue
+				}
+				entry := map[string]string{"id": rec.ID}
+				if rec.Name != "" {
 					entry["name"] = rec.Name
 				}
+				agentList = append(agentList, entry)
+				listed[rec.ID] = true
 			}
-			agentList = append(agentList, entry)
 		}
+	}
+	// Plus anything attached to the caller's runtime that they don't own
+	// (public agents, api-key grants).
+	for _, ag := range s.resolveAllAgents(r) {
+		id := ag.Name() // AgentHandle.Name() returns the agent id
+		if listed[id] {
+			continue
+		}
+		entry := map[string]string{"id": id}
+		// Surface the human-friendly name from the agents row so the
+		// dashboard list reads "default" / "ImgAny" instead of
+		// "agt_…". Look-up failures fall back to id-only so a
+		// transient store error doesn't black out the panel.
+		if s.dataStore != nil {
+			if rec, _ := s.dataStore.GetAgent(r.Context(), id); rec != nil && rec.Name != "" {
+				entry["name"] = rec.Name
+			}
+		}
+		agentList = append(agentList, entry)
+	}
+	if len(agentList) > 0 {
 		resp["agents"] = agentList
 	}
 	jsonResponse(w, http.StatusOK, resp)
@@ -1198,6 +1235,19 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 		return
 	}
+	if req.SessionID == "" {
+		req.SessionID = "web-ui"
+	}
+	agentCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentTurnTimeout)
+	streamSessionID := s.chatEventSessionID(r, ag.Name(), req.SessionID)
+	key := teamRunKey{uid, ag.Name(), streamSessionID}
+	if !s.beginChatTurn(key, cancel) {
+		cancel()
+		jsonResponse(w, http.StatusConflict, map[string]any{"error": "this topic is already running"})
+		return
+	}
+	failed := false
+	defer func() { s.endChatTurn(key, agentCtx, failed); cancel() }()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -1216,25 +1266,38 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Subscribe to the hub BEFORE starting the agent so we don't race
-	// the first emitted event. The hub buffers in-flight events so
-	// dispatch from emitEvent never blocks even if we're slow to drain.
+	// the first emitted event. emitEvent never blocks on us: the queue
+	// grows while network writes are slow instead of dropping events.
 	hub := s.chatEventHub()
 	agentID := ag.Name()
-	sub, unsubscribe := hub.Subscribe(uid, agentID, req.SessionID)
+	// A lossless queue: the plain hub subscription drops events once 32 are
+	// waiting, and every network write below can stall on a slow reader (a
+	// CLI piped through ssh, a buffering proxy). Dropping `done` ended the
+	// SSE as "stream closed before the turn finished".
+	queue, unsubscribe := hub.SubscribeQueue(uid, agentID, streamSessionID)
 	defer unsubscribe()
+	turn := &turnForwarder{
+		ctx: r.Context(), events: s.dataStore, userID: uid, agentID: agentID, sessionKey: streamSessionID,
+		lastSeq: -1, forward: func(env agent.EventEnvelope) { forwardEvent(w, flusher, env) }, failed: &failed,
+	}
+	// Every event of this turn is persisted after this seq, so a gap or a
+	// missing `done` can be recovered from session_events.
+	if s.dataStore != nil {
+		if latest, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, agentID, streamSessionID); err == nil {
+			turn.lastSeq = latest
+		}
+	}
 
 	// Detach the agent's ctx from the request: when the browser tab
 	// disconnects (refresh, close, network blip) we want the agent to
 	// keep running so its already-paid-for LLM call finishes and the
 	// reply lands in session_events. The 15-minute cap is the only thing
 	// that can kill it.
-	agentCtx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), agentTurnTimeout)
 	// cancel lives on the handler, not the agent goroutine: when a slash
 	// queues a continuation we keep the SSE open past HandleMessage's
 	// return, and inner-scope cancel would tear down agentCtx before the
 	// continuation's events can reach this handler's safety-net check.
-	defer cancel()
-	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, req.SessionID)
+	agentCtx = agent.ContextWithStream(agentCtx, nil, s.dataStore, hub, uid, agentID, streamSessionID)
 
 	agentDone := make(chan struct{})
 	go func() {
@@ -1252,8 +1315,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	defer keepalive.Stop()
 
 	clientGone := r.Context().Done()
-	forwardedAny := false
-	// turnPending flips on when the slash handler reports it queued a
+	// turn.turnPending flips on when the slash handler reports it queued a
 	// continuation via bus.Inbound (`turn_pending` event). The POST
 	// goroutine's HandleMessage has already returned, but the real
 	// reply is still 10–15s away on a different goroutine — we keep
@@ -1261,7 +1323,6 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 	// and the continuation's content_delta/content events stream into
 	// the same connection. Cleared when the continuation's own `done`
 	// arrives, at which point the loop returns normally.
-	turnPending := false
 	for {
 		select {
 		case <-clientGone:
@@ -1269,37 +1330,25 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 			// its detached ctx and persists every event it emits.
 			// User reloading the chat page will pick up the rest via
 			// /api/chat/subscribe?since=N.
-			return
+			clientGone = nil
 		case <-agentDone:
 			// Race: HandleMessage publishes `turn_pending` to the hub
 			// AND `defer close(agentDone)` fires from the same goroutine.
 			// Go's select picks at random when both are ready, so
 			// agentDone can win even when a turn_pending event is
-			// sitting in the sub buffer. Drain pending events first to
-			// make the decision deterministic.
-		drain:
-			for {
-				select {
-				case env, ok := <-sub:
-					if !ok {
-						return
-					}
-					if env.Event.Type == "turn_pending" {
-						turnPending = true
-						continue
-					}
-					if env.Event.Type == "done" {
-						forwardEvent(w, flusher, env)
-						forwardedAny = true
-						return
-					}
-					forwardEvent(w, flusher, env)
-					forwardedAny = true
-				default:
-					break drain
+			// still queued. Take the queue first to make the decision
+			// deterministic: every publish completed before agentDone.
+			for _, env := range queue.Take() {
+				if turn.deliver(env) {
+					return
 				}
 			}
-			if turnPending {
+			// The turn is over but its `done` never reached this
+			// connection: recover the persisted tail before giving up.
+			if !turn.turnPending && turn.recoverTail() {
+				return
+			}
+			if turn.turnPending {
 				// HandleMessage returned silent after queueing a
 				// continuation. Don't close; wait for the continuation's
 				// `done` event over the hub instead. agentCtx.Done()
@@ -1307,7 +1356,7 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 				agentDone = nil
 				continue
 			}
-			if !forwardedAny {
+			if !turn.forwardedAny {
 				forwardSyntheticEvent(w, flusher, agent.ChatEvent{
 					Type: "error",
 					Data: map[string]any{"message": "agent finished without emitting a response"},
@@ -1322,18 +1371,11 @@ func (s *Server) handleChatStream(w http.ResponseWriter, r *http.Request) {
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
-		case env, ok := <-sub:
-			if !ok {
-				return
-			}
-			if env.Event.Type == "turn_pending" {
-				turnPending = true
-				continue
-			}
-			forwardEvent(w, flusher, env)
-			forwardedAny = true
-			if env.Event.Type == "done" {
-				return
+		case <-queue.Ready():
+			for _, env := range queue.Take() {
+				if turn.deliver(env) {
+					return
+				}
 			}
 		}
 	}
@@ -1430,6 +1472,7 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	sessionID = s.chatEventSessionID(r, agentID, sessionID)
 	hub := s.chatEventHub()
 	// Subscribe BEFORE replay so any event that lands while we're
 	// scanning the DB ends up either in the replayed range OR in the
@@ -1482,17 +1525,9 @@ func (s *Server) handleChatSubscribe(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			// content_delta is the high-volume token-by-token stream
-			// that drives the active turn's bubble. It is intentionally
-			// NOT persisted (see emitEvent), arrives with seq=-1, and is
-			// already delivered to the initiating tab via the POST
-			// /api/chat/stream subscription on the same hub. Forwarding
-			// it here would double-render on the active tab; reloaders
-			// who join mid-turn miss the partial reveal but still get
-			// the trailing `content` event with the full text.
-			if env.Event.Type == "content_delta" {
-				continue
-			}
+			// The client scopes callbacks to the selected conversation and
+			// lets the active POST own rendering. Reconnected views therefore
+			// also receive live deltas without double-rendering the sender.
 			// Drop replay-overlap events: any event with seq <= the
 			// highest seq we already streamed during replay. Without
 			// this, a browser that reconnects at exactly the wrong
@@ -1705,7 +1740,7 @@ func (s *Server) handleChatHistory(w http.ResponseWriter, r *http.Request) {
 	if s.dataStore != nil {
 		uid := s.effectiveUserID(r)
 		if uid != "" {
-			if seq, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, ag.Name(), sessionID); err == nil {
+			if seq, err := s.dataStore.LatestSessionEventSeq(r.Context(), uid, ag.Name(), s.chatEventSessionID(r, ag.Name(), sessionID)); err == nil {
 				resp["latestEventSeq"] = seq
 			}
 		}
@@ -1744,7 +1779,19 @@ func (s *Server) handleChatSessions(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusOK, map[string]any{"sessions": []session.WebSession{}})
 		return
 	}
-	jsonResponse(w, http.StatusOK, map[string]any{"sessions": ag.WebChatSessions()})
+	sessions := ag.WebChatSessions()
+	s.chatTurnsMu.Lock()
+	for i := range sessions {
+		run := s.chatTurns[teamRunKey{s.effectiveUserID(r), ag.Name(), sessions[i].ID}]
+		if run == nil {
+			run = s.chatTurns[teamRunKey{s.effectiveUserID(r), ag.Name(), sessions[i].ChatID}]
+		}
+		if run != nil {
+			sessions[i].Status = run.status
+		}
+	}
+	s.chatTurnsMu.Unlock()
+	jsonResponse(w, http.StatusOK, map[string]any{"sessions": sessions})
 }
 
 // handleChats returns chat sessions scoped by the caller's API key type:
@@ -2075,14 +2122,14 @@ func (s *Server) handleLINEWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	signature := r.Header.Get("x-line-signature")
 	type lineDispatcher interface {
-		DispatchLINEWebhook(accountID string, body []byte, signature string) ([]byte, int, error)
+		DispatchLINEWebhook(accountID string, body []byte, signature, publicBase string) ([]byte, int, error)
 	}
 	d, ok := s.userResolver.(lineDispatcher)
 	if !ok {
 		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "line webhook dispatch not available"})
 		return
 	}
-	respBody, status, derr := d.DispatchLINEWebhook(accountID, body, signature)
+	respBody, status, derr := d.DispatchLINEWebhook(accountID, body, signature, requestBaseURL(r))
 	if derr != nil {
 		slog.Warn("line webhook dispatch error", "accountId", accountID, "status", status, "error", derr)
 		if respBody == nil {
@@ -2092,6 +2139,30 @@ func (s *Server) handleLINEWebhook(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(respBody)
+}
+
+// handleLINEMedia serves outbound media the LINE adapter stored for LINE
+// to fetch (image messages carry URLs, not bytes). Public like the
+// webhook: LINE's servers fetch without credentials, so the random
+// token in the name is the access check.
+func (s *Server) handleLINEMedia(w http.ResponseWriter, r *http.Request) {
+	type lineMediaServer interface {
+		ServeLINEMedia(accountID, name string) ([]byte, string, error)
+	}
+	srv, ok := s.userResolver.(lineMediaServer)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	data, contentType, err := srv.ServeLINEMedia(r.PathValue("accountId"), r.PathValue("name"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=2592000, immutable")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = w.Write(data)
 }
 
 // --- Helpers ---

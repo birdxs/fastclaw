@@ -89,11 +89,16 @@ func (a *apiResolver) DispatchFeishuWebhook(accountID string, body []byte) ([]by
 	return a.gw.DispatchFeishuWebhook(accountID, body)
 }
 
-func (a *apiResolver) DispatchLINEWebhook(accountID string, body []byte, signature string) ([]byte, int, error) {
-	return a.gw.DispatchLINEWebhook(accountID, body, signature)
+func (a *apiResolver) DispatchLINEWebhook(accountID string, body []byte, signature, publicBase string) ([]byte, int, error) {
+	return a.gw.DispatchLINEWebhook(accountID, body, signature, publicBase)
+}
+
+func (a *apiResolver) ServeLINEMedia(accountID, name string) ([]byte, string, error) {
+	return a.gw.ServeLINEMedia(accountID, name)
 }
 
 func main() {
+	var showVersion bool
 	rootCmd := &cobra.Command{
 		Use:   "fastclaw",
 		Short: "FastClaw - Multi-User AI Agent Platform",
@@ -111,12 +116,17 @@ func main() {
 			})))
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if showVersion {
+				versionCmd().Run(cmd, args)
+				return nil
+			}
 			if isInteractiveTerminal(os.Stdin, os.Stdout) {
 				return runChat(cmd.Context(), chatOptions{})
 			}
 			return runGateway(18953)
 		},
 	}
+	rootCmd.Flags().BoolVar(&showVersion, "version", false, "Print FastClaw version")
 
 	rootCmd.AddCommand(gatewayCmd())
 	rootCmd.AddCommand(chatCmd())
@@ -188,6 +198,10 @@ func runGateway(port int) error {
 		port = env.Gateway.Port
 	}
 
+	if home, err := config.HomeDir(); err == nil {
+		slog.Info("fastclaw instance", "home", home, "port", port)
+	}
+
 	agent.InstallBundledSkills()
 
 	if err := daemon.WritePIDFile(); err != nil {
@@ -241,6 +255,8 @@ func runGateway(port int) error {
 	apiSrv := api.NewServer(&apiResolver{gw: gw}, authResolver, gwCfg)
 	apiSrv.SetMeter(gw.Usage())
 	apiSrv.SetQuotaStore(gw.QuotaStore())
+	apiSrv.SetStore(gw.Store())
+	apiSrv.SetWorkspaceStore(gw.Workspace())
 	webSrv.SetAPIServer(apiSrv)
 
 	// Coding-agent project runtime: long-lived dev-server sandbox +

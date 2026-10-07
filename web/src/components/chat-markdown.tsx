@@ -39,9 +39,9 @@ const streamdownPlugins = { code, mermaid, math, cjk: cjkWithBreaks };
 const PROSE_CLASS =
   "chat-md text-[13.5px] leading-normal prose prose-sm max-w-none dark:prose-invert min-w-0 wrap-anywhere " +
   "prose-p:my-1.5 " +
-  // Tighter, shallower lists: smaller indent (pl-5 ≈ 20px vs prose's ~26px),
-  // less gap between the marker and text, and snug item spacing.
-  "prose-ul:my-1.5 prose-ol:my-1.5 prose-ul:pl-4 prose-ol:pl-4 " +
+  // Tighter lists: snug item spacing. The indent is set in globals.css
+  // (.chat-md lists) so top-level and nested lists share it.
+  "prose-ul:my-1.5 prose-ol:my-1.5 " +
   "prose-li:my-0.5 prose-li:pl-0 prose-li:marker:text-muted-foreground/60 " +
   "prose-headings:font-semibold prose-headings:mt-2.5 prose-headings:mb-1 " +
   "prose-h1:text-[15px] prose-h2:text-[14px] prose-h3:text-[13.5px] prose-h4:text-[13.5px] prose-h5:text-[13.5px] prose-h6:text-[13.5px] " +

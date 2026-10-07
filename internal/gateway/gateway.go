@@ -240,6 +240,9 @@ type Gateway struct {
 	chatEvents *agent.EventHub
 	mu         sync.RWMutex
 	dedup      sync.Map
+	// pairFails counts wrong /pair attempts per channel row id (see
+	// pairing.go); the outstanding code is burned once it hits the cap.
+	pairFails sync.Map
 }
 
 // SetProjectRuntime wires the coding-agent runtime manager. Call once at
@@ -486,6 +489,14 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 		}
 		ag := space.Agents.AgentByID(task.AgentID)
 		if ag == nil {
+			// Routing already authorized this agent for the space, but
+			// it may have been evicted (on-demand) or the space reloaded
+			// since. Re-attach rather than dropping the message.
+			if err := space.EnsureAgent(ctx, g.store, g.bus, g.workspace, task.AgentID); err == nil {
+				ag = space.Agents.AgentByID(task.AgentID)
+			}
+		}
+		if ag == nil {
 			return "", fmt.Errorf("agent %q not found", task.AgentID)
 		}
 		if len(task.Message.MediaItems) > 0 {
@@ -510,6 +521,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 			}
 		}
 		chanMgr.SendTyping(task.Message.Channel, task.AccountID, task.Message.ChatID)
+		stopMsgTyping := chanMgr.StartMessageTyping(task.Message.Channel, task.AccountID, task.Message.ChatID, task.Message.MessageID)
 		typingDone := make(chan struct{})
 		go func() {
 			ticker := time.NewTicker(5 * time.Second)
@@ -553,6 +565,7 @@ func New(env *config.EnvConfig) (*Gateway, error) {
 
 		reply := ag.HandleMessage(ctx, task.Message)
 		close(typingDone)
+		stopMsgTyping()
 		// Extract `![alt](workspace/relative/path)` markdown image refs
 		// from the agent's reply, resolve their bytes via the
 		// workspace.Store, and ship them as MediaItems so IM channels

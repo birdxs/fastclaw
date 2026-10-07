@@ -3,6 +3,8 @@
 import * as React from "react";
 import { usePathname, useSearchParams } from "next/navigation";
 import { AppSidebar } from "@/components/app-sidebar";
+import { AppRail, APP_RAIL_WIDTH } from "@/components/app-rail";
+import { rememberLocation } from "@/lib/landing";
 import {
   SidebarInset,
   SidebarProvider,
@@ -37,9 +39,18 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
   // session, not the impersonated user — hiding it (and its collapse
   // toggle) keeps the surface focused on the conversation being inspected.
   const isActAsView = !!searchParams?.get("actAs");
-  const isConversationRoute = /^\/agents\/[^/]+\/(chat|project)(?:\/|$)/.test(
-    usePathname() || "",
-  );
+  const pathname = usePathname() || "";
+  const isConversationRoute =
+    /^\/chat\/[^/]+\/?$/.test(pathname) ||
+    /^\/agents\/[^/]+\/(chat|project|team)(?:\/|$)/.test(pathname) ||
+    /^\/teams\/[^/]+\/chat\/[^/]+(?:\/|$)/.test(pathname);
+
+  // Remember where the user is (chat vs console) so the next sign-in
+  // resumes there.
+  const search = searchParams?.toString() || "";
+  React.useEffect(() => {
+    rememberLocation(pathname, search ? `?${search}` : "");
+  }, [pathname, search]);
 
   const headerCtx = React.useMemo<PageHeaderContextValue>(
     () => ({ setNode: setHeaderNode }),
@@ -52,7 +63,7 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
         <div className="flex min-h-svh flex-col">
           <header
             className={`sticky top-0 z-20 flex items-center bg-background/90 backdrop-blur ${
-              isConversationRoute ? "h-14" : "h-12 gap-2 px-3"
+              isConversationRoute ? "h-14" : "h-14 gap-2 px-3"
             }`}
           >
             {headerNode}
@@ -71,26 +82,26 @@ export function SidebarLayout({ children }: { children: React.ReactNode }) {
         resizeMinWidth={isConversationRoute ? 240 : undefined}
         resizeMaxWidth={isConversationRoute ? 420 : undefined}
         resizeStorageKey={isConversationRoute ? "fastclaw:bot-sidebar-width" : undefined}
-        resizeViewportReserve={isConversationRoute ? 480 : undefined}
+        // 480px for the conversation pane plus the 56px app rail.
+        resizeViewportReserve={isConversationRoute ? 536 : undefined}
         style={
-          isConversationRoute
-            ? ({
-                "--sidebar-width-icon": "64px",
-              } as React.CSSProperties)
-            : undefined
+          {
+            "--sidebar-offset": APP_RAIL_WIDTH,
+          } as React.CSSProperties
         }
       >
+        <AppRail />
         <AppSidebar />
         <SidebarInset className={isConversationRoute ? "min-w-0 overflow-hidden" : undefined}>
           <header
             className={`sticky top-0 z-20 flex items-center bg-background/90 backdrop-blur ${
               isConversationRoute
                 ? "h-14"
-                : "h-12 gap-2 px-3"
+                : "h-14 gap-2 px-3"
             }`}
           >
             <SidebarTrigger
-              className={isConversationRoute ? "ml-2 shrink-0 md:hidden" : "-ml-1"}
+              className={isConversationRoute ? "ml-3 shrink-0 text-muted-foreground" : "-ml-1"}
             />
             {headerNode}
           </header>

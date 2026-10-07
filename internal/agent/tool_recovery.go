@@ -181,7 +181,11 @@ var parameterRE = regexp.MustCompile(`(?s)<parameter\s+name="([^"]+)"(?:\s+strin
 //   - the optional outer <tool_calls> / <function_calls> / <DSML>
 //     wrappers some models add (open AND close tags), so the residual
 //     content doesn't keep a dangling `</tool_calls>`.
-var stripRE = regexp.MustCompile(`(?s)<invoke\s+name="[^"]+"\s*>.*?</invoke>|</?(?:tool_calls|function_calls|DSML)\s*/?>`)
+//
+// The DSML wrapper keeps whatever followed the marker: DeepSeek-style
+// gateways also emit `<｜｜DSML｜｜ calls>`, which normalizes to
+// `<DSML｜｜ calls>`, so any tag starting with DSML is a wrapper.
+var stripRE = regexp.MustCompile(`(?s)<invoke\s+name="[^"]+"\s*>.*?</invoke>|</?(?:tool_calls|function_calls)\s*/?>|</?DSML[^>]*>`)
 
 // tagLeakHintRE flags content worth running the leaked-token normalizer
 // on. We match either a normal `<invoke` (the original recovery
