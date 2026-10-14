@@ -122,10 +122,12 @@ type SkillsLoader struct {
 	// other agent they chat with. Empty disables this layer (legacy /
 	// single-user installs that pre-date per-user skills).
 	userID string
-	// sandboxed is set when every command runs in the sandbox, not on
-	// this host. The host's PATH then says nothing about a skill's
+	// sandboxed is set when commands never run on this host (enforced
+	// sandbox deploys). The host's PATH then says nothing about a skill's
 	// required binaries (a slim server image has no python3 while the
-	// sandbox does), so those checks are skipped.
+	// sandbox does), so those checks are skipped. It follows the deploy
+	// mode, not the agent's own sandbox flag: hosted agents get the
+	// sandbox pool after they're built, whatever that flag says.
 	sandboxed bool
 }
 

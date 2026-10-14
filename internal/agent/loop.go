@@ -342,9 +342,8 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	// workspaceStore. The manager will call ReloadWorkspaceFiles after
 	// wiring to refresh the summary with OSS-hosted skills, and runOnce
 	// re-hydrates on every turn to pick up later uploads.
-	sandboxEnforced := rc.Sandbox.Enabled && buildinfo.IsSandboxEnforced()
 	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, globalSkillsCfg).
-		WithSandbox(sandboxEnforced)
+		WithSandbox(buildinfo.IsSandboxEnforced())
 	loader.agentID = rc.ID
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
@@ -360,6 +359,7 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	// the sandbox is just a per-call tool, so sbCfg stays nil.
 	skillDirs := loader.AllSkillDirs()
 	tools.RegisterLoadSkill(registry, skillDirs)
+	sandboxEnforced := rc.Sandbox.Enabled && buildinfo.IsSandboxEnforced()
 	var sbCfg *tools.SandboxConfig
 	if sandboxEnforced {
 		sbCfg = &tools.SandboxConfig{Enabled: true}
@@ -4184,7 +4184,7 @@ func (a *Agent) refreshSkillsFromStore(userID string) {
 	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
 		WithObjectStore(a.workspaceStore, a.agentID).
 		WithUserID(userID).
-		WithSandbox(a.ctxBuilder.sandboxEnabled)
+		WithSandbox(buildinfo.IsSandboxEnforced())
 	skills := loader.LoadSkills()
 	summary := loader.BuildSkillsSummary(skills)
 	a.ctxBuilder.SetSkillsSummary(summary)
@@ -4217,7 +4217,7 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	// post-boot on this one) become visible.
 	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
 		WithUserID(a.ownerUserID).
-		WithSandbox(a.ctxBuilder != nil && a.ctxBuilder.sandboxEnabled)
+		WithSandbox(buildinfo.IsSandboxEnforced())
 	if a.workspaceStore != nil {
 		loader.WithObjectStore(a.workspaceStore, a.agentID)
 	}
