@@ -122,6 +122,11 @@ type SkillsLoader struct {
 	// other agent they chat with. Empty disables this layer (legacy /
 	// single-user installs that pre-date per-user skills).
 	userID string
+	// sandboxed is set when every command runs in the sandbox, not on
+	// this host. The host's PATH then says nothing about a skill's
+	// required binaries (a slim server image has no python3 while the
+	// sandbox does), so those checks are skipped.
+	sandboxed bool
 }
 
 // NewSkillsLoader creates a new skills loader.
@@ -156,6 +161,13 @@ func (sl *SkillsLoader) WithObjectStore(ws workspace.Store, agentID string) *Ski
 // this pod's disk. Empty userID disables the layer.
 func (sl *SkillsLoader) WithUserID(userID string) *SkillsLoader {
 	sl.userID = userID
+	return sl
+}
+
+// WithSandbox marks the agent's commands as running in the sandbox, so
+// skills aren't gated on binaries missing from this host.
+func (sl *SkillsLoader) WithSandbox(enforced bool) *SkillsLoader {
+	sl.sandboxed = enforced
 	return sl
 }
 
@@ -274,6 +286,9 @@ func (sl *SkillsLoader) LoadSkills() []Skill {
 	// is not installed.
 	result := make([]Skill, 0, len(skillsMap))
 	for _, s := range skillsMap {
+		if sl.sandboxed {
+			s.Gated, s.GateReason = checkGating(s.Metadata, false)
+		}
 		if s.Gated {
 			slog.Debug("skill gated", "name", s.Name, "reason", s.GateReason)
 		}
@@ -546,7 +561,7 @@ func discoverSkillsEnhanced(dir string, layer string) map[string]Skill {
 		}
 
 		// Apply gating
-		gated, gateReason := checkGating(meta)
+		gated, gateReason := checkGating(meta, true)
 
 		name := entry.Name()
 		if fm != nil && fm.Name != "" {
@@ -716,7 +731,9 @@ func convertYAMLToJSON(v interface{}) interface{} {
 
 // checkGating validates whether a skill's requirements are met.
 // Returns (gated, reason). gated=true means the skill should be skipped.
-func checkGating(meta *SkillMetadata) (bool, string) {
+// hostBins checks required binaries on this host's PATH; it is false when
+// commands run in the sandbox instead.
+func checkGating(meta *SkillMetadata, hostBins bool) (bool, string) {
 	if meta == nil || meta.Meta() == nil {
 		return false, ""
 	}
@@ -745,24 +762,25 @@ func checkGating(meta *SkillMetadata) (bool, string) {
 		return false, ""
 	}
 
-	// Check required binaries
-	for _, bin := range oc.Requires.Bins {
-		if _, err := exec.LookPath(bin); err != nil {
-			return true, fmt.Sprintf("required binary %q not found on PATH", bin)
-		}
-	}
-
-	// Check anyBins (at least one must exist)
-	if len(oc.Requires.AnyBins) > 0 {
-		found := false
-		for _, bin := range oc.Requires.AnyBins {
-			if _, err := exec.LookPath(bin); err == nil {
-				found = true
-				break
+	// Check required binaries (only on the host that runs the commands)
+	if hostBins {
+		for _, bin := range oc.Requires.Bins {
+			if _, err := exec.LookPath(bin); err != nil {
+				return true, fmt.Sprintf("required binary %q not found on PATH", bin)
 			}
 		}
-		if !found {
-			return true, fmt.Sprintf("none of required binaries %v found on PATH", oc.Requires.AnyBins)
+		// anyBins: at least one must exist
+		if len(oc.Requires.AnyBins) > 0 {
+			found := false
+			for _, bin := range oc.Requires.AnyBins {
+				if _, err := exec.LookPath(bin); err == nil {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return true, fmt.Sprintf("none of required binaries %v found on PATH", oc.Requires.AnyBins)
+			}
 		}
 	}
 

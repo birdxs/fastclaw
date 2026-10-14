@@ -342,7 +342,9 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	// workspaceStore. The manager will call ReloadWorkspaceFiles after
 	// wiring to refresh the summary with OSS-hosted skills, and runOnce
 	// re-hydrates on every turn to pick up later uploads.
-	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, globalSkillsCfg)
+	sandboxEnforced := rc.Sandbox.Enabled && buildinfo.IsSandboxEnforced()
+	loader := NewSkillsLoaderWithGlobal(homeDir, rc.Home, "", rc.Skills, globalSkillsCfg).
+		WithSandbox(sandboxEnforced)
 	loader.agentID = rc.ID
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
@@ -358,7 +360,6 @@ func NewAgentWithSkillsCfg(rc config.ResolvedAgent, prov provider.Provider, mb *
 	// the sandbox is just a per-call tool, so sbCfg stays nil.
 	skillDirs := loader.AllSkillDirs()
 	tools.RegisterLoadSkill(registry, skillDirs)
-	sandboxEnforced := rc.Sandbox.Enabled && buildinfo.IsSandboxEnforced()
 	var sbCfg *tools.SandboxConfig
 	if sandboxEnforced {
 		sbCfg = &tools.SandboxConfig{Enabled: true}
@@ -4182,7 +4183,8 @@ func (a *Agent) refreshSkillsFromStore(userID string) {
 	}
 	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
 		WithObjectStore(a.workspaceStore, a.agentID).
-		WithUserID(userID)
+		WithUserID(userID).
+		WithSandbox(a.ctxBuilder.sandboxEnabled)
 	skills := loader.LoadSkills()
 	summary := loader.BuildSkillsSummary(skills)
 	a.ctxBuilder.SetSkillsSummary(summary)
@@ -4214,16 +4216,27 @@ func (a *Agent) ReloadWorkspaceFiles() {
 	// from object storage so skills uploaded on another replica (or
 	// post-boot on this one) become visible.
 	loader := NewSkillsLoaderWithGlobal(a.homeDir, a.homePath, "", a.skillsCfg, a.globalSkillsCfg).
-		WithUserID(a.ownerUserID)
+		WithUserID(a.ownerUserID).
+		WithSandbox(a.ctxBuilder != nil && a.ctxBuilder.sandboxEnabled)
 	if a.workspaceStore != nil {
 		loader.WithObjectStore(a.workspaceStore, a.agentID)
 	}
 	skills := loader.LoadSkills()
 	skillsSummary := loader.BuildSkillsSummary(skills)
 	tools.RegisterLoadSkill(a.registry, loader.AllSkillDirs())
+	prev := a.ctxBuilder
 	a.ctxBuilder = NewContextBuilder(a.homePath, a.memory, skillsSummary)
 	a.ctxBuilder.SetWorkspace(a.workspacePath)
 	a.ctxBuilder.SetPromptMode(a.promptMode)
+	// Carry the thinking level and sandbox mode over: they come from the
+	// agent's config, not its files, and a reload (e.g. after importing
+	// an agent archive) must not make the prompt describe host paths.
+	if prev != nil {
+		a.ctxBuilder.thinking = prev.thinking
+		a.ctxBuilder.sandboxEnabled = prev.sandboxEnabled
+		a.ctxBuilder.sandboxOptional = prev.sandboxOptional
+		a.ctxBuilder.sandboxBackend = prev.sandboxBackend
+	}
 	a.ctxBuilder.SetDisplayName(a.displayName)
 	// Preserve Store-backed identity reads across reload; without this,
 	// Postgres-mode pods silently fall back to pod-local filesystem.
