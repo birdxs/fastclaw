@@ -1156,6 +1156,8 @@ export async function steerChat(
 
 export interface ToolResultMetadata {
   sandbox?: boolean;
+  // A connect / access card the connectors tool put in the conversation.
+  connectorRequest?: { id: string; connector: string; title: string; kind: "connect" | "reconnect" | "access" };
   // Assistant message delivered privately to the human from a group.
   privateFrom?: PrivateSource;
   knowledgeSources?: KnowledgeSource[];
@@ -1165,6 +1167,9 @@ export interface ToolResultMetadata {
   // under-budget and may be incomplete.
   iterationCapReached?: boolean;
   iterationCapValue?: number;
+  // Why the tool loop was cut off: "cap" (budget used up) or "loop"
+  // (kept repeating an identical call after a warning). Absent = "cap".
+  iterationStopReason?: "cap" | "loop";
   // Stamped on assistant messages produced by plan mode (composer toggle).
   // The bubble is a plan, not an execution result — UI shows a distinct
   // badge so the user knows to review it and reply with "go" (or edits).
@@ -1188,7 +1193,8 @@ export interface ChatStreamEvent {
     | "steer"
     | "error"
     | "done"
-    | "subagent_progress";
+    | "subagent_progress"
+    | "status";
   // Per-session monotonic sequence assigned by chat_events. Lets the
   // chat page dedupe events arriving on both the active POST stream
   // and the parallel /api/chat/subscribe SSE connection. -1 means
@@ -1214,8 +1220,12 @@ export interface ChatStreamEvent {
     // subagent_progress payload — only populated when type === "subagent_progress".
     iteration?: number;
     max?: number;
-    phase?: "thinking" | "running" | "final-delivery" | "done";
+    phase?: "thinking" | "running" | "final-delivery" | "done" | "retrying" | "wrap_up";
     tools?: string[];
+    // status payload (type === "status", phase "retrying"): the model call
+    // failed and the backend is retrying it.
+    attempt?: number;
+    maxAttempts?: number;
   };
 }
 
@@ -2301,6 +2311,48 @@ export async function deleteChannelPairing(
   return res.json();
 }
 
+// Agent configuration archive (Settings → Advanced). The export is a
+// ZIP of identity files + the agent's own skills; import replaces both.
+export interface AgentArchivePreview {
+  ok?: boolean;
+  format: "fastclaw-agent" | "workspace";
+  name?: string;
+  description?: string;
+  files: string[];
+  skills: string[];
+  ignored: string[];
+  error?: string;
+}
+
+export async function exportAgentArchive(agentId: string): Promise<{ blob: Blob; filename: string }> {
+  const res = await apiFetch(`/api/agents/${agentId}/archive`);
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Export failed (${res.status})`);
+  }
+  const disposition = res.headers.get("Content-Disposition") || "";
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const plain = disposition.match(/filename="?([^";]+)"?/i)?.[1];
+  const filename = encoded ? decodeURIComponent(encoded) : plain || `${agentId}-config.zip`;
+  return { blob: await res.blob(), filename };
+}
+
+export async function importAgentArchive(
+  agentId: string,
+  file: File,
+  dryRun: boolean,
+): Promise<AgentArchivePreview> {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+  const res = await apiFetch(`/api/agents/${agentId}/archive${dryRun ? "?dryRun=1" : ""}`, {
+    method: "POST",
+    body: fd,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Import failed (${res.status})`);
+  return data;
+}
+
 export async function updateAgentChannel(
   agentId: string,
   type: string,
@@ -2373,12 +2425,31 @@ export async function getAgentTokenUsage(
 // cookie, so <img src>, <a href>, and direct downloads authenticate by cookie
 // like every other API call. (Putting `?token=<bearer>` in a URL leaked a full
 // API credential via Referer, browser history, and reverse-proxy access logs.)
-export function fileUrl(agentId: string, path: string, download = false): string {
+// With sessionId, path is relative to that conversation's folder and the
+// server resolves where the folder is.
+export function fileUrl(agentId: string, path: string, download = false, sessionId?: string): string {
   const encoded = path.split("/").map(encodeURIComponent).join("/");
   const params = new URLSearchParams();
+  if (sessionId) params.set("sessionId", sessionId);
   if (download) params.set("download", "1");
   const qs = params.toString();
   return `/api/agents/${agentId}/files/${encoded}${qs ? "?" + qs : ""}`;
+}
+
+// Editable designs (skills/image-to-editable-html): the page runs in a
+// sandboxed iframe and posts the user's manual edits up; they are saved to
+// <design>/scene/edits.json next to the page, where the skill merges them
+// before its next change. htmlPath is the page's workspace path.
+export async function saveSceneEdits(agentId: string, htmlPath: string, edits: unknown): Promise<void> {
+  const dir = htmlPath.split("/").slice(0, -1).join("/");
+  const rel = `${dir ? dir + "/" : ""}scene/edits.json`;
+  const encoded = rel.split("/").map(encodeURIComponent).join("/");
+  const res = await apiFetch(`/api/agents/${encodeURIComponent(agentId)}/scene-edits/${encoded}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(edits),
+  });
+  if (!res.ok) throw new Error(`save failed: ${res.status}`);
 }
 
 // Workspace version history (per-session git snapshots taken after each
@@ -2461,4 +2532,138 @@ export function deleteTeamTopic(teamId: string, sessionId: string) {
 export interface TeamInboxNotice { id: string; agentId: string; sessionId: string; timestamp: number }
 export function getTeamInbox() {
   return teamRequest<{ messages: TeamInboxNotice[] }>("/api/chat/team/inbox");
+}
+
+// ── Connectors: the caller's own third-party accounts ──────────────────
+// Server routes in internal/setup/handlers_connectors.go. Errors come back
+// as a closed `code` the UI words itself (connectorErrorText).
+
+export interface ConnectorInfo {
+  name: string;
+  title: string;
+  category?: string;
+  description?: string;
+  avatarUrl: string;
+}
+
+export interface ConnectorCatalog {
+  configured: boolean;
+  categories: { name: string; title: string }[];
+  connectors: ConnectorInfo[];
+}
+
+export interface ConnectorAccount {
+  id: string;
+  connector: string;
+  status: "connected" | "reauth_required";
+  name: string;
+  accountName?: string;
+  workspaceName?: string;
+  displayName?: string;
+  needsAccess: boolean;
+  isDefault: boolean;
+}
+
+export interface ConnectorRequestView {
+  id: string;
+  connector: string;
+  kind: "connect" | "reconnect" | "access";
+  status: "requested" | "pending" | "connected" | "granted" | "error" | "expired" | "cancelled";
+  errorCode?: string;
+}
+
+export interface ConnectorAccess {
+  canAdd: boolean;
+  total: number;
+  grants: { id: string | number; type: string; name: string; selection: "all" | "selected"; suspended: boolean; manage_url: string }[];
+}
+
+export class ConnectorApiError extends Error {
+  constructor(public code: string) {
+    super(code);
+  }
+}
+
+async function connectorJSON<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await apiFetch(path, init);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ConnectorApiError((body as { code?: string }).code || "service_unavailable");
+  return body as T;
+}
+
+const jsonInit = (method: string, body?: unknown): RequestInit => ({
+  method,
+  headers: { "Content-Type": "application/json" },
+  ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+});
+
+export function getConnectorCatalog(lang: string, fresh = false) {
+  return connectorJSON<ConnectorCatalog>(`/api/connectors?${new URLSearchParams({ lang, ...(fresh ? { fresh: "1" } : {}) })}`);
+}
+
+export async function getConnectorAccounts(fresh = false) {
+  const r = await connectorJSON<{ accounts: ConnectorAccount[] }>(`/api/connector-accounts${fresh ? "?fresh=1" : ""}`);
+  return r.accounts;
+}
+
+export function updateConnectorAccount(id: string, patch: { name?: string; isDefault?: boolean }) {
+  return connectorJSON<{ ok: boolean }>(`/api/connector-accounts/${encodeURIComponent(id)}`, jsonInit("PATCH", patch));
+}
+
+export function disconnectConnectorAccount(id: string) {
+  return connectorJSON<{ ok: boolean }>(`/api/connector-accounts/${encodeURIComponent(id)}`, jsonInit("DELETE"));
+}
+
+export function checkConnectorAccount(id: string) {
+  return connectorJSON<{ toolCount: number }>(`/api/connector-accounts/${encodeURIComponent(id)}/check`, jsonInit("POST", {}));
+}
+
+export function getConnectorAccess(id: string) {
+  return connectorJSON<ConnectorAccess>(`/api/connector-accounts/${encodeURIComponent(id)}/access`);
+}
+
+/** Mints the one-use authorization link for exactly one target. */
+export function authorizeConnector(target: { requestId: string } | { connector: string } | { reconnectId: string } | { accessId: string }) {
+  return connectorJSON<{ url: string; request: ConnectorRequestView }>("/api/connector-authorizations", jsonInit("POST", target));
+}
+
+export function getConnectorRequest(id: string) {
+  return connectorJSON<ConnectorRequestView>(`/api/connector-requests/${encodeURIComponent(id)}`);
+}
+
+export function recheckConnectorRequest(id: string) {
+  return connectorJSON<ConnectorRequestView>(`/api/connector-requests/${encodeURIComponent(id)}/recheck`, jsonInit("POST", {}));
+}
+
+export function cancelConnectorRequest(id: string) {
+  return connectorJSON<ConnectorRequestView>(`/api/connector-requests/${encodeURIComponent(id)}/cancel`, jsonInit("POST", {}));
+}
+
+export function confirmConnectorReturn(providerSessionId: string) {
+  return connectorJSON<ConnectorRequestView>("/api/connector-requests/confirm", jsonInit("POST", { providerSessionId }));
+}
+
+/** System → Tools → Connectors (super admin): where Connany is. The key
+ *  never comes back — only whether one is set and its last characters. */
+export interface ConnectorsConfig {
+  enabled: boolean;
+  source: "" | "settings" | "env";
+  url: string;
+  apiKeySet: boolean;
+  apiKeyHint: string;
+  envConfigured: boolean;
+}
+
+export function getConnectorsConfig() {
+  return connectorJSON<ConnectorsConfig>("/api/admin/connectors-config");
+}
+
+/** Validates against Connany, saves and applies at once. An empty apiKey
+ *  keeps the one already set. */
+export function saveConnectorsConfig(url: string, apiKey: string) {
+  return connectorJSON<ConnectorsConfig>("/api/admin/connectors-config", jsonInit("PUT", { url, apiKey }));
+}
+
+export function clearConnectorsConfig() {
+  return connectorJSON<ConnectorsConfig>("/api/admin/connectors-config", jsonInit("DELETE"));
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fastclaw-ai/fastclaw/internal/provider"
@@ -16,9 +17,10 @@ import (
 // scoping is implicit at the call site instead of getting plumbed through
 // every agent loop call.
 type StoreAdapter struct {
-	st             store.Store
-	userID         string
-	ownerCache     map[string]string // sessionKey → resolved owner userID
+	st         store.Store
+	userID     string
+	ownerMu    sync.Mutex
+	ownerCache map[string]string // sessionKey → resolved owner userID
 }
 
 func NewStoreAdapter(st store.Store, userID string) *StoreAdapter {
@@ -32,29 +34,40 @@ func NewStoreAdapter(st store.Store, userID string) *StoreAdapter {
 // session_key on a shared/public agent cannot read another user's chat.
 func (a *StoreAdapter) resolveSessionOwner(ctx context.Context, agentID, sessionKey string) string {
 	// Check cache first to avoid repeated DB lookups for the same session.
-	if a.ownerCache != nil {
-		if cached, ok := a.ownerCache[sessionKey]; ok {
-			return cached
-		}
+	a.ownerMu.Lock()
+	cached, ok := a.ownerCache[sessionKey]
+	a.ownerMu.Unlock()
+	if ok {
+		return cached
+	}
+	owner, err := a.st.LookupSessionOwner(ctx, agentID, sessionKey)
+	if err != nil || owner == "" {
+		// No row yet (a chat about to be created) or a failed lookup (e.g.
+		// a busy database): answer self/deny for now, but don't remember
+		// it — a cached failure would hide a real session until restart.
+		return a.userID
 	}
 	result := a.userID // default: deny / self
-	owner, err := a.st.LookupSessionOwner(ctx, agentID, sessionKey)
-	if err == nil && owner != "" {
-		if owner == a.userID {
+	if owner == a.userID {
+		result = owner
+	} else {
+		// Check if the owner is a child of the caller (app_user whose
+		// owner_user_id == a.userID). If not, deny by returning a.userID
+		// so the downstream query simply returns no rows.
+		u, err := a.st.GetUser(ctx, owner)
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			return a.userID
+		}
+		if u != nil && u.OwnerUserID == a.userID {
 			result = owner
-		} else {
-			// Check if the owner is a child of the caller (app_user whose
-			// owner_user_id == a.userID). If not, deny by returning a.userID
-			// so the downstream query simply returns no rows.
-			if u, err := a.st.GetUser(ctx, owner); err == nil && u != nil && u.OwnerUserID == a.userID {
-				result = owner
-			}
 		}
 	}
+	a.ownerMu.Lock()
 	if a.ownerCache == nil {
 		a.ownerCache = make(map[string]string)
 	}
 	a.ownerCache[sessionKey] = result
+	a.ownerMu.Unlock()
 	return result
 }
 
@@ -182,6 +195,30 @@ func (a *StoreAdapter) ListMessages(ctx context.Context, agentID, sessionKey str
 		msgs[i] = providerMessageFromStored(m)
 	}
 	return msgs, nil
+}
+
+// ListMessagesPage reads one page of the archive; see
+// store.Store.ListSessionMessagesPage for the cursor contract.
+func (a *StoreAdapter) ListMessagesPage(ctx context.Context, agentID, sessionKey string, before int64, limit int) ([]provider.Message, int64, bool, error) {
+	sms, start, hasMore, err := a.st.ListSessionMessagesPage(ctx, a.resolveSessionOwner(ctx, agentID, sessionKey), agentID, sessionKey, before, limit)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	msgs := make([]provider.Message, len(sms))
+	for i, m := range sms {
+		msgs[i] = providerMessageFromStored(m)
+	}
+	return msgs, start, hasMore, nil
+}
+
+// SessionExists checks for the session row without reading its
+// messages, under the same owner rules as GetSession.
+func (a *StoreAdapter) SessionExists(ctx context.Context, agentID, sessionKey string) (bool, error) {
+	_, _, _, err := a.st.LookupSessionTriple(ctx, a.resolveSessionOwner(ctx, agentID, sessionKey), agentID, sessionKey)
+	if errors.Is(err, store.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // sessionMessageFromProvider converts a provider.Message into the wire

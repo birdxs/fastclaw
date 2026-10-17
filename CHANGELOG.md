@@ -5,6 +5,101 @@ action on upgrade — read those notes before deploying.
 
 ## [Unreleased]
 
+### Changed — API streams the turn as it runs
+
+`stream: true` on `/v1/chat/completions` now runs the same agent loop as the
+web chat: the agent's text arrives as it is written, including what it says
+between steps, and each tool call is reported on a chunk with an empty
+delta and a top-level `tool` object (`{"id", "name", "status": "running" |
+"done"}`). The final answer costs one model call instead of two. Separate
+messages in a reply are joined by a blank line instead of a literal
+`<|split|>` marker.
+
+### Changed — failed API turns are errors
+
+When the agent's model API fails, or the model gives no usable answer, a
+non-streaming request now answers `502` with `{"error": {"code":
+"agent_error", ...}}` instead of a `200` apology, and a stream ends with
+that `error` object on its final chunk. Integrators that treated every
+`200` as a delivered answer should handle it (don't charge, offer a retry).
+The reason is also saved in the conversation, so the console shows why a
+turn failed.
+
+### Added — `/model` in `fastclaw chat`
+
+The terminal chat switches the current agent's model with
+`/model [provider/model|default]`, listing the same models as the console,
+and its footer keeps the key hints on one line.
+
+### Fixed
+
+- A reply cut off at the model's output limit (usually one huge tool call)
+  is dropped and retried with a note to work in smaller pieces, instead of
+  running half-written arguments or ending the turn empty.
+- DeepSeek thinking mode behind a routing model: a "reasoning_content must
+  be passed back" 400 is retried with it, and later calls send it up front.
+- Pictures in API conversations and project chats show in the console —
+  a reply's file links are resolved against the conversation's own folder.
+  Pictures the agent links instead of embedding are shown inline, and an
+  image beside text no longer causes a hydration error.
+- An agent's model dropdown no longer mixes in models from an inherited
+  provider of the same name.
+
+### Added — connectors (Notion, GitHub, Linear, …)
+
+People connect their own accounts in Console → Connectors and agents they
+own can read from them in web chats, through the Connany connector service
+(configured in System → Tools → Connectors). Read-only for now; never
+available in IM, groups, cron or on someone else's agent. See
+`docs/connectors.md`.
+
+### Added — chat list working and unread states
+
+Agent and group rows in the chat list show a spinner while any of their
+chats is running — including IM and cron turns — and a red dot for unread
+replies.
+
+### Changed — long conversations open fast
+
+Chat history pages are read directly from the database instead of loading
+the whole conversation for every page, so very long chats open as fast as
+short ones. A New chat button now sits next to Share in the chat header.
+Pictures in replies are shown at a bounded size and open full size on
+click.
+
+### Added — agent configuration export / import
+
+Settings → Advanced exports an agent's identity files (SOUL.md, AGENTS.md,
+…), prompt mode and its own skills as a ZIP, and imports one — a FastClaw
+export or a plain workspace folder — to replace them after a preview.
+Model keys, MCP servers, channels, chats and personal memory are never
+included.
+
+### Changed — turns survive flaky model APIs
+
+LLM requests now retry up to 6 times (2s → 30s backoff) on timeouts,
+dropped connections, 429 and 5xx, instead of ending the turn on the first
+response-header timeout; the header timeout is raised from 60s to 180s.
+Tool output over 64 KB is trimmed in context and saved in full under
+`.tool-outputs/`. Ordinary tool calls no longer hit a fixed 20-iteration
+cap — only repeated failures and no-progress loops stop a turn.
+
+### Changed — host-mode commands run in the session workspace
+
+`exec` on the host now starts in the chat's session folder, so generated
+files show up in that chat's workspace and links. Links to files an older
+version wrote at the agent root still resolve.
+
+### Fixed
+
+- DeepSeek thinking mode no longer fails with "The reasoning_content in the
+  thinking mode must be passed back to the API" when a step had no
+  reasoning (e.g. behind a routing model).
+- Clicking Send no longer immediately stops the run it started.
+- Photos sent over IM channels are saved to the workspace, and files an
+  agent links from outside the session folder are delivered to IM chats.
+- Relative image and HTML links in replies open the workspace file.
+
 ### Changed — **BREAKING**: IM channels must be paired before they answer
 
 Connecting a bot proves you control the bot, not which chat account is

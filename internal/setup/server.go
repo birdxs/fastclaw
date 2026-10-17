@@ -41,7 +41,12 @@ type AgentHandle interface {
 	// normal send).
 	SteerWeb(sessionId, projectIDHint, text string) bool
 	WebChatHistory(sessionId string) []map[string]any
+	// WebChatHistoryPage pages the history in the database; ok=false
+	// means the caller should page WebChatHistory in memory instead.
+	WebChatHistoryPage(sessionId string, before int64, limit int) (history []map[string]any, start int64, hasMore, ok bool)
 	WebChatSessions() []session.WebSession
+	// SessionTurnActive reports a turn in flight in that session, from any channel.
+	SessionTurnActive(sessionKey string) bool
 	DeleteWebChatSession(sessionId string) error
 	RenameWebChatSession(sessionId, title string) error
 	// MoveWebChatSession reassigns the chat to a different project (or
@@ -300,6 +305,8 @@ func (s *Server) Run(ctx context.Context) error {
 	// Long-lived SSE subscription so cron-fired (and other async)
 	// messages reach the open chat panel without a manual refresh.
 	mux.HandleFunc("GET /api/chat/subscribe", auth(s.handleChatSubscribe))
+	// The caller's own connected third-party accounts (handlers_connectors.go).
+	s.registerConnectorRoutes(mux, auth)
 
 	// Agents
 	mux.HandleFunc("GET /api/agents", auth(s.handleListAgents))
@@ -309,11 +316,14 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /api/agents/{id}/config", auth(s.handleGetAgentConfig))
 	mux.HandleFunc("GET /api/agents/{id}/tools/registered", auth(s.handleListAgentRegisteredTools))
 	mux.HandleFunc("DELETE /api/agents/{id}", auth(s.handleDeleteAgent))
+	mux.HandleFunc("GET /api/agents/{id}/archive", auth(s.handleExportAgentArchive))
+	mux.HandleFunc("POST /api/agents/{id}/archive", auth(s.handleImportAgentArchive))
 
 	mux.HandleFunc("GET /api/agents/{id}/files", auth(s.handleAgentFileList))
 	mux.HandleFunc("GET /api/agents/{id}/files.zip", auth(s.handleAgentFilesZip))
 	mux.HandleFunc("GET /api/agents/{id}/files/{path...}", auth(s.handleAgentFile))
 	mux.HandleFunc("POST /api/agents/{id}/files", auth(s.handleAgentFileUpload))
+	mux.HandleFunc("PUT /api/agents/{id}/scene-edits/{path...}", auth(s.handleSaveSceneEdits))
 	mux.HandleFunc("GET /api/agents/{id}/sessions/{sessionId}/history", auth(s.handleAgentSessionHistory))
 	mux.HandleFunc("POST /api/agents/{id}/sessions/{sessionId}/history/restore", auth(s.handleAgentSessionHistoryRestore))
 	mux.HandleFunc("GET /api/agents/{id}/workspace/history", auth(s.handleAgentFolderHistory))

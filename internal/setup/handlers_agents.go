@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -1409,6 +1410,28 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAgentReadable(w, r, id) {
 		return
 	}
+	// ?sessionId= makes the path relative to that conversation's folder,
+	// resolved like the file panel's (sessions/<chat id>/ or
+	// projects/<pid>/<chat id>/): a reply's relative file links only know
+	// the session, and an API conversation's folder is named by the
+	// caller's conversation key, not the session id.
+	if sid := r.URL.Query().Get("sessionId"); sid != "" {
+		clean := path.Clean("/" + rel)[1:]
+		if clean == "" || clean != strings.TrimPrefix(rel, "./") {
+			jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "invalid path"})
+			return
+		}
+		projectID, chatID, ok := s.workspaceFolderScope(r, id, sid, "")
+		if !ok || chatID == "" {
+			jsonResponse(w, http.StatusNotFound, map[string]any{"error": "session not found"})
+			return
+		}
+		if projectID != "" {
+			rel = "projects/" + projectID + "/" + chatID + "/" + clean
+		} else {
+			rel = "sessions/" + chatID + "/" + clean
+		}
+	}
 	// Never serve a file named SKILL.md as a downloadable artifact. Skill
 	// manifests are the agent's IP and never legitimately land in the
 	// workspace (skill-creator writes them to the skills bucket, not here),
@@ -1439,6 +1462,11 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, http.StatusForbidden, map[string]any{"error": "path escape"})
 		return
 	}
+	if _, err := os.Stat(abs); err != nil {
+		if legacy := legacyRootFallback(rel); legacy != "" {
+			abs = filepath.Join(root, legacy)
+		}
+	}
 	// ServeFile sets Content-Type from the mime database itself; we just
 	// add the CSP sandbox for HTML on top — same rationale as in
 	// setFileResponseHeaders above.
@@ -1452,12 +1480,35 @@ func (s *Server) handleAgentFile(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serveFileFromWorkspaceStore(w http.ResponseWriter, r *http.Request, agentID, path string) {
 	rc, err := s.workspaceStore.Get(r.Context(), agentID, "", "", path)
 	if err != nil {
+		if legacy := legacyRootFallback(path); legacy != "" {
+			rc, err = s.workspaceStore.Get(r.Context(), agentID, "", "", legacy)
+		}
+	}
+	if err != nil {
 		jsonResponse(w, http.StatusNotFound, map[string]any{"error": err.Error()})
 		return
 	}
 	defer rc.Close()
 	setFileResponseHeaders(w, path)
 	io.Copy(w, rc)
+}
+
+// legacyRootFallback maps "sessions/<sid>/<file>" to "<file>" for the
+// retry in serveFileFromWorkspaceStore. Host-mode agents used to run in
+// the agent workspace root, so older chats reference images that live
+// there; the chat UI now scopes relative paths to the session. Only a
+// single top-level file name qualifies — enough for those images without
+// turning every session path into a lookup across the whole agent.
+func legacyRootFallback(path string) string {
+	rest, ok := strings.CutPrefix(path, "sessions/")
+	if !ok {
+		return ""
+	}
+	_, file, ok := strings.Cut(rest, "/")
+	if !ok || file == "" || file == "." || file == ".." || strings.ContainsAny(file, "/\\") {
+		return ""
+	}
+	return file
 }
 
 // setFileResponseHeaders picks the right Content-Type for a user-produced
@@ -1543,6 +1594,50 @@ func (s *Server) handleAgentFileUpload(w http.ResponseWriter, r *http.Request) {
 		saved = append(saved, map[string]any{"name": h.Filename, "size": len(data)})
 	}
 	jsonResponse(w, http.StatusOK, map[string]any{"ok": true, "files": saved})
+}
+
+// sceneEditsName is the one workspace file the editable-design pages
+// (skills/image-to-editable-html) may write from the browser: the edits a
+// user made by hand, which the skill merges into scene.json before its next
+// change.
+const sceneEditsName = "edits.json"
+
+// handleSaveSceneEdits writes <design>/scene/edits.json. The design page
+// runs in a sandboxed iframe and can't call the API itself; the chat page
+// relays its edits here. Deliberately narrow — only that file name, inside
+// a scene/ folder, small JSON — so it is not a general file-write endpoint.
+func (s *Server) handleSaveSceneEdits(w http.ResponseWriter, r *http.Request) {
+	if !s.requireWritable(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	rel := filepath.ToSlash(filepath.Clean("/" + r.PathValue("path")))[1:]
+	if filepath.Base(rel) != sceneEditsName || filepath.Base(filepath.Dir(rel)) != "scene" {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "only <design>/scene/edits.json can be written"})
+		return
+	}
+	if s.workspaceStore == nil {
+		jsonResponse(w, http.StatusServiceUnavailable, map[string]any{"error": "no workspace store"})
+		return
+	}
+	if rec := s.requireAgentOwner(w, r, id); rec == nil {
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20+1))
+	if err != nil || len(body) > 1<<20 || !json.Valid(body) {
+		jsonResponse(w, http.StatusBadRequest, map[string]any{"error": "body must be JSON under 1 MB"})
+		return
+	}
+	// Only next to an existing design: the scene.json must be there.
+	if _, err := s.workspaceStore.Stat(r.Context(), id, "", "", filepath.ToSlash(filepath.Join(filepath.Dir(rel), "scene.json"))); err != nil {
+		jsonResponse(w, http.StatusNotFound, map[string]any{"error": "no scene.json next to it"})
+		return
+	}
+	if err := s.workspaceStore.Put(r.Context(), id, "", "", rel, strings.NewReader(string(body)), int64(len(body)), "application/json"); err != nil {
+		jsonResponse(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	jsonResponse(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func defaultIfEmpty(v, fallback string) string {

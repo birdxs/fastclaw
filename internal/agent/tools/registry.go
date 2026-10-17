@@ -171,6 +171,7 @@ const (
 	SourceBuiltin ToolSource = iota // built-in tool
 	SourceMCP                       // MCP server tool
 	SourcePlugin                    // plugin-provided tool
+	SourceConnector                 // the person's connected accounts (connectors tool)
 )
 
 // Registry holds all registered tools.
@@ -600,6 +601,28 @@ func (r *Registry) EffectiveUserID() string {
 // per-chat isolation, so existing behavior is unchanged.
 func (r *Registry) SetCodingRootScope(v bool) {
 	r.codingRootScope = v
+}
+
+// HostWorkDir is the on-disk directory of the current turn's workspace
+// scope (sessions/<sid>, projects/<pid>/<sid>, …) — the same place
+// write_file puts relative paths. Host-mode exec runs there and the
+// system prompt advertises it as the Working Directory, so the shell and
+// the file tools agree on where "./out.png" is. "" when the workspace
+// store has no local directory (S3/R2) — callers fall back to their
+// previous behavior.
+func (r *Registry) HostWorkDir() string {
+	if r.workspaceStore == nil || r.agentID == "" {
+		return ""
+	}
+	ls, ok := r.workspaceStore.(workspace.LocalScoper)
+	if !ok {
+		return ""
+	}
+	dir, ok := ls.LocalScopeDir(r.agentID, r.projectID, r.scopeSessionID())
+	if !ok {
+		return ""
+	}
+	return dir
 }
 
 // scopeSessionID is the session segment the file tools pass to the

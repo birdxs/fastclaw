@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef, useCallback, useMemo, useLayoutEffect } from "react";
 import { useRouter, usePathname, useSearchParams } from "next/navigation";
+import { ConnectorRequestCard } from "@/components/connector-request-card";
 import { beginChatRun, finishChatRun, stopChatRun, useChatRunStatus, type ChatRunStatus } from "@/lib/chat-runs";
 import { useAgentIdFromURL } from "@/hooks/use-agent-id";
 import { Button } from "@/components/ui/button";
@@ -11,7 +12,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { createProject, deleteChatSession, deleteProject, fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, getFolderHistory, getSessionHistory, listAgentFiles, listProjects, renameChatSession, restoreFolderHistory, restoreSessionHistory, revealAgentWorkspace, sendChatStream, steerChat, updateAgent, updateProject, uploadAgentFiles, getSkills, type AgentDetail, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type MeResponse, type PrivateSource, type ProjectEntry, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile, type WorkspaceHistoryEntry } from "@/lib/api";
+import { createProject, deleteChatSession, deleteProject, fileUrl, getAgent, getAgentKnowledgeFile, getChangedFiles, getChatHistoryWithCursor, getChatSessions, getChatTodo, getMe, getScopePreview, getScopePreviewLogs, getFolderHistory, getSessionHistory, listAgentFiles, listProjects, renameChatSession, restoreFolderHistory, restoreSessionHistory, revealAgentWorkspace, saveSceneEdits, sendChatStream, steerChat, updateAgent, updateProject, uploadAgentFiles, getSkills, type AgentDetail, type ChatHistoryMessage, type ChatStreamEvent, type KnowledgeSource, type MeResponse, type PrivateSource, type ProjectEntry, type ScopePreview, type SkillInfo, type TodoItem, type ToolResultMetadata, type WorkspaceFile, type WorkspaceHistoryEntry } from "@/lib/api";
 import { ArrowLeft, ArrowUp, BookOpen, Box, Brain, Check, ChevronDown, ChevronRight, ChevronUp, CircleAlert, CornerDownRight, CirclePause, Clock, Code2, Copy, Download, Eye, ExternalLink, File, FileCode, FileText, Film, Folder, FolderOpen, FolderPlus, FolderSearch, Globe, Globe2, IdCard, Image as ImageIcon, Link2, ListChecks, LoaderCircle, LockKeyhole, MoreHorizontal, Music, PanelLeftClose, PanelLeftOpen, Paperclip, Pencil, Plus, Puzzle, Radio, RefreshCw, RotateCcw, Settings, Share2, SlidersHorizontal, Sparkles, Square, SquarePen, Terminal, Trash2, Wand2, Wrench, X } from "lucide-react";
 import Link from "next/link";
 import { ChatMarkdown } from "@/components/chat-markdown";
@@ -77,6 +78,7 @@ function renderContentWithDataImages(
   sessionId?: string,
   knowledgeSources?: KnowledgeSource[],
   onKnowledgeCitationClick?: (source: KnowledgeSource) => void,
+  onWorkspaceFileClick?: (path: string) => void,
 ): React.ReactNode | null {
   const parts = splitDataImages(content);
   if (!parts.some((p) => p.type === "image")) return null;
@@ -87,7 +89,7 @@ function renderContentWithDataImages(
           if (suppressAllInlineImages || surfacedSrcs?.has(p.src)) return null;
           return (
             // eslint-disable-next-line @next/next/no-img-element
-            <img key={i} src={p.src} alt={p.alt} className="rounded-lg max-w-full h-auto my-2" />
+            <img key={i} src={p.src} alt={p.alt} className="my-2 h-auto max-h-96 w-auto max-w-[min(100%,28rem)] cursor-zoom-in rounded-lg" />
           );
         }
         return (
@@ -98,6 +100,7 @@ function renderContentWithDataImages(
             sessionId={sessionId}
             knowledgeSources={knowledgeSources}
             onKnowledgeCitationClick={onKnowledgeCitationClick}
+            onWorkspaceFileClick={onWorkspaceFileClick}
           />
         );
       })}
@@ -766,10 +769,13 @@ export function ChatScreen() {
   // turns off, so it never lingers across turns. Only one subagent
   // runs at a time (delegate_task is registered serial) so we don't
   // need to key this by tool_call_id.
+  // Set while the backend is retrying a failed model call (status event,
+  // phase "retrying"); cleared by the next real event of the turn.
+  const [llmRetryStatus, setLlmRetryStatus] = useState<null | { attempt: number; max: number }>(null);
   const [subagentProgress, setSubagentProgress] = useState<null | {
     iteration?: number;
     max?: number;
-    phase?: "thinking" | "running" | "final-delivery" | "done";
+    phase?: "thinking" | "running" | "final-delivery" | "done" | "retrying" | "wrap_up";
     tools?: string[];
   }>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -778,6 +784,9 @@ export function ChatScreen() {
   const [workspaceReturnsToBotPanel, setWorkspaceReturnsToBotPanel] = useState(false);
   // File picked in the Agent panel's Files tab; the workspace opens on it.
   const [workspaceInitialFile, setWorkspaceInitialFile] = useState<ProducedFile | null>(null);
+  // Bumped when a file link in a reply opens the panel, remounting it so the
+  // new initialPreview is picked up even if the panel was already open.
+  const [workspaceFileNonce, setWorkspaceFileNonce] = useState(0);
   // The Files tab's "All" view: the workspace opens on the whole agent
   // workspace instead of the current conversation (owners only).
   const [workspaceAllFiles, setWorkspaceAllFiles] = useState(false);
@@ -833,6 +842,16 @@ export function ChatScreen() {
     setBotPanelOpen(false);
     setFilesSheetOpen(true);
   }, []);
+  // A workspace file link in a reply (e.g. report.html) opens in the
+  // Workspace panel's viewer instead of navigating away from the chat.
+  const openWorkspaceFile = useCallback((path: string) => {
+    setWorkspaceInitialFile({ path });
+    setWorkspaceAllFiles(false);
+    setWorkspaceReturnsToBotPanel(false);
+    setBotPanelOpen(false);
+    setWorkspaceFileNonce((n) => n + 1);
+    setFilesSheetOpen(true);
+  }, []);
   const openKnowledgeCitation = useCallback((source: KnowledgeSource) => {
     setKnowledgePreview(source);
     openWorkspace();
@@ -841,6 +860,12 @@ export function ChatScreen() {
   // Lightbox for clicking either an attachment thumbnail (compose box)
   // or an inline image in a sent message bubble. `null` = closed.
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  useEffect(() => {
+    if (!lightboxSrc) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setLightboxSrc(null); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [lightboxSrc]);
   // Object URLs for image attachments in the compose box. Keyed by file
   // index so we can revoke on remove without re-computing for every
   // chip on every keystroke. Re-derived whenever `attachments` changes.
@@ -1173,8 +1198,11 @@ export function ChatScreen() {
           // subagent_progress fields
           iteration?: number;
           max?: number;
-          phase?: "thinking" | "running" | "final-delivery" | "done";
+          phase?: "thinking" | "running" | "final-delivery" | "done" | "retrying" | "wrap_up";
           tools?: string[];
+          // status fields (phase "retrying")
+          attempt?: number;
+          maxAttempts?: number;
         };
       };
       try {
@@ -1203,6 +1231,13 @@ export function ChatScreen() {
         const claim = () => {
           if (seq >= 0) maxSeqRef.current = seq;
         };
+        if (data.type === "status") {
+          if (data.data?.phase === "retrying") {
+            setLlmRetryStatus({ attempt: data.data.attempt ?? 0, max: data.data.maxAttempts ?? 0 });
+          }
+          return;
+        }
+        setLlmRetryStatus(null);
         switch (data.type) {
           case "content_delta": {
             const delta = data.data?.delta;
@@ -1488,6 +1523,10 @@ export function ChatScreen() {
   }, [fallbackChatHref]);
   const navigationPanelOpen = botPanelOpen || isChatsPage;
 
+  // The header is memoized; reach the per-render new-chat handler
+  // through a ref instead of rebuilding the header on every render.
+  const newChatRef = useRef<() => void>(() => {});
+
   // Conversation header follows the compact Bot pattern: identity opens
   // settings, while the monitor action opens the live workspace.
   const headerSlot = useMemo(
@@ -1513,9 +1552,20 @@ export function ChatScreen() {
         {/* Pushes share + the panel toggle to the right edge, with or
             without the share button. */}
         <span aria-hidden="true" className="flex-1" />
-        {/* Share copies this session's link, so it only shows on a session
-            that exists (not a new, unsent chat). */}
+        {/* New chat and share act on a session that exists, so both stay
+            hidden on a new, unsent chat. */}
+        <div className="flex shrink-0 items-center gap-1">
         {routeSessionId && sessions.some((session) => session.id === routeSessionId) && (
+        <>
+        <button
+          type="button"
+          onClick={() => newChatRef.current()}
+          className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted/70 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          title={tr("New chat (⌘N)", "新建对话 (⌘N)")}
+          aria-label={tr("New chat", "新建对话")}
+        >
+          <SquarePen className="size-[17px]" />
+        </button>
         <ShareAgentMenu
           agentId={selectedAgent}
           sessionId={routeSessionId}
@@ -1524,6 +1574,7 @@ export function ChatScreen() {
           canChangeVisibility={agentDetail?.role === "owner" && !isActAsView}
           onPublicChange={handleAgentPublicChange}
         />
+        </>
         )}
         <RightPanelToggle
           open={navigationPanelOpen}
@@ -1540,6 +1591,7 @@ export function ChatScreen() {
             setBotPanelOpen((value) => !value);
           }}
         />
+        </div>
       </div>
     ),
     [
@@ -1554,6 +1606,8 @@ export function ChatScreen() {
       leaveChatsPage,
       navigationPanelOpen,
       botPanelOpen,
+      routeSessionId,
+      sessions,
       tr,
     ],
   );
@@ -1590,6 +1644,7 @@ export function ChatScreen() {
     // Same for the subagent progress indicator — never carry it across
     // sessions; a fresh load means no in-flight delegate_task to track.
     setSubagentProgress(null);
+    setLlmRetryStatus(null);
     // Refresh todo.md alongside the history fetch. We don't gate the
     // rest of the load on it — a 404 (no todo.md yet) is the normal
     // empty-session case.
@@ -1612,6 +1667,18 @@ export function ChatScreen() {
           return;
         }
         const built = buildChatMessages(history, historyStart);
+        setMessages(built);
+        setLoadedSessionId(sessionId);
+        // Attach the files after the conversation is on screen: listing a
+        // large workspace can take a while and must not hold up the chat.
+        let anchorId = "";
+        for (let i = built.length - 1; i >= 0; i--) {
+          if (built[i].role === "agent" || built[i].role === "tool-group") {
+            anchorId = built[i].id;
+            break;
+          }
+        }
+        if (!anchorId) return;
         try {
           // listAgentFiles(agentId, sessionId) lets the backend pick
           // the right prefix — projects/<pid>/ for project chats,
@@ -1623,18 +1690,15 @@ export function ChatScreen() {
           )
             .filter((f) => !isSystemFile(f.path))
             .map((f) => ({ path: f.path, size: f.size }));
-          if (sessionFiles.length > 0) {
-            for (let i = built.length - 1; i >= 0; i--) {
-              if (built[i].role === "agent" || built[i].role === "tool-group") {
-                built[i] = { ...built[i], files: sessionFiles };
-                break;
-              }
-            }
-          }
+          if (aborted || sessionFiles.length === 0) return;
+          setMessages((current) =>
+            current.map((message) =>
+              message.id === anchorId && !message.files
+                ? { ...message, files: sessionFiles }
+                : message,
+            ),
+          );
         } catch { /* listing failed — fall back to no panel */ }
-        if (aborted) return;
-        setMessages(built);
-        setLoadedSessionId(sessionId);
       })
       .catch(() => {
         if (aborted) return;
@@ -1773,18 +1837,30 @@ export function ChatScreen() {
     const syncScrollbarGutter = () => {
       el.parentElement?.style.setProperty("--chat-scrollbar", `${el.offsetWidth - el.clientWidth}px`);
     };
+    // Older pages load on scroll-to-top, but a page that doesn't fill the
+    // viewport can't scroll, so no scroll event ever fires — a short last
+    // turn (e.g. "continue" after a long tool run) would hide everything
+    // before it. Keep loading until the list overflows or history runs out;
+    // each prepend resizes the content and re-runs this check.
+    const fillViewport = () => {
+      if (hasOlderHistory && el.scrollHeight <= el.clientHeight + 24) {
+        void loadOlderHistory();
+      }
+    };
     const resizeObserver = new ResizeObserver(() => {
       if (stickToBottomRef.current && !pendingPrependScrollRef.current) {
         el.scrollTop = el.scrollHeight;
       }
       syncScrollbarGutter();
       updateMessageScrollState();
+      fillViewport();
     });
     el.addEventListener("scroll", onScroll, { passive: true });
     if (content) resizeObserver.observe(content);
     resizeObserver.observe(el);
     syncScrollbarGutter();
     updateMessageScrollState();
+    fillViewport();
     return () => {
       el.removeEventListener("scroll", onScroll);
       window.removeEventListener(CHAT_RELEASE_BOTTOM_STICK_EVENT, releaseBottomStick);
@@ -2068,6 +2144,13 @@ export function ChatScreen() {
           if (evt.seq <= maxSeqRef.current) return;
           maxSeqRef.current = evt.seq;
         }
+        if (evt.type === "status") {
+          if (evt.data?.phase === "retrying") {
+            setLlmRetryStatus({ attempt: evt.data.attempt ?? 0, max: evt.data.maxAttempts ?? 0 });
+          }
+          return;
+        }
+        setLlmRetryStatus(null);
         switch (evt.type) {
           case "content_delta": {
             // Incremental token chunk from the provider. Append to the
@@ -2459,6 +2542,25 @@ export function ChatScreen() {
     }
   }, [input, attachments, selectedAgent, sessionId, routeSessionId, sending, isReadOnlyView, isReadOnlySafeSlashCommand, loadSessions, pathname, refreshTodoForScope, router, tr, urlProjectId]);
 
+  // Workspace previews reload after each agent turn (the agent may have
+  // rewritten the file being viewed, e.g. an editable design).
+  const [turnNonce, setTurnNonce] = useState(0);
+  const wasSending = useRef(sending);
+  useEffect(() => {
+    if (wasSending.current && !sending) setTurnNonce((n) => n + 1);
+    wasSending.current = sending;
+  }, [sending]);
+  // An editable design asked for a change: send it now, or leave it in the
+  // composer while a turn is still running.
+  const handleDesignAsk = useCallback((text: string) => {
+    if (sending || isReadOnlyView) {
+      setInput(text);
+      return;
+    }
+    void handleSend(text);
+  }, [sending, isReadOnlyView, handleSend]);
+
+  const stopPressRef = useRef(false);
   const handleStop = useCallback(() => {
     stopChatRun(selectedAgent, sessionId);
   }, [selectedAgent, sessionId]);
@@ -2631,6 +2733,7 @@ export function ChatScreen() {
     setMessages([]);
     window.history.replaceState(null, "", chatHref(newId));
   };
+  newChatRef.current = handleNewChat;
 
   const handleSelectSession = (sid: string) => {
     resetTodoScope(selectedAgent, sid);
@@ -2848,6 +2951,16 @@ export function ChatScreen() {
                       </div>,
                     );
                   }
+                  // Cards an agent put in front of the person (connect an
+                  // account), outside the collapsible tool details.
+                  for (const round of rounds) {
+                    for (const call of round.toolCalls ?? []) {
+                      const req = call.metadata?.connectorRequest;
+                      if (req?.id) {
+                        elements.push(<ConnectorRequestCard key={`connector-${req.id}`} request={req} />);
+                      }
+                    }
+                  }
                   if (rounds.some((round) => round.id === todoAnchorMessageId)) {
                     elements.push(
                       <TodoPanel key="todo-panel" items={todoItems} active={todoIsActive} />,
@@ -2965,6 +3078,14 @@ export function ChatScreen() {
                           ? `user-chat-bubble rounded-2xl rounded-br-md border border-[#ded5e2] bg-[#eee9f0] px-4 py-2.5 text-[#29252a] dark:border-[#4b404e] dark:bg-[#342d36] dark:text-[#f8f5f9] ${msg.content.trim() ? "" : "hidden"}`
                           : "py-0.5 text-[#202020] dark:text-foreground"
                       }`}
+                      // Every picture in a message opens full size; images
+                      // inside a link keep the link.
+                      onClick={(e) => {
+                        const img = (e.target as HTMLElement).closest("img");
+                        if (!img || img.closest("a, button") || !img.currentSrc) return;
+                        e.preventDefault();
+                        setLightboxSrc(img.currentSrc);
+                      }}
                     >
                       {(() => {
                         const attached = attachedImages.get(msg.id);
@@ -2976,7 +3097,7 @@ export function ChatScreen() {
                                 key={i}
                                 src={img.src}
                                 alt={img.alt}
-                                className="rounded-lg max-w-full h-auto"
+                                className="h-auto max-h-96 w-auto max-w-[min(100%,28rem)] cursor-zoom-in rounded-lg"
                               />
                             ))}
                           </div>
@@ -2991,6 +3112,7 @@ export function ChatScreen() {
                           sessionId,
                           msg.metadata?.knowledgeSources,
                           openKnowledgeCitation,
+                          openWorkspaceFile,
                         ) ?? (
                           <ChatMarkdown
                             text={msg.content}
@@ -2998,15 +3120,27 @@ export function ChatScreen() {
                             sessionId={sessionId}
                             knowledgeSources={msg.metadata?.knowledgeSources}
                             onKnowledgeCitationClick={openKnowledgeCitation}
+                            onWorkspaceFileClick={openWorkspaceFile}
                           />
                         )
                       )}
                       {msg.role === "agent" && msg.metadata?.iterationCapReached && (
                         <div className="mt-2 flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-900 dark:text-amber-200">
-                          <span className="font-medium">{tr("Iteration limit reached", "已达到迭代上限")}</span>
-                          <span className="opacity-80">
-                            {tr("The agent reached its {{count}} tool-call budget before finishing. The answer above was synthesized from partial results, so some fields may be marked unknown or partial. Continue the conversation to go further.", "Agent 在完成任务前已用完 {{count}} 次工具调用预算。上方回答基于部分结果整理，某些字段可能标记为未知或不完整；可继续对话以进一步处理。", { count: msg.metadata.iterationCapValue ?? "" })}
-                          </span>
+                          {msg.metadata.iterationStopReason === "loop" ? (
+                            <>
+                              <span className="font-medium">{tr("Stopped: no progress", "已停止：没有进展")}</span>
+                              <span className="opacity-80">
+                                {tr("The agent kept repeating the same step with the same result, so the turn was stopped. The answer above may be incomplete. Continue the conversation to check again.", "Agent 反复执行同一步骤且结果没有变化，本轮已停止。上方回答可能不完整；可继续对话让它再检查一次。")}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <span className="font-medium">{tr("Iteration limit reached", "已达到迭代上限")}</span>
+                              <span className="opacity-80">
+                                {tr("The agent reached its {{count}} tool-call budget before finishing. The answer above was synthesized from partial results, so some fields may be marked unknown or partial. Continue the conversation to go further.", "Agent 在完成任务前已用完 {{count}} 次工具调用预算。上方回答基于部分结果整理，某些字段可能标记为未知或不完整；可继续对话以进一步处理。", { count: msg.metadata.iterationCapValue ?? "" })}
+                              </span>
+                            </>
+                          )}
                         </div>
                       )}
                       {msg.role === "agent" && msg.metadata?.planMode && (
@@ -3132,6 +3266,11 @@ export function ChatScreen() {
                     <span className="typing-dot inline-block h-2 w-2 rounded-full bg-muted-foreground/60" style={{ animationDelay: "0ms" }} />
                     <span className="typing-dot inline-block h-2 w-2 rounded-full bg-muted-foreground/60" style={{ animationDelay: "200ms" }} />
                     <span className="typing-dot inline-block h-2 w-2 rounded-full bg-muted-foreground/60" style={{ animationDelay: "400ms" }} />
+                    {llmRetryStatus && (
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        {tr("Model request failed, retrying ({{attempt}}/{{max}})…", "模型请求失败，正在自动重试（{{attempt}}/{{max}}）…", { attempt: llmRetryStatus.attempt, max: llmRetryStatus.max })}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
@@ -3334,9 +3473,26 @@ export function ChatScreen() {
                   className="block min-w-0 flex-1 resize-none bg-transparent px-1 py-1 text-[15px] leading-6 placeholder:text-muted-foreground/45 outline-none [scrollbar-width:none] [&::-webkit-scrollbar]:hidden disabled:opacity-50"
                   style={{ maxHeight: 180, minHeight: 32 }}
                 />
+                {/* Send fires on mousedown, which flips `sending` before the
+                    mouseup. Separate keys keep React from reusing the Send
+                    <button> as Stop, and Stop only acts on a press that
+                    started on it (or a keyboard click, detail === 0) — so
+                    the click that finishes a Send press can't stop the run
+                    it just started. */}
                 {sending ? (
                   <Button
-                    onClick={handleStop}
+                    key="composer-stop"
+                    onPointerDown={() => {
+                      stopPressRef.current = true;
+                    }}
+                    onPointerLeave={() => {
+                      stopPressRef.current = false;
+                    }}
+                    onClick={(event) => {
+                      const pressed = stopPressRef.current || event.detail === 0;
+                      stopPressRef.current = false;
+                      if (pressed) handleStop();
+                    }}
                     size="icon"
                     className="size-8 shrink-0 rounded-full bg-[#111] text-white hover:bg-black disabled:bg-[#111] dark:bg-white dark:text-black dark:hover:bg-white/90"
                     aria-label={t("composer.stop")}
@@ -3347,6 +3503,7 @@ export function ChatScreen() {
                   // Always present so the composer reads as sendable; it
                   // stays dimmed until there's something to send.
                   <Button
+                    key="composer-send"
                     onMouseDown={(event) => {
                       event.preventDefault();
                       handleSend();
@@ -3442,7 +3599,7 @@ export function ChatScreen() {
       )}
       {filesSheetOpen && selectedAgent && (sessionId || urlProjectId) && (
         <WorkspacePanel
-          key={workspaceAllFiles ? "all" : "scope"}
+          key={`${workspaceAllFiles ? "all" : "scope"}-${workspaceFileNonce}`}
           agentId={selectedAgent}
           // On a project landing (no routeSessionId), sessionId here is the
           // synthetic id chat-screen mints for the upcoming "New chat" —
@@ -3457,6 +3614,8 @@ export function ChatScreen() {
           knowledgePreview={knowledgePreview}
           onClearKnowledgePreview={() => setKnowledgePreview(null)}
           onPreviewStateChange={handleWorkspacePreviewChange}
+          onAsk={handleDesignAsk}
+          reloadNonce={turnNonce}
           onBack={
             workspaceReturnsToBotPanel
               ? () => {
@@ -5003,7 +5162,7 @@ function releaseChatBottomStick() {
 }
 
 export type ToolCallEntry = NonNullable<ChatMessage["toolCalls"]>[number];
-type ToolSubagentProgress = { iteration?: number; max?: number; phase?: "thinking" | "running" | "final-delivery" | "done"; tools?: string[] };
+type ToolSubagentProgress = { iteration?: number; max?: number; phase?: "thinking" | "running" | "final-delivery" | "done" | "retrying" | "wrap_up"; tools?: string[] };
 export type ToolActivityItem = { kind: "tool"; tc: ToolCallEntry } | { kind: "note"; id: string; text: string };
 
 // message_agent calls render as private-message cards, not tool lines.
@@ -5235,7 +5394,7 @@ export function ToolActivity({ items, subagentProgress }: { items: ToolActivityI
   const activeDelegateId = tools.find((tc) => tc.name === "delegate_task" && tc.result == null)?.id ?? null;
 
   return (
-    <div className="max-w-full text-sm leading-6 text-muted-foreground">
+    <div className="max-w-full text-sm md:max-w-xl leading-6 text-muted-foreground">
       <button
         type="button"
         onClick={() => {
@@ -5744,6 +5903,8 @@ export function WorkspacePanel({
   onPreviewStateChange,
   onBack,
   onClose,
+  onAsk,
+  reloadNonce = 0,
 }: {
   agentId: string;
   sessionId: string;
@@ -5758,6 +5919,9 @@ export function WorkspacePanel({
   onPreviewStateChange?: (active: boolean) => void;
   onBack?: () => void;
   onClose: () => void;
+  // See FileViewer.
+  onAsk?: (text: string) => void;
+  reloadNonce?: number;
 }) {
   const { locale, t, tr } = useLocale();
   const [files, setFiles] = useState<WorkspaceFile[]>([]);
@@ -5772,6 +5936,9 @@ export function WorkspacePanel({
   const [tab, setTab] = useState<"code" | "preview">("code");
   // Collapse the left file tree to give the viewer the full width.
   const [treeCollapsed, setTreeCollapsed] = useState(false);
+  // Set when the person opens the tree beside a file themselves: it then
+  // stays open on the next files until they close it again.
+  const treeKeptOpenRef = useRef(false);
   // Files the agent changed vs the template baseline (so the tree can show
   // just this task's output), and whether to show all files instead.
   const [changed, setChanged] = useState<{ files: WorkspaceFile[]; available: boolean }>({ files: [], available: false });
@@ -5907,6 +6074,13 @@ export function WorkspacePanel({
   useEffect(() => {
     refresh();
   }, [refresh]);
+  // A finished agent turn may have written files: refetch the tree.
+  const lastReload = useRef(reloadNonce);
+  useEffect(() => {
+    if (lastReload.current === reloadNonce) return;
+    lastReload.current = reloadNonce;
+    refresh();
+  }, [reloadNonce, refresh]);
 
   // Workspace version history: load commits when the dropdown opens;
   // restore checks out the whole session workspace to that commit and
@@ -5996,12 +6170,19 @@ export function WorkspacePanel({
   // its wide inspection mode; closing the viewer returns it to navigation.
   useEffect(() => {
     setWidth(viewerExpanded ? expandedWorkspaceWidth() : compactWorkspaceWidth());
-    if (!viewerExpanded) setTreeCollapsed(false);
     onPreviewStateChange?.(viewerExpanded);
     return () => {
       if (viewerExpanded) onPreviewStateChange?.(false);
     };
   }, [onPreviewStateChange, viewerExpanded]);
+
+  // Opening a file hands the viewer the full width: the tree folds away
+  // unless the person opened it with the header toggle, in which case it
+  // stays until they close it. Back in navigation mode the tree is all
+  // there is, so show it.
+  useEffect(() => {
+    setTreeCollapsed(Boolean(previewing || knowledgePreview) && !treeKeptOpenRef.current);
+  }, [previewing, knowledgePreview]);
 
   // The Preview tab only exists for coding projects with a live dev server.
   // When there's no app preview, hide the tab and snap back to Files.
@@ -6212,10 +6393,23 @@ export function WorkspacePanel({
             </button>
           </div>
         </div>
-        {/* Row 2: Files (tree) / Preview (dev server) toggle + tree collapse.
+        {/* Row 2: tree collapse (left, above the tree it toggles) + Files
+            (tree) / Preview (dev server) toggle.
             The Preview tab is shown only for coding projects with a live dev
             server; a plain file session (a PDF, some docs) just shows Files. */}
-        <div className="flex h-10 items-center justify-between gap-2 border-b border-border px-3">
+        <div className="flex h-10 items-center gap-0.5 border-b border-border px-4">
+          {tab === "code" && viewerExpanded && (
+            <button
+              onClick={() => {
+                treeKeptOpenRef.current = treeCollapsed;
+                setTreeCollapsed(!treeCollapsed);
+              }}
+              className="-ml-1.5 rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
+              title={treeCollapsed ? tr("Show file tree", "显示文件树") : tr("Hide file tree", "隐藏文件树")}
+            >
+              {treeCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+            </button>
+          )}
           {hasPreview ? (
             <div className="flex items-center rounded-md bg-muted p-0.5 text-xs">
               <button
@@ -6243,16 +6437,7 @@ export function WorkspacePanel({
               </button>
             </div>
           ) : (
-            <span className="px-1 text-xs font-medium text-muted-foreground">{tr("Files", "文件")}</span>
-          )}
-          {tab === "code" && viewerExpanded && (
-            <button
-              onClick={() => setTreeCollapsed((c) => !c)}
-              className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-muted/50 hover:text-foreground"
-              title={treeCollapsed ? tr("Show file tree", "显示文件树") : tr("Hide file tree", "隐藏文件树")}
-            >
-              {treeCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-            </button>
+            <span className="text-xs font-medium text-muted-foreground">{tr("Files", "文件")}</span>
           )}
         </div>
         {tab === "code" ? (
@@ -6334,6 +6519,8 @@ export function WorkspacePanel({
                   agentId={agentId}
                   file={previewing}
                   onClose={() => setPreviewing(null)}
+                  onAsk={onAsk}
+                  reloadNonce={reloadNonce}
                 />
               ) : null}
             </div>
@@ -6392,7 +6579,8 @@ function KnowledgeFileViewer({ agentId, source, onClose }: { agentId: string; so
   const storedName = source.path.startsWith("knowledge/") ? source.path.slice("knowledge/".length) : source.path;
   const [file, setFile] = useState<{ name: string; content: string; size: number; hash?: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<"rendered" | "source">("source");
+  // Rendered first; the toggle flips to source.
+  const [view, setView] = useState<"rendered" | "source">("rendered");
 
   useEffect(() => {
     let cancelled = false;
@@ -6451,7 +6639,7 @@ function KnowledgeFileViewer({ agentId, source, onClose }: { agentId: string; so
           <p className="p-4 text-sm text-destructive">{tr("Failed to load: {{error}}", "加载失败：{{error}}", { error })}</p>
         ) : !file ? (
           <p className="p-4 text-sm text-muted-foreground">{tr("Loading…", "正在加载…")}</p>
-        ) : preview !== "text" && view === "rendered" ? (
+        ) : (preview === "markdown" || preview === "html") && view === "rendered" ? (
           <div className="h-full overflow-auto p-4">
             <ChatMarkdown text={file.content} />
           </div>
@@ -6467,22 +6655,60 @@ function KnowledgeFileViewer({ agentId, source, onClose }: { agentId: string; so
   );
 }
 
-function FileViewer({ agentId, file, onClose }: { agentId: string; file: ProducedFile; onClose?: () => void }) {
+function FileViewer({
+  agentId,
+  file,
+  onClose,
+  onAsk,
+  reloadNonce = 0,
+}: {
+  agentId: string;
+  file: ProducedFile;
+  onClose?: () => void;
+  // An editable design page asked the agent to change something.
+  onAsk?: (text: string) => void;
+  // Bumped after each agent turn: reloads a rendered HTML page so the
+  // user sees the agent's latest change.
+  reloadNonce?: number;
+}) {
   const { tr } = useLocale();
   const { preview } = fileKind(file.path);
   const src = fileUrl(agentId, file.path, false);
+  const frameRef = useRef<HTMLIFrameElement | null>(null);
+
+  // Editable designs (skills/image-to-editable-html) talk to the chat from
+  // their sandboxed iframe: manual edits are saved next to the design so
+  // the agent's next change builds on them; "ask AI" posts an instruction
+  // into the conversation. Only messages from this viewer's own frame count.
+  useEffect(() => {
+    if (preview !== "html") return;
+    const onMessage = (e: MessageEvent) => {
+      if (!frameRef.current || e.source !== frameRef.current.contentWindow) return;
+      const data = e.data as { type?: string; text?: string; version?: number; changed?: unknown; deleted?: unknown };
+      if (data?.type === "fastclaw:scene-edits") {
+        saveSceneEdits(agentId, file.path, { version: data.version, changed: data.changed, deleted: data.deleted }).catch(() => {});
+      } else if (data?.type === "fastclaw:ask" && typeof data.text === "string" && data.text.trim()) {
+        onAsk?.(data.text.trim());
+      }
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [preview, agentId, file.path, onAsk]);
   const downloadUrl = fileUrl(agentId, file.path, true);
   const basename = file.path.split("/").pop() || file.path;
   const [text, setText] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Default to SOURCE for markdown/html — clicking a file shows its code; the
-  // toggle flips to rendered when wanted.
-  const [view, setView] = useState<"rendered" | "source">("source");
+  // Default to the RENDERED preview for markdown/html; the toggle flips to
+  // source when wanted.
+  const [view, setView] = useState<"rendered" | "source">("rendered");
 
   useEffect(() => {
-    // Fetch the raw text for anything we show as source: markdown, code/text,
-    // and html (html starts in source view too).
+    // Fetch the raw text for anything we show as text: markdown (rendered or
+    // source), code/text, and html only once the source view is opened —
+    // rendered html loads in the iframe, and generated pages can be several
+    // MB of inlined assets.
     if (preview !== "markdown" && preview !== "text" && preview !== "html") return;
+    if (preview === "html" && view !== "source") return;
     if (text !== null) return;
     let cancelled = false;
     fetch(src)
@@ -6490,7 +6716,7 @@ function FileViewer({ agentId, file, onClose }: { agentId: string; file: Produce
       .then((t) => { if (!cancelled) setText(t); })
       .catch((e) => { if (!cancelled) setError(String(e)); });
     return () => { cancelled = true; };
-  }, [src, preview, text]);
+  }, [src, preview, text, view]);
 
   return (
     <div className="flex h-full flex-col">
@@ -6542,13 +6768,15 @@ function FileViewer({ agentId, file, onClose }: { agentId: string; file: Produce
             <iframe src={src} className="h-full w-full border-0" title={basename} />
           )}
           {(preview === "markdown" || preview === "text" || preview === "html") && (
-            // Rendered view (markdown / html) only when toggled; otherwise the
-            // default is full-bleed highlighted SOURCE.
+            // Rendered view (markdown / html) by default; the toggle switches
+            // to full-bleed highlighted SOURCE.
             preview !== "text" && view === "rendered" ? (
               preview === "html" ? (
                 // sandbox="allow-scripts": CSS/animations work; scripts can't
                 // reach parent cookies/storage — safe for untrusted output.
                 <iframe
+                  key={reloadNonce}
+                  ref={frameRef}
                   src={src}
                   sandbox="allow-scripts"
                   className="h-full w-full border-0 bg-white"
@@ -6563,9 +6791,10 @@ function FileViewer({ agentId, file, onClose }: { agentId: string; file: Produce
               <p className="p-4 text-sm text-destructive">{tr("Failed to load: {{error}}", "加载失败：{{error}}", { error })}</p>
             ) : text === null ? (
               <p className="p-4 text-sm text-muted-foreground">{tr("Loading…", "正在加载…")}</p>
-            ) : text.includes("```") ? (
-              // Content with its own fences would break the fenced wrapper —
-              // fall back to a plain (unhighlighted) full-bleed block.
+            ) : text.includes("```") || text.length > 200_000 ? (
+              // Content with its own fences would break the fenced wrapper, and
+              // highlighting a multi-MB file freezes the tab — fall back to a
+              // plain (unhighlighted) full-bleed block.
               <pre className="h-full overflow-auto whitespace-pre-wrap break-all p-3 font-mono text-xs">{text}</pre>
             ) : (
               // Shiki-highlighted source, no card / copy pill / padding —
